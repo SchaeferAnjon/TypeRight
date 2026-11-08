@@ -908,6 +908,8 @@ class AnalysisCoordinator: ObservableObject {
 
     /// Setup overlay callbacks for hover-based popup
     private func setupOverlayCallbacks() {
+        TypingCoach.shared.host = self // TypeRight
+
         errorOverlay.onErrorHover = { [weak self] error, position, windowFrame in
             guard let self else { return }
 
@@ -1391,6 +1393,7 @@ class AnalysisCoordinator: ObservableObject {
             // from showing overlays for the old app after switching
             if !isSameApp {
                 Logger.trace("AnalysisCoordinator: Stopping monitoring for previous app", category: Logger.analysis)
+                TypingCoach.shared.reset() // TypeRight
                 invalidateGrammarAnalysis()
                 textMonitor.stopMonitoring()
                 stopWindowPositionMonitoring()
@@ -1728,6 +1731,7 @@ class AnalysisCoordinator: ObservableObject {
 
     /// Stop monitoring
     private func stopMonitoring() {
+        TypingCoach.shared.reset() // TypeRight
         invalidateGrammarAnalysis()
         textMonitor.stopMonitoring()
         currentErrors = []
@@ -2701,6 +2705,9 @@ class AnalysisCoordinator: ObservableObject {
         // Sync the popover's error and style suggestion lists with the canonical lists
         // This ensures the popover shows the correct counts after re-analysis
         suggestionPopover.syncErrors(filteredErrors, styleSuggestions: currentStyleSuggestions)
+
+        // TypeRight: decide whether a card should pop up for what was just typed.
+        TypingCoach.shared.analysisDidUpdate(text: sourceText, errors: filteredErrors)
     }
 
     /// Timer for Electron layout stabilization delay

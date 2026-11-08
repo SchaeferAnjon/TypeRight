@@ -569,6 +569,7 @@
 					SystemConfiguration,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.typeright.app;
+				PRODUCT_MODULE_NAME = TextWarden;
 				PRODUCT_NAME = TypeRight;
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
@@ -625,6 +626,7 @@
 					SystemConfiguration,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.typeright.app;
+				PRODUCT_MODULE_NAME = TextWarden;
 				PRODUCT_NAME = TypeRight;
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
