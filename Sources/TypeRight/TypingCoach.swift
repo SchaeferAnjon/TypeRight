@@ -99,7 +99,7 @@ final class TypingCoach {
         if let active, !stillMatches(active) { dismiss(remember: false) }
 
         if active == nil, let (error, word) = justFinishedSpellingError(in: text, errors: errors) {
-            if CoachSettings.isAIReady, PinyinDetector.isLikelyPinyin(word) {
+            if CoachSettings.isAIReady, CoachSettings.pinyinEnabled, PinyinDetector.isLikelyPinyin(word) {
                 waitingPinyin = (error.start ..< error.end, word)
             } else {
                 showSpelling(error, word: word, text: text)
@@ -161,14 +161,20 @@ final class TypingCoach {
     // MARK: - After a pause: Chinese, pinyin, finished sentences
 
     private func userPaused() {
-        guard active == nil || isThinking, CoachSettings.isAIReady else { return }
+        guard active == nil || isThinking else { return }
         let text = latestText
         let scalars = Array(text.unicodeScalars)
         let caret = min(host?.coachCaret(in: text) ?? scalars.count, scalars.count)
         let sentence = sentenceRange(endingNear: caret, in: scalars)
 
+        guard CoachSettings.isAIReady else {
+            countWithoutAI(caret: caret, scalars: scalars)
+            return
+        }
+
         // Chinese inside an English sentence.
-        if ChineseText.latinWordCount(in: scalars, from: sentence.lowerBound, to: sentence.upperBound) >= 1,
+        if CoachSettings.autoTranslateMixed,
+           ChineseText.latinWordCount(in: scalars, from: sentence.lowerBound, to: sentence.upperBound) >= 1,
            let run = ChineseText.hanRuns(in: scalars, from: sentence.lowerBound, to: sentence.upperBound)
            .first(where: { !declined.contains("han:\(substring(scalars, $0))") })
         {
@@ -256,7 +262,10 @@ final class TypingCoach {
             do {
                 let result = try await CoachAI.check(sentence: sentenceText, mayBeUnfinished: unfinished)
                 guard let self, !Task.isCancelled else { return }
-                guard !result.ok, !result.corrected.isEmpty, result.corrected != sentenceText,
+                let clean = result.ok || result.corrected.isEmpty || result.corrected == sentenceText
+                CoachNotebook.shared.noteSentence(clean: clean)
+                if clean { CoachNotebook.shared.noteCorrectUse(in: sentenceText) }
+                guard !clean,
                       self.latestTextStill(has: sentenceText, at: sentenceRange)
                 else {
                     if self.isThinking { self.dismiss(remember: false) }
@@ -352,8 +361,43 @@ final class TypingCoach {
             guard let host = self?.host else { return }
             let ok = await host.coachReplace(range: card.range, with: replacement,
                                              analyzedText: card.analyzedText, harperError: card.harperError)
-            if ok { CoachNotebook.shared.record(card.content, app: appName) }
+            if ok {
+                let context = Self.context(of: card, after: replacement)
+                CoachNotebook.shared.record(card.content, app: appName, context: context)
+            }
         }
+    }
+
+    /// The sentence around the fix as it reads afterwards.
+    private static func context(of card: Active, after replacement: String) -> String {
+        if case let .sentence(_, check) = card.content { return check.corrected }
+        let scalars = Array(card.analyzedText.unicodeScalars)
+        guard card.range.upperBound <= scalars.count else { return "" }
+        var start = card.range.lowerBound
+        while start > 0, !sentenceEnds.contains(scalars[start - 1]) {
+            start -= 1
+        }
+        var end = card.range.upperBound
+        while end < scalars.count, !sentenceEnds.contains(scalars[end]) {
+            end += 1
+        }
+        let before = String(String.UnicodeScalarView(scalars[start ..< card.range.lowerBound]))
+        let after = String(String.UnicodeScalarView(scalars[card.range.upperBound ..< end]))
+        return (before + replacement + after).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Without an AI the sentence count comes from the spell checker: a finished sentence
+    /// it found nothing in counts as right the first time.
+    private func countWithoutAI(caret: Int, scalars: [Unicode.Scalar]) {
+        guard let finished = finishedSentence(before: caret, in: scalars) else { return }
+        let sentenceText = substring(scalars, finished)
+        let key = Self.sentenceKey(sentenceText)
+        guard !checkedSentences.contains(key),
+              ChineseText.latinWordCount(in: scalars, from: finished.lowerBound, to: finished.upperBound) >= 3 else { return }
+        checkedSentences.insert(key)
+        let clean = !latestErrors.contains { $0.start < finished.upperBound && $0.end > finished.lowerBound }
+        CoachNotebook.shared.noteSentence(clean: clean)
+        if clean { CoachNotebook.shared.noteCorrectUse(in: sentenceText) }
     }
 
     // MARK: - Text helpers

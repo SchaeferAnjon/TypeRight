@@ -143,6 +143,36 @@ enum CoachSettings {
         set { defaults.set(newValue, forKey: "typeright.pauseSeconds") }
     }
 
+    /// Chinese inside an English sentence turns into English by itself (a whole Chinese
+    /// sentence waits for the translate shortcut).
+    static var autoTranslateMixed: Bool {
+        get { defaults.object(forKey: "typeright.autoTranslateMixed") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "typeright.autoTranslateMixed") }
+    }
+
+    /// Pinyin typed in English mode (`yuyue`) is offered as English too.
+    static var pinyinEnabled: Bool {
+        get { defaults.object(forKey: "typeright.pinyinEnabled") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "typeright.pinyinEnabled") }
+    }
+
+    /// "us" or "uk": the IPA and the voice.
+    static var accent: String {
+        get { defaults.string(forKey: "typeright.accent") ?? "us" }
+        set { defaults.set(newValue, forKey: "typeright.accent") }
+    }
+
+    /// The daily anonymous check-in; off until the user agrees.
+    static var anonymousReport: Bool {
+        get { defaults.bool(forKey: "typeright.anonymousReport") }
+        set { defaults.set(newValue, forKey: "typeright.anonymousReport") }
+    }
+
+    static var onboarded: Bool {
+        get { defaults.bool(forKey: "typeright.onboarded") }
+        set { defaults.set(newValue, forKey: "typeright.onboarded") }
+    }
+
     static var cardsEnabled: Bool {
         get { defaults.object(forKey: "typeright.cardsEnabled") as? Bool ?? true }
         set { defaults.set(newValue, forKey: "typeright.cardsEnabled") }
@@ -219,13 +249,16 @@ struct CoachSentenceCheck: Decodable, Equatable {
         let from: String
         let to: String
         let why: String
+        /// Kind of mistake, one of the words listed in the check prompt.
+        let type: String
 
-        private enum CodingKeys: String, CodingKey { case from, to, why }
+        private enum CodingKeys: String, CodingKey { case from, to, why, type }
 
-        init(from: String, to: String, why: String) {
+        init(from: String, to: String, why: String, type: String = "other") {
             self.from = from
             self.to = to
             self.why = why
+            self.type = type
         }
 
         init(from decoder: Decoder) throws {
@@ -233,6 +266,7 @@ struct CoachSentenceCheck: Decodable, Equatable {
             from = (try? c.decode(String.self, forKey: .from)) ?? ""
             to = (try? c.decode(String.self, forKey: .to)) ?? ""
             why = (try? c.decode(String.self, forKey: .why)) ?? ""
+            type = (try? c.decode(String.self, forKey: .type)) ?? "other"
         }
     }
 
@@ -285,7 +319,7 @@ enum CoachAI {
         let prompt = """
         Task: translate. In the sentence below, the part inside ⟦ ⟧ is Chinese or pinyin the user could not say in English. \
         Give the English words that should replace exactly that part so the sentence reads naturally. \
-        JSON: {"english": "...", "ipa": "IPA of the English words, US, with slashes", "note": "when to use it vs. close alternatives, one sentence"}
+        JSON: {"english": "...", "ipa": "IPA of the English words, \(CoachSettings.accent == "uk" ? "British" : "US"), with slashes", "note": "when to use it vs. close alternatives, one sentence"}
         Sentence: \(marked)
         """
         let data = try await complete(prompt, maxTokens: 300)
@@ -305,7 +339,8 @@ enum CoachAI {
         but the pronoun I is always a capital letter. \
         Do not change names, code, URLs or anything in quotes. \(unfinishedRule)\
         If it is fine, return {"ok": true}. Otherwise return {"ok": false, "corrected": "the whole corrected sentence", \
-        "changes": [{"from": "original words", "to": "new words", "why": "reason"}]}
+        "changes": [{"from": "original words", "to": "new words", "why": "reason", \
+        "type": "one of spelling, article, tense, plural, preposition, chinglish, agreement, capitalization, word-choice, punctuation, other"}]}
         Sentence: \(sentence)
         """
         let data = try await complete(prompt, maxTokens: 500)
