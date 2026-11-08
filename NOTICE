@@ -1,0 +1,17 @@
+TypeRight
+Copyright (C) 2026 zonghan jia
+
+TypeRight as a whole is free software, distributed under the GNU General Public
+License, version 3 or later (see LICENSE).
+
+TypeRight is based on TextWarden (https://github.com/PhilipSchmid/textwarden),
+Copyright Philip Schmid, licensed under the Apache License, Version 2.0. The
+Apache license text is kept in LICENSES/Apache-2.0-TextWarden.txt. TypeRight
+changed TextWarden's app identity, menus, onboarding and settings, and added the
+typing coach in Sources/TypeRight/.
+
+The permission drag helper (Sources/TypeRight/UI/PermissionDragHelper.swift)
+comes from GetNewWord by the same author, licensed under GPL-3.0-or-later.
+
+TextWarden's name and logo belong to its author; TypeRight is not affiliated
+with or endorsed by the TextWarden project.

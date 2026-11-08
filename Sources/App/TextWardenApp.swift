@@ -40,14 +40,14 @@ struct TextWardenApp: App {
         .commands {
             // App menu customizations
             CommandGroup(replacing: .appInfo) {
-                Button("About TextWarden") {
+                Button("关于 TypeRight") {
                     PreferencesWindowController.shared.selectTab(.about)
                     NSApp.sendAction(#selector(AppDelegate.openSettingsWindow(selectedTab:)), to: nil, from: nil)
                 }
             }
 
             CommandGroup(after: .appInfo) {
-                Button("Check for Updates...") {
+                Button("检查更新…") {
                     UpdaterViewModel.shared.checkForUpdates()
                 }
             }
@@ -59,7 +59,7 @@ struct TextWardenApp: App {
             }
 
             CommandGroup(replacing: .appSettings) {
-                Button("Settings...") {
+                Button("设置…") {
                     PreferencesWindowController.shared.selectTab(.general)
                     NSApp.sendAction(#selector(AppDelegate.openSettingsWindow(selectedTab:)), to: nil, from: nil)
                 }
