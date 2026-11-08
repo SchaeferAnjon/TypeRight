@@ -59,10 +59,29 @@ final class TypingCoach {
     private var checkedSentences = Set<String>()
 
     private init() {
+        #if DEBUG
+            Self.importDevKey()
+        #endif
         PinyinDetector.warmUp()
         keyTap.onKey = { [weak self] key in self?.handleKey(key) ?? false }
         panel.onClickOutside = { [weak self] in self?.dismiss(remember: false) }
     }
+
+    #if DEBUG
+        /// Development builds can be handed a DeepSeek key through a one-time file
+        /// (`open --env TYPERIGHT_DEV_KEY_FILE=…`); the app stores it in its own keychain item and deletes the file.
+        private static func importDevKey() {
+            guard let path = ProcessInfo.processInfo.environment["TYPERIGHT_DEV_KEY_FILE"],
+                  let key = try? String(contentsOfFile: path, encoding: .utf8)
+            else { return }
+            try? FileManager.default.removeItem(atPath: path)
+            let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return }
+            CoachKeychain.setKey(trimmed, for: .deepseek)
+            CoachSettings.provider = .deepseek
+            Logger.info("TypeRight: development key imported", category: Logger.llm)
+        }
+    #endif
 
     // MARK: - Input from the analysis
 
