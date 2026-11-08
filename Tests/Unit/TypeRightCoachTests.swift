@@ -44,6 +44,18 @@ final class TypeRightCoachTests: XCTestCase {
         XCTAssertEqual(ChineseText.latinWordCount(in: scalars, from: 0, to: scalars.count), 0)
     }
 
+    func testMixedChatSentence() {
+        let scalars = Array("i wannna 预约 a table".unicodeScalars)
+        let runs = ChineseText.hanRuns(in: scalars, from: 0, to: scalars.count)
+        XCTAssertEqual(runs, [9 ..< 11])
+        XCTAssertEqual(ChineseText.latinWordCount(in: scalars, from: 0, to: scalars.count), 2) // "i" is one letter
+    }
+
+    func testSentenceKeyIgnoresFinalPunctuation() {
+        XCTAssertEqual(TypingCoach.sentenceKey("I has a question"), TypingCoach.sentenceKey("I has a question. "))
+        XCTAssertNotEqual(TypingCoach.sentenceKey("I has a question"), TypingCoach.sentenceKey("I have a question"))
+    }
+
     // MARK: AI replies
 
     func testCodeFenceAndChatterAreStripped() {

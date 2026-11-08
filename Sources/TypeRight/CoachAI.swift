@@ -295,10 +295,15 @@ enum CoachAI {
     }
 
     /// Grammar, spelling and clearly unnatural wording in one finished sentence.
-    static func check(sentence: String) async throws -> CoachSentenceCheck {
+    static func check(sentence: String, mayBeUnfinished: Bool = false) async throws -> CoachSentenceCheck {
+        let unfinishedRule = mayBeUnfinished
+            ? "The user may still be typing: never add words to complete it and do not add final punctuation. "
+            : ""
         let prompt = """
         Task: check. Correct grammar, spelling and clearly unnatural (Chinglish) wording in this sentence with as few changes as possible; \
-        keep the meaning, tone and punctuation style. Do not change names, code, URLs or anything in quotes. \
+        keep the meaning, tone and punctuation style. Casual chat words (wanna, gonna, lol) are fine, \
+        but the pronoun I is always a capital letter. \
+        Do not change names, code, URLs or anything in quotes. \(unfinishedRule)\
         If it is fine, return {"ok": true}. Otherwise return {"ok": false, "corrected": "the whole corrected sentence", \
         "changes": [{"from": "original words", "to": "new words", "why": "reason"}]}
         Sentence: \(sentence)

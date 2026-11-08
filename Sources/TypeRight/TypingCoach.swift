@@ -50,6 +50,8 @@ final class TypingCoach {
     private var latestText = ""
     private var latestErrors: [GrammarErrorModel] = []
     private var pauseTimer: Timer?
+    /// A longer pause: a sentence without . ? ! (chat style) is checked as finished.
+    private var lingerTimer: Timer?
     private var aiTask: Task<Void, Never>?
     private var waitingPinyin: (range: Range<Int>, word: String)?
 
@@ -64,7 +66,10 @@ final class TypingCoach {
         #endif
         PinyinDetector.warmUp()
         keyTap.onKey = { [weak self] key in self?.handleKey(key) ?? false }
-        panel.onClickOutside = { [weak self] in self?.dismiss(remember: false) }
+        panel.onClickOutside = { [weak self] in
+            self?.dismiss(remember: false)
+            self?.schedulePauseCheck(after: 0.4)
+        }
     }
 
     #if DEBUG
@@ -101,8 +106,13 @@ final class TypingCoach {
             }
         }
 
+        schedulePauseCheck(after: CoachSettings.pauseSeconds)
+    }
+
+    private func schedulePauseCheck(after seconds: Double) {
         pauseTimer?.invalidate()
-        pauseTimer = Timer.scheduledTimer(withTimeInterval: CoachSettings.pauseSeconds, repeats: false) { [weak self] _ in
+        lingerTimer?.invalidate()
+        pauseTimer = Timer.scheduledTimer(withTimeInterval: seconds, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated { self?.userPaused() }
         }
     }
@@ -110,6 +120,7 @@ final class TypingCoach {
     /// The monitored field went away (focus moved, app switched, monitoring stopped).
     func reset() {
         pauseTimer?.invalidate()
+        lingerTimer?.invalidate()
         aiTask?.cancel()
         waitingPinyin = nil
         dismiss(remember: false)
@@ -129,7 +140,10 @@ final class TypingCoach {
         guard let first = after.first, !CharacterSet.letters.contains(first), after.count <= 4 else { return nil }
 
         let word = String(String.UnicodeScalarView(scalars[error.start ..< error.end]))
-        guard !declined.contains(spellingKey(word, error)) else { return nil }
+        // Chinese is handled by the translate card, never as a misspelling.
+        guard !word.unicodeScalars.contains(where: ChineseText.isHan),
+              word.unicodeScalars.contains(where: { ("a" ... "z").contains($0) || ("A" ... "Z").contains($0) }),
+              !declined.contains(spellingKey(word, error)) else { return nil }
         return (error, word)
     }
 
@@ -173,14 +187,46 @@ final class TypingCoach {
 
         // A sentence that was just finished.
         if let finished = finishedSentence(before: caret, in: scalars) {
-            let sentenceText = substring(scalars, finished)
-            guard !checkedSentences.contains(sentenceText),
-                  ChineseText.hanRuns(in: scalars, from: finished.lowerBound, to: finished.upperBound).isEmpty,
-                  ChineseText.latinWordCount(in: scalars, from: finished.lowerBound, to: finished.upperBound) >= 3
-            else { return }
-            checkedSentences.insert(sentenceText)
-            check(sentenceRange: finished, scalars: scalars, text: text)
+            checkIfNew(finished, scalars: scalars, text: text, unfinished: false)
+            return
         }
+
+        // No . ? ! yet: chat messages often go out without one, so after a longer pause
+        // check what is there as if it were finished.
+        lingerTimer?.invalidate()
+        lingerTimer = Timer.scheduledTimer(withTimeInterval: 1.2, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.userLingered() }
+        }
+    }
+
+    private func userLingered() {
+        guard active == nil, CoachSettings.isAIReady else { return }
+        let text = latestText
+        let scalars = Array(text.unicodeScalars)
+        let caret = min(host?.coachCaret(in: text) ?? scalars.count, scalars.count)
+        // Only when the caret sits at the end of what was typed.
+        guard scalars[caret...].allSatisfy({ CharacterSet.whitespacesAndNewlines.contains($0) }) else { return }
+        var range = sentenceRange(endingNear: caret, in: scalars)
+        while range.upperBound > range.lowerBound, CharacterSet.whitespaces.contains(scalars[range.upperBound - 1]) {
+            range = range.lowerBound ..< range.upperBound - 1
+        }
+        guard ChineseText.latinWordCount(in: scalars, from: range.lowerBound, to: range.upperBound) >= 4 else { return }
+        checkIfNew(range, scalars: scalars, text: text, unfinished: true)
+    }
+
+    private func checkIfNew(_ range: Range<Int>, scalars: [Unicode.Scalar], text: String, unfinished: Bool) {
+        let key = Self.sentenceKey(substring(scalars, range))
+        guard !checkedSentences.contains(key), !declined.contains("sentence:\(key)"),
+              ChineseText.hanRuns(in: scalars, from: range.lowerBound, to: range.upperBound).isEmpty,
+              ChineseText.latinWordCount(in: scalars, from: range.lowerBound, to: range.upperBound) >= 3
+        else { return }
+        checkedSentences.insert(key)
+        check(sentenceRange: range, scalars: scalars, text: text, unfinished: unfinished)
+    }
+
+    /// The same sentence with or without its final . ? ! counts once.
+    nonisolated static func sentenceKey(_ sentence: String) -> String {
+        sentence.trimmingCharacters(in: CharacterSet(charactersIn: ".?!").union(.whitespacesAndNewlines)).lowercased()
     }
 
     private func translate(fragmentRange: Range<Int>, sentence: Range<Int>, scalars: [Unicode.Scalar], text: String) {
@@ -201,14 +247,14 @@ final class TypingCoach {
         }
     }
 
-    private func check(sentenceRange: Range<Int>, scalars: [Unicode.Scalar], text: String) {
+    private func check(sentenceRange: Range<Int>, scalars: [Unicode.Scalar], text: String, unfinished: Bool) {
         let sentenceText = substring(scalars, sentenceRange)
         let lastWord = lastWordRange(in: scalars, within: sentenceRange)
         showThinking(at: lastWord, text: text)
         aiTask?.cancel()
         aiTask = Task { [weak self] in
             do {
-                let result = try await CoachAI.check(sentence: sentenceText)
+                let result = try await CoachAI.check(sentence: sentenceText, mayBeUnfinished: unfinished)
                 guard let self, !Task.isCancelled else { return }
                 guard !result.ok, !result.corrected.isEmpty, result.corrected != sentenceText,
                       self.latestTextStill(has: sentenceText, at: sentenceRange)
@@ -218,7 +264,8 @@ final class TypingCoach {
                 }
                 let anchor = self.firstChangeRange(result, in: scalars, within: sentenceRange) ?? lastWord
                 var card = Active(content: .sentence(original: sentenceText, check: result), range: sentenceRange,
-                                  analyzedText: self.latestText, harperError: nil, memoryKey: "sentence:\(sentenceText)")
+                                  analyzedText: self.latestText, harperError: nil,
+                                  memoryKey: "sentence:\(Self.sentenceKey(sentenceText))")
                 card.anchorOverride = anchor
                 self.present(card)
             } catch {
@@ -287,6 +334,8 @@ final class TypingCoach {
             return true
         case .escape:
             dismiss(remember: true)
+            // Whatever was waiting behind this card (Chinese after a misspelling) comes next.
+            schedulePauseCheck(after: 0.4)
             return true
         case let .other(printable):
             card.keysSinceShown += 1
