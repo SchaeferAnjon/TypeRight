@@ -46,8 +46,8 @@
 | [TabType](https://github.com/nilava/TabType)、[Pretype](https://github.com/nikiomori/Pretype) | MIT | 在所有 App 里用灰字提示下一个词，按 Tab 接受 | 全局截获 Tab 的做法 |
 | [Glint](https://github.com/jsogn/Glint)、[Monkey](https://github.com/jiaqianjing/monkey) | MIT | 打中文时显示或预览英文 | 中文变英文的交互 |
 
-## 还没定
+## 后来定的（2026-11-08）
 
-- 用户平时在哪些 App 里打英文：等用户试用 TextWarden 后告诉我们。
-- 做成独立 App 还是并入 GetNewWord：倾向独立。
-- 正式的英文名：要一眼看出软件是干什么的。
+- 名字 **TypeRight**，独立 App，有自己的官网和会员，官网和付费全面对照 MeetCaption，见 `docs/LAUNCH.md`。
+- 界面用方向 A「贴词小卡」，见根目录的 `DESIGN.md`。
+- 测试范围：微信、浏览器、给 Agent 打提示词的地方（Orca、终端）、邮件、备忘录、文档，都要测一遍。
