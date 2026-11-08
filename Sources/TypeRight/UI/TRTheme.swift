@@ -189,16 +189,26 @@ struct TRDiffText: View {
     let to: String
     var size: CGFloat = 13
 
+    /// One paragraph, so a long pair wraps as a sentence instead of as two columns.
     var body: some View {
-        HStack(spacing: 5) {
-            if !from.isEmpty { Text(from).strikethrough().foregroundStyle(TR.text3) }
-            Text(to)
-                .foregroundStyle(TR.fix)
-                .fontWeight(.medium)
-                .padding(.horizontal, 2)
-                .background(TR.fixSoft, in: RoundedRectangle(cornerRadius: 3))
+        Text(attributed).font(.system(size: size)).fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var attributed: AttributedString {
+        var result = AttributedString()
+        if !from.isEmpty {
+            var old = AttributedString(from)
+            old.strikethroughStyle = .single
+            old.foregroundColor = TR.text3
+            result += old
+            result += AttributedString("  ")
         }
-        .font(.system(size: size))
+        var new = AttributedString(" \(to) ")
+        new.foregroundColor = TR.fix
+        new.backgroundColor = TR.fixSoft
+        new.font = .system(size: size, weight: .medium)
+        result += new
+        return result
     }
 }
 

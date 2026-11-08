@@ -88,7 +88,7 @@ enum TRAppActivation {
 
 struct TRMainView: View {
     @ObservedObject var controller: TRMainWindowController
-    @ObservedObject private var notebook = CoachNotebook.shared
+    @ObservedObject var notebook: CoachNotebook = .shared
 
     var body: some View {
         HStack(spacing: 0) {

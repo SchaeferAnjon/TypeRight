@@ -284,7 +284,8 @@ struct TRTodayPage: View {
                     HStack(spacing: 10) {
                         Text(w.from).font(.system(size: 12.5)).foregroundStyle(TR.text2).frame(width: 64, alignment: .leading)
                         Text(w.to).font(.system(size: 13.5, weight: .medium)).foregroundStyle(TR.text)
-                        Text(w.ipa).font(.system(size: 12)).foregroundStyle(TR.text2).lineLimit(1)
+                            .lineLimit(1).fixedSize().layoutPriority(1)
+                        Text(w.ipa).font(.system(size: 12)).foregroundStyle(TR.text2).lineLimit(1).truncationMode(.tail)
                         Spacer()
                         TRSpeakButton(text: w.to)
                     }

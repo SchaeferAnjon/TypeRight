@@ -10,6 +10,7 @@
 //
 
 import AppKit
+import KeyboardShortcuts
 
 /// What TypingCoach needs from the app-monitoring side (AnalysisCoordinator).
 @MainActor
@@ -65,6 +66,7 @@ final class TypingCoach {
             Self.importDevKey()
         #endif
         PinyinDetector.warmUp()
+        KeyboardShortcuts.onKeyUp(for: .typeRightTranslate) { [weak self] in self?.translateWholeSentence() }
         keyTap.onKey = { [weak self] key in self?.handleKey(key) ?? false }
         panel.onClickOutside = { [weak self] in
             self?.dismiss(remember: false)
@@ -124,6 +126,29 @@ final class TypingCoach {
         aiTask?.cancel()
         waitingPinyin = nil
         dismiss(remember: false)
+    }
+
+    /// The translate shortcut: the Chinese sentence at the caret becomes English.
+    func translateWholeSentence() {
+        guard host != nil else { return }
+        let text = latestText
+        let scalars = Array(text.unicodeScalars)
+        let caret = min(host?.coachCaret(in: text) ?? scalars.count, scalars.count)
+        var end = caret
+        while end > 0, CharacterSet.whitespacesAndNewlines.contains(scalars[end - 1]) {
+            end -= 1
+        }
+        var range = sentenceRange(endingNear: end, in: scalars)
+        if range.isEmpty, end > 0 { range = sentenceRange(endingNear: end - 1, in: scalars).lowerBound ..< end }
+        guard !range.isEmpty,
+              !ChineseText.hanRuns(in: scalars, from: range.lowerBound, to: range.upperBound).isEmpty else { return }
+        guard CoachSettings.isAIReady else {
+            present(Active(content: .failed("整句翻译要用 AI：先在设置 › AI 服务商里选一家、填 Key。"), range: range,
+                           analyzedText: text, harperError: nil, memoryKey: ""))
+            return
+        }
+        dismiss(remember: false)
+        translate(fragmentRange: range, sentence: range, scalars: scalars, text: text)
     }
 
     // MARK: - Spelling

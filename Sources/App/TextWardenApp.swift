@@ -340,6 +340,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor
     @objc func openOnboardingWindow() {
+        // TypeRight: unit tests run inside the app; never put a setup window on the user's screen then.
+        guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else { return }
         guard let setup = StartupSetup.required(
             hasCompletedOnboarding: UserPreferences.shared.hasCompletedOnboarding,
             hasPermission: PermissionManager.shared.isPermissionGranted
@@ -354,17 +356,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         Logger.info("Creating setup window: \(setup)", category: Logger.ui)
         let content = Group {
             switch setup {
+            // TypeRight: its own five-step setup replaces TextWarden's onboarding and recovery views.
             case .onboarding:
-                OnboardingView()
+                TROnboardingView(onFinish: { [weak self] in
+                    self?.closeOnboardingWindow()
+                    TRMainWindowController.shared.show()
+                })
             case .restoreAccessibility:
-                AccessibilityRecoveryView(onClose: { [weak self] in self?.closeOnboardingWindow() })
+                TROnboardingView(start: .access, onFinish: { [weak self] in self?.closeOnboardingWindow() })
             }
         }
         let window = NSWindow(contentViewController: NSHostingController(rootView: content))
-        window.title = setup == .onboarding ? "Welcome to TextWarden" : "Restore Accessibility Access"
-        window.styleMask = [.titled, .closable]
+        window.title = "TypeRight"
+        window.styleMask = [.titled, .closable, .fullSizeContentView]
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
         window.isReleasedWhenClosed = false // We manage the lifecycle manually
-        window.setContentSize(setup == .onboarding ? NSSize(width: 640, height: 760) : NSSize(width: 520, height: 420))
+        window.setContentSize(NSSize(width: 980, height: 680))
         window.center()
 
         // Store strong reference to prevent premature deallocation
@@ -485,6 +493,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// Creates window manually for reliable reopening behavior
     /// Tab selection is controlled by PreferencesWindowController.shared
     @objc func openSettingsWindow(selectedTab _: Int = 0) {
+        // TypeRight: its own settings window; TextWarden's lives on under 设置 › 高级.
+        MainActor.assumeIsolated { TRSettingsWindowController.shared.show() }
+        return
+
         Logger.debug("openSettingsWindow called - ActivationPolicy: \(NSApp.activationPolicy().rawValue)", category: Logger.ui)
 
         // If window exists, just show it (tab is already set by PreferencesWindowController)

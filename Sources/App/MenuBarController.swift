@@ -181,6 +181,10 @@ class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     private func createMenu() {
+        // TypeRight: its own menu (today's count, pause, open, settings, AI, quit).
+        menu = TypeRightMenu.shared.build(frontmost: menuTargetApp)
+        return
+
         menu = NSMenu()
 
         // Status header
