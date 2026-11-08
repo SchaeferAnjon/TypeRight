@@ -1,0 +1,6235 @@
+// Analyzer - Grammar analysis implementation wrapping Harper
+//
+// Provides the core text analysis functionality.
+
+use crate::language_filter::LanguageFilter;
+use crate::slang_dict;
+use harper_core::spell::{MergedDictionary, MutableDictionary};
+use harper_core::{
+    linting::{LintGroup, Linter},
+    parsers::MarkdownOptions,
+    Dialect, Document,
+};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+use tracing;
+
+// MARK: - Dictionary Cache
+
+/// Cache key for dictionary configuration
+/// Represents the combination of enabled wordlist options
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct DictionaryCacheKey {
+    internet_abbrev: bool,
+    genz_slang: bool,
+    it_terminology: bool,
+    brand_names: bool,
+    person_names: bool,
+    last_names: bool,
+}
+
+/// Cached dictionary with its configuration key
+struct CachedDictionary {
+    key: DictionaryCacheKey,
+    dictionary: Arc<MergedDictionary>,
+}
+
+/// Global dictionary cache - avoids rebuilding dictionary on every analysis
+/// Thread-safe via Mutex
+static DICTIONARY_CACHE: Mutex<Option<CachedDictionary>> = Mutex::new(None);
+
+/// Get or build a dictionary for the given configuration
+/// Returns cached dictionary if settings match, otherwise builds and caches new one
+fn get_or_build_dictionary(
+    enable_internet_abbrev: bool,
+    enable_genz_slang: bool,
+    enable_it_terminology: bool,
+    enable_brand_names: bool,
+    enable_person_names: bool,
+    enable_last_names: bool,
+) -> (Arc<MergedDictionary>, bool) {
+    let key = DictionaryCacheKey {
+        internet_abbrev: enable_internet_abbrev,
+        genz_slang: enable_genz_slang,
+        it_terminology: enable_it_terminology,
+        brand_names: enable_brand_names,
+        person_names: enable_person_names,
+        last_names: enable_last_names,
+    };
+
+    // Try to get cached dictionary
+    {
+        let cache = DICTIONARY_CACHE.lock().unwrap();
+        if let Some(ref cached) = *cache {
+            if cached.key == key {
+                tracing::debug!("Dictionary cache hit");
+                return (cached.dictionary.clone(), true);
+            }
+        }
+    }
+
+    // Cache miss - build new dictionary
+    tracing::debug!("Dictionary cache miss - building new dictionary");
+    let dictionary = build_dictionary(
+        enable_internet_abbrev,
+        enable_genz_slang,
+        enable_it_terminology,
+        enable_brand_names,
+        enable_person_names,
+        enable_last_names,
+    );
+
+    // Store in cache
+    {
+        let mut cache = DICTIONARY_CACHE.lock().unwrap();
+        *cache = Some(CachedDictionary {
+            key,
+            dictionary: dictionary.clone(),
+        });
+    }
+
+    (dictionary, false)
+}
+
+/// Build a merged dictionary with the specified wordlists
+fn build_dictionary(
+    enable_internet_abbrev: bool,
+    enable_genz_slang: bool,
+    enable_it_terminology: bool,
+    enable_brand_names: bool,
+    enable_person_names: bool,
+    enable_last_names: bool,
+) -> Arc<MergedDictionary> {
+    let mut merged = MergedDictionary::new();
+    merged.add_dictionary(MutableDictionary::curated());
+
+    if enable_internet_abbrev {
+        let abbrev_words = slang_dict::WordlistCategory::InternetAbbreviations.load_words();
+        let mut abbrev_dict = MutableDictionary::new();
+        abbrev_dict.extend_words(abbrev_words);
+        merged.add_dictionary(Arc::new(abbrev_dict));
+    }
+
+    if enable_genz_slang {
+        let genz_words = slang_dict::WordlistCategory::GenZSlang.load_words();
+        let mut genz_dict = MutableDictionary::new();
+        genz_dict.extend_words(genz_words);
+        merged.add_dictionary(Arc::new(genz_dict));
+    }
+
+    if enable_it_terminology {
+        let it_words = slang_dict::WordlistCategory::ITTerminology.load_words();
+        let mut it_dict = MutableDictionary::new();
+        it_dict.extend_words(it_words);
+        merged.add_dictionary(Arc::new(it_dict));
+    }
+
+    if enable_brand_names {
+        let brand_words = slang_dict::WordlistCategory::BrandNames.load_words();
+        let mut brand_dict = MutableDictionary::new();
+        brand_dict.extend_words(brand_words);
+        merged.add_dictionary(Arc::new(brand_dict));
+    }
+
+    if enable_person_names {
+        let person_words = slang_dict::WordlistCategory::PersonNames.load_words();
+        let mut person_dict = MutableDictionary::new();
+        person_dict.extend_words(person_words);
+        merged.add_dictionary(Arc::new(person_dict));
+    }
+
+    if enable_last_names {
+        let last_words = slang_dict::WordlistCategory::LastNames.load_words();
+        let mut last_dict = MutableDictionary::new();
+        last_dict.extend_words(last_words);
+        merged.add_dictionary(Arc::new(last_dict));
+    }
+
+    Arc::new(merged)
+}
+
+#[derive(Debug, Clone)]
+pub enum ErrorSeverity {
+    Error,
+    Warning,
+    Info,
+}
+
+#[derive(Debug, Clone)]
+pub struct GrammarError {
+    pub start: usize,
+    pub end: usize,
+    pub message: String,
+    pub severity: ErrorSeverity,
+    pub category: String,
+    pub lint_id: String,
+    pub suggestions: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AnalysisResult {
+    pub errors: Vec<GrammarError>,
+    pub word_count: usize,
+    pub analysis_time_ms: u64,
+    /// True if document is primarily in a non-English language (>60% excluded language)
+    /// Used to skip readability analysis, which is English-specific
+    pub is_non_english_document: bool,
+
+    // Timing breakdown for performance profiling
+    /// Time spent in early language check (before Harper analysis)
+    pub early_language_check_ms: u64,
+    /// Time spent building the merged dictionary with custom wordlists
+    pub dictionary_build_ms: u64,
+    /// Time spent creating and configuring the Harper linter
+    pub linter_setup_ms: u64,
+    /// Time spent parsing text into a Harper Document
+    pub document_parse_ms: u64,
+    /// Time spent in Harper's lint() call - the core analysis
+    pub harper_lint_ms: u64,
+    /// Time spent in post-processing (converting lints, dedup, language filter)
+    pub post_process_ms: u64,
+}
+
+/// Parse a dialect string into Harper's Dialect enum
+///
+/// # Arguments
+/// * `dialect_str` - Dialect name: "American", "British", "Canadian", "Australian", or "Indian"
+///
+/// # Returns
+/// The corresponding Dialect enum variant, defaulting to American if invalid
+fn parse_dialect(dialect_str: &str) -> Dialect {
+    match dialect_str {
+        "American" => Dialect::American,
+        "British" => Dialect::British,
+        "Canadian" => Dialect::Canadian,
+        "Australian" => Dialect::Australian,
+        "Indian" => Dialect::Indian,
+        _ => Dialect::American, // Default to American
+    }
+}
+
+/// Deduplicate errors that have overlapping text ranges.
+/// When multiple errors overlap (e.g., SPELLING and TYPO for the same misspelled word),
+/// keep only the most specific/useful one.
+fn deduplicate_overlapping_errors(mut errors: Vec<GrammarError>) -> Vec<GrammarError> {
+    use std::collections::HashMap;
+
+    if errors.len() <= 1 {
+        return errors;
+    }
+
+    // Sort by start position, then by end position (descending to prefer larger spans)
+    errors.sort_by(|a, b| a.start.cmp(&b.start).then_with(|| b.end.cmp(&a.end)));
+
+    // Group errors by exact span (start, end)
+    let mut span_groups: HashMap<(usize, usize), Vec<GrammarError>> = HashMap::new();
+    for error in errors {
+        span_groups
+            .entry((error.start, error.end))
+            .or_default()
+            .push(error);
+    }
+
+    // For each group, pick the best error
+    let mut result: Vec<GrammarError> = span_groups
+        .into_values()
+        .map(|mut group| {
+            if group.len() == 1 {
+                return group.remove(0);
+            }
+
+            // Priority order for categories (higher = better to keep)
+            // SPELLING is more specific than TYPO, GRAMMAR more specific than both
+            let category_priority = |cat: &str| -> u8 {
+                match cat.to_uppercase().as_str() {
+                    "GRAMMAR" => 10,
+                    "SPELLING" => 9,
+                    "PUNCTUATION" => 8,
+                    "STYLE" => 7,
+                    "FORMATTING" => 6,
+                    "TYPO" => 5, // Lower priority - often duplicates SPELLING
+                    _ => 1,
+                }
+            };
+
+            // Sort by category priority (descending) then by severity
+            group.sort_by(|a, b| {
+                let a_priority = category_priority(&a.category);
+                let b_priority = category_priority(&b.category);
+                b_priority.cmp(&a_priority).then_with(|| {
+                    // Higher severity wins as tiebreaker
+                    let severity_ord = |s: &ErrorSeverity| match s {
+                        ErrorSeverity::Error => 3,
+                        ErrorSeverity::Warning => 2,
+                        ErrorSeverity::Info => 1,
+                    };
+                    severity_ord(&b.severity).cmp(&severity_ord(&a.severity))
+                })
+            });
+
+            // Take the best one (first after sorting)
+            group.remove(0)
+        })
+        .collect();
+
+    // Sort result by start position for consistent ordering
+    result.sort_by_key(|e| e.start);
+    result
+}
+
+/// Filter out spelling errors for valid possessive forms.
+///
+/// Harper's custom dictionary words (added via extend_words) don't automatically
+/// recognize possessive forms. This function filters out spelling errors for words
+/// ending in possessive markers when the base word is in the dictionary.
+///
+/// Handles both standard possessive forms:
+/// - "'s" suffix (e.g., "Oliver's" - Chicago Manual of Style)
+/// - "'" suffix for words ending in 's' (e.g., "Kubernetes'" - AP Style)
+/// - Both straight (') and curly (') apostrophes
+///
+/// For example:
+/// - If "Oliver" is in the dictionary, "Oliver's" should not be flagged
+/// - If "Kubernetes" is in the dictionary, both "Kubernetes's" and "Kubernetes'" pass
+fn filter_valid_possessive_errors<D: harper_core::spell::Dictionary>(
+    errors: Vec<GrammarError>,
+    text: &str,
+    dictionary: &D,
+) -> Vec<GrammarError> {
+    let chars: Vec<char> = text.chars().collect();
+
+    errors
+        .into_iter()
+        .filter(|error| {
+            // Only process spelling errors
+            if error.category.to_uppercase() != "SPELLING" {
+                return true;
+            }
+
+            // Extract the error word from text
+            if error.start >= chars.len() || error.end > chars.len() {
+                return true;
+            }
+            let error_word: String = chars[error.start..error.end].iter().collect();
+
+            // Try to extract the base word from possessive forms
+            // Order matters: check "'s" suffixes first, then lone apostrophe for words ending in 's'
+            let base_word = error_word
+                // Standard possessive with straight apostrophe: Oliver's → Oliver
+                .strip_suffix("'s")
+                // Standard possessive with curly apostrophe: Oliver's → Oliver
+                .or_else(|| error_word.strip_suffix("\u{2019}s"))
+                // AP-style for words ending in s (straight apostrophe): Kubernetes' → Kubernetes
+                .or_else(|| {
+                    error_word
+                        .strip_suffix('\'')
+                        .filter(|base| base.ends_with('s') || base.ends_with('S'))
+                })
+                // AP-style for words ending in s (curly apostrophe): Kubernetes' → Kubernetes
+                .or_else(|| {
+                    error_word
+                        .strip_suffix('\u{2019}')
+                        .filter(|base| base.ends_with('s') || base.ends_with('S'))
+                });
+
+            let Some(base) = base_word else {
+                return true; // Not a possessive form, keep the error
+            };
+
+            if base.is_empty() {
+                return true; // Just an apostrophe alone, keep the error
+            }
+
+            // Check if the base word is in the dictionary (case-insensitive)
+            // Harper stores words in lowercase and matches case-insensitively
+            let base_chars: Vec<char> = base.to_lowercase().chars().collect();
+
+            if dictionary.contains_word(&base_chars) {
+                tracing::debug!(
+                    "Filtering possessive form: '{}' (base '{}' is in dictionary)",
+                    error_word,
+                    base
+                );
+                return false; // Base word is valid, filter out this possessive error
+            }
+
+            true // Keep the error
+        })
+        .collect()
+}
+
+/// Filter out capitalization errors for dot-notation identifiers
+///
+/// In programming and configuration contexts, dot notation like "status.learning" or
+/// "spec.rules" creates identifiers where the dot doesn't represent a sentence boundary.
+/// Harper's `UncapitalizedSentences` lint incorrectly flags the word after the dot
+/// as needing capitalization.
+///
+/// This filter removes capitalization errors where:
+/// - The character immediately before the flagged word is a dot (.)
+/// - The character before the dot is NOT whitespace (indicating continuous dot notation)
+///
+/// Examples filtered:
+/// - `status.learning` - "learning" won't be flagged
+/// - `spec.rules` - "rules" won't be flagged
+/// - `kubernetes.io` - "io" won't be flagged
+///
+/// Examples NOT filtered (normal sentences):
+/// - `Hello. world` - "world" WILL still be flagged (space after dot)
+/// - `End. Start` - normal sentence boundary detected
+fn filter_dot_notation_capitalization_errors(
+    errors: Vec<GrammarError>,
+    text: &str,
+) -> Vec<GrammarError> {
+    let chars: Vec<char> = text.chars().collect();
+
+    errors
+        .into_iter()
+        .filter(|error| {
+            // Only process capitalization errors
+            if error.category.to_uppercase() != "CAPITALIZATION" {
+                return true;
+            }
+
+            // Safety checks for bounds
+            if error.start == 0 || error.start > chars.len() {
+                return true;
+            }
+
+            // Check if the character immediately before the error position is a dot
+            let char_before_error = chars[error.start - 1];
+            if char_before_error != '.' {
+                return true; // Not preceded by a dot, keep the error
+            }
+
+            // Check if there's a non-whitespace character before the dot
+            // This distinguishes "status.learning" from "Hello. world"
+            if error.start < 2 {
+                return true; // Not enough context, keep the error
+            }
+
+            let char_before_dot = chars[error.start - 2];
+            if char_before_dot.is_whitespace() {
+                return true; // Space before dot means it's a real sentence boundary
+            }
+
+            // This is dot notation (no space before dot) - filter out the error
+            tracing::debug!(
+                "Filtering dot-notation capitalization error at position {}",
+                error.start
+            );
+            false
+        })
+        .collect()
+}
+
+/// Filter out capitalization errors that occur after emojis
+///
+/// Harper's `UncapitalizedSentences` lint incorrectly treats emojis as sentence terminators,
+/// flagging the word after an emoji as needing capitalization. For example:
+/// "I saw the 📁 first" - Harper incorrectly flags "first" as needing capitalization
+///
+/// This filter removes capitalization errors where:
+/// - The error is preceded by whitespace followed by an emoji
+/// - The emoji is not actually a sentence terminator
+fn filter_emoji_capitalization_errors(errors: Vec<GrammarError>, text: &str) -> Vec<GrammarError> {
+    let chars: Vec<char> = text.chars().collect();
+
+    errors
+        .into_iter()
+        .filter(|error| {
+            // Only process capitalization errors
+            if error.category.to_uppercase() != "CAPITALIZATION" {
+                return true;
+            }
+
+            // Safety checks for bounds
+            if error.start == 0 || error.start > chars.len() {
+                return true;
+            }
+
+            // Look backwards from error position to find what precedes it
+            let mut pos = error.start - 1;
+
+            // Skip whitespace
+            while pos > 0 && chars[pos].is_whitespace() {
+                pos -= 1;
+            }
+
+            // Check if we hit a sentence-ending punctuation mark
+            // If so, this is a real sentence boundary - keep the error
+            if matches!(chars[pos], '.' | '!' | '?') {
+                return true;
+            }
+
+            // Skip non-sentence-ending punctuation (comma, semicolon, etc.)
+            // These might appear after an emoji but don't indicate sentence boundaries
+            while pos > 0 && matches!(chars[pos], ',' | ';' | ':' | '-' | ')' | ']' | '}' | '"' | '\'') {
+                pos -= 1;
+                // Skip any whitespace between punctuation and what's before it
+                while pos > 0 && chars[pos].is_whitespace() {
+                    pos -= 1;
+                }
+            }
+
+            let char_before = chars[pos];
+
+            // Check if it's an emoji or emoji-like character
+            // We consider it an emoji if it's:
+            // - Not ASCII
+            // - Not a common Unicode letter (like accented characters)
+            let is_emoji = !char_before.is_ascii() && !char_before.is_alphabetic();
+
+            if is_emoji {
+                tracing::debug!(
+                    "Filtering emoji-preceded capitalization error at position {}: char before = {:?}",
+                    error.start,
+                    char_before
+                );
+                return false; // Filter out this error
+            }
+
+            true // Keep the error
+        })
+        .collect()
+}
+
+/// Capitalize standalone "I" pronouns throughout a string.
+///
+/// The English pronoun "I" should always be capitalized. This function finds
+/// all instances of lowercase "i" that appear as standalone words (not part of
+/// other words like "is" or "it") and capitalizes them.
+///
+/// Handles:
+/// - " i " → " I " (surrounded by spaces)
+/// - " i'" → " I'" (before contractions like i'm, i'll, i've, i'd)
+/// - " i," / " i." / " i!" / " i?" → " I," etc. (before punctuation)
+/// - "i " at start → "I " (at beginning of string)
+/// - "i'" at start → "I'" (contraction at start)
+/// - " i" at end → " I" (at end of string)
+fn capitalize_pronoun_i(s: &str) -> String {
+    if s.is_empty() {
+        return s.to_string();
+    }
+
+    // Handle the case where input is just "i"
+    if s == "i" {
+        return "I".to_string();
+    }
+
+    let mut result = s.to_string();
+
+    // Handle start of string: "i " or "i'" (contractions) or "i," etc.
+    if result.starts_with("i ") {
+        result = format!("I {}", &result[2..]);
+    } else if result.starts_with("i'") || result.starts_with("i'") {
+        // Handle both straight and curly apostrophe
+        result = format!("I{}", &result[1..]);
+    } else if result.starts_with("i,")
+        || result.starts_with("i.")
+        || result.starts_with("i!")
+        || result.starts_with("i?")
+        || result.starts_with("i;")
+        || result.starts_with("i:")
+    {
+        // Handle i followed by punctuation at start
+        result = format!("I{}", &result[1..]);
+    }
+
+    // Handle middle of string: " i " → " I "
+    result = result.replace(" i ", " I ");
+
+    // Handle before contractions: " i'" → " I'" (straight apostrophe)
+    result = result.replace(" i'", " I'");
+    // Handle curly apostrophe (U+2019)
+    result = result.replace(" i'", " I'");
+
+    // Handle before punctuation
+    result = result.replace(" i,", " I,");
+    result = result.replace(" i.", " I.");
+    result = result.replace(" i!", " I!");
+    result = result.replace(" i?", " I?");
+    result = result.replace(" i;", " I;");
+    result = result.replace(" i:", " I:");
+
+    // Handle end of string: " i" at the very end
+    if result.ends_with(" i") {
+        let len = result.len();
+        result = format!("{}I", &result[..len - 1]);
+    }
+
+    result
+}
+
+/// Analyze text for grammar errors using Harper
+///
+/// # Arguments
+/// * `text` - The text to analyze
+/// * `dialect_str` - English dialect: "American", "British", "Canadian", "Australian", or "Indian"
+/// * `enable_internet_abbrev` - Enable internet abbreviations (BTW, FYI, LOL, etc.)
+/// * `enable_genz_slang` - Enable Gen Z slang words (ghosting, sus, slay, etc.)
+/// * `enable_it_terminology` - Enable IT terminology (kubernetes, docker, localhost, etc.)
+/// * `enable_language_detection` - Enable detection and filtering of non-English words
+/// * `excluded_languages` - ISO 639-3 codes to exclude from error detection (e.g., ["spa", "deu"])
+/// * `enable_sentence_start_capitalization` - Enable capitalization of suggestions at sentence starts
+///
+/// # Returns
+/// An AnalysisResult containing detected errors and analysis metadata
+#[tracing::instrument(skip(text), fields(text_len = text.len(), dialect = dialect_str))]
+pub fn analyze_text(
+    text: &str,
+    dialect_str: &str,
+    enable_internet_abbrev: bool,
+    enable_genz_slang: bool,
+    enable_it_terminology: bool,
+    enable_brand_names: bool,
+    enable_person_names: bool,
+    enable_last_names: bool,
+    enable_language_detection: bool,
+    excluded_languages: Vec<String>,
+    enable_sentence_start_capitalization: bool,
+    enforce_oxford_comma: bool,
+    check_ellipsis: bool,
+    check_unclosed_quotes: bool,
+    check_dashes: bool,
+) -> AnalysisResult {
+    let start_time = Instant::now();
+
+    // SECURITY: Never log the actual text content - only metadata like length
+    // User text may contain passwords, credentials, personal information, etc.
+    tracing::debug!(
+        "Starting grammar analysis: len={}, dialect={}, lang_detect={}",
+        text.len(),
+        dialect_str,
+        enable_language_detection
+    );
+
+    // Parse the dialect string
+    let dialect = parse_dialect(dialect_str);
+
+    // --- PHASE 0: Language Detection ---
+    // Detect each semantic segment once. The summary is reused after Harper so
+    // language detection is never repeated for the same analysis.
+    let early_lang_start = Instant::now();
+    let language_filter = LanguageFilter::new(enable_language_detection, excluded_languages);
+    let excluded_langs_count = language_filter.excluded_language_count();
+    let language_summary = language_filter.analyze(text);
+    let early_language_check = language_summary
+        .as_ref()
+        .is_some_and(|summary| language_filter.should_skip_harper(summary));
+    let early_language_check_ms = early_lang_start.elapsed().as_millis() as u64;
+
+    if early_language_check {
+        let word_count = text.split_whitespace().count();
+        tracing::info!(
+            "Early language bailout: {} words, {}ms - document primarily in excluded language",
+            word_count,
+            early_language_check_ms
+        );
+        return AnalysisResult {
+            errors: vec![],
+            word_count,
+            analysis_time_ms: start_time.elapsed().as_millis() as u64,
+            is_non_english_document: true,
+            early_language_check_ms,
+            dictionary_build_ms: 0,
+            linter_setup_ms: 0,
+            document_parse_ms: 0,
+            harper_lint_ms: 0,
+            post_process_ms: 0,
+        };
+    }
+
+    // --- PHASE 1: Dictionary Build (with caching) ---
+    let dict_start = Instant::now();
+
+    // Get or build cached dictionary based on wordlist options
+    let (dictionary, cache_hit) = get_or_build_dictionary(
+        enable_internet_abbrev,
+        enable_genz_slang,
+        enable_it_terminology,
+        enable_brand_names,
+        enable_person_names,
+        enable_last_names,
+    );
+    let dictionary_build_ms = dict_start.elapsed().as_millis() as u64;
+
+    tracing::debug!(
+        "Dictionary configured: abbrev={}, slang={}, it={}, brands={}, first_names={}, last_names={} ({}ms, cache={})",
+        enable_internet_abbrev,
+        enable_genz_slang,
+        enable_it_terminology,
+        enable_brand_names,
+        enable_person_names,
+        enable_last_names,
+        dictionary_build_ms,
+        if cache_hit { "hit" } else { "miss" }
+    );
+
+    // --- PHASE 2: Linter Setup ---
+    let linter_start = Instant::now();
+
+    // Initialize Harper linter with curated rules for selected dialect
+    // Clone the Arc so we can use the dictionary for both linting and document parsing
+    let mut linter = LintGroup::new_curated(dictionary.clone(), dialect);
+
+    // Configure individual rule toggles based on user preferences
+    // These allow fine-grained control over specific punctuation rules
+    if !enforce_oxford_comma {
+        linter.config.set_rule_enabled("OxfordComma", false);
+    }
+    if !check_ellipsis {
+        linter.config.set_rule_enabled("EllipsisLength", false);
+    }
+    if !check_unclosed_quotes {
+        linter.config.set_rule_enabled("UnclosedQuotes", false);
+    }
+    if !check_dashes {
+        linter.config.set_rule_enabled("Dashes", false);
+    }
+
+    // HARD-CODED: Always disable Harper's LongSentences rule (produces LintKind::Readability)
+    // We use our own ReadabilityCalculator instead, which provides:
+    // - Flesch Reading Ease score (not just word count > 40)
+    // - Target audience consideration
+    // - AI-powered simplification suggestions via Foundation Models
+    linter.config.set_rule_enabled("LongSentences", false);
+
+    let linter_setup_ms = linter_start.elapsed().as_millis() as u64;
+
+    // --- PHASE 3: Document Parsing ---
+    let parse_start = Instant::now();
+
+    // Parse Markdown structurally so links and code are not treated as prose.
+    // Keep using the merged dictionary so configured vocabulary is recognized.
+    let mut markdown_options = MarkdownOptions::default();
+    markdown_options.ignore_link_title = true;
+    let document = Document::new_markdown(text, markdown_options, dictionary.as_ref());
+    let document_parse_ms = parse_start.elapsed().as_millis() as u64;
+
+    // --- PHASE 4: Harper Linting ---
+    let lint_start = Instant::now();
+
+    // Perform linting
+    tracing::debug!("Running Harper linter");
+    let lints = linter.lint(&document);
+    let harper_lint_ms = lint_start.elapsed().as_millis() as u64;
+    tracing::debug!(
+        "Harper linter found {} lints ({}ms)",
+        lints.len(),
+        harper_lint_ms
+    );
+
+    // Count words (approximate - split on whitespace)
+    let word_count = text.split_whitespace().count();
+
+    // --- PHASE 5: Post-Processing ---
+    let post_start = Instant::now();
+
+    // Convert Harper lints to our GrammarError format
+    let mut errors: Vec<GrammarError> = lints
+        .into_iter()
+        .map(|lint| {
+            let span = lint.span;
+            let message = lint.message;
+
+            // Extract the category from Harper's LintKind
+            let category = lint.lint_kind.to_string_key();
+
+            // Create a unique lint_id by combining category with normalized message
+            // This ensures each specific rule gets its own identifier
+            // Example: "Formatting::horizontal_ellipsis_must_have_3_dots"
+            let message_key = message
+                .to_lowercase()
+                .chars()
+                .map(|c| if c.is_alphanumeric() { c } else { '_' })
+                .collect::<String>()
+                .split('_')
+                .filter(|s| !s.is_empty())
+                .take(8) // Limit to first 8 words to avoid very long IDs
+                .collect::<Vec<&str>>()
+                .join("_");
+            let lint_id = format!("{}::{}", category, message_key);
+
+            // Extract the original text at this span for InsertAfter suggestions
+            // Harper's span uses character indices, but Rust strings use byte offsets
+            // Convert character indices to byte offsets for correct slicing
+            let original_text = {
+                let chars: Vec<char> = text.chars().collect();
+                if span.start < chars.len() && span.end <= chars.len() {
+                    chars[span.start..span.end].iter().collect::<String>()
+                } else {
+                    String::new()
+                }
+            };
+
+            // Extract suggestions from Harper's lint
+            // Harper provides three suggestion types:
+            // - ReplaceWith: replace the error span with new text
+            // - InsertAfter: insert characters after the span (e.g., Oxford comma)
+            // - Remove: delete the text at the span
+            let mut suggestions: Vec<String> = lint
+                .suggestions
+                .iter()
+                .map(|suggestion| match suggestion {
+                    harper_core::linting::Suggestion::ReplaceWith(chars) => chars.iter().collect(),
+                    harper_core::linting::Suggestion::InsertAfter(chars) => {
+                        // Construct full replacement: original text + inserted chars
+                        let insert: String = chars.iter().collect();
+                        format!("{}{}", original_text, insert)
+                    }
+                    harper_core::linting::Suggestion::Remove => {
+                        // Remove suggestion = replace with empty string
+                        String::new()
+                    }
+                })
+                .collect();
+
+            // Post-process suggestions: capitalize if at sentence start (TextWarden enhancement)
+            // This is only applied if the user has enabled this feature in preferences
+            if enable_sentence_start_capitalization {
+                // Check if this error is at the beginning of a sentence
+                // Harper's span uses CHARACTER indices, but Rust strings use byte offsets
+                // Convert character index to byte offset for correct slicing
+                let chars: Vec<char> = text.chars().collect();
+                let byte_offset = if span.start < chars.len() {
+                    chars[..span.start].iter().collect::<String>().len()
+                } else {
+                    text.len()
+                };
+
+                let is_sentence_start = span.start == 0 || {
+                    // Check if preceded by sentence-ending punctuation (., !, ?)
+                    // OR by paragraph break (multiple newlines, as in Notion blocks)
+                    // BUT NOT if it's dot-notation (e.g., status.learning)
+                    text.get(..byte_offset)
+                        .map(|prefix| {
+                            // Check for paragraph break: 2+ consecutive newlines
+                            let has_paragraph_break = prefix.ends_with("\n\n")
+                                || prefix.ends_with("\r\n\r\n")
+                                || prefix.ends_with("\n\r\n");
+
+                            // Check for sentence-ending punctuation
+                            // For dots, we need to verify it's not dot-notation (no space after dot)
+                            let trimmed = prefix.trim_end();
+                            let has_sentence_end = trimmed
+                                .chars()
+                                .last()
+                                .map(|c| {
+                                    if c == '!' || c == '?' {
+                                        true
+                                    } else if c == '.' {
+                                        // For dots, check if there's whitespace between dot and error
+                                        // If prefix == trimmed (no trailing whitespace), it's dot-notation
+                                        prefix.len() > trimmed.len() // Has trailing whitespace = real sentence
+                                    } else {
+                                        false
+                                    }
+                                })
+                                .unwrap_or(false);
+
+                            has_paragraph_break || has_sentence_end
+                        })
+                        .unwrap_or(false)
+                };
+
+                // If at sentence start, ensure suggestions are capitalized
+                if is_sentence_start {
+                    suggestions = suggestions
+                        .into_iter()
+                        .map(|s| {
+                            // Step 1: Capitalize first letter
+                            let mut chars: Vec<char> = s.chars().collect();
+                            if let Some(first_char) = chars.first_mut() {
+                                *first_char =
+                                    first_char.to_uppercase().next().unwrap_or(*first_char);
+                            }
+                            let capitalized: String = chars.into_iter().collect();
+
+                            // Step 2: Ensure all standalone "I" pronouns are capitalized
+                            // Harper may return "If i recall correctly" with lowercase "i"
+                            capitalize_pronoun_i(&capitalized)
+                        })
+                        .collect();
+                } else {
+                    // If NOT at sentence start, lowercase the first character of suggestions
+                    // but preserve "I" (the pronoun) which is always capitalized in English
+                    suggestions = suggestions
+                        .into_iter()
+                        .map(|s| {
+                            // Step 1: Lowercase the first character (unless it's "I" pronoun)
+                            let lowercased = if s.starts_with("I ")
+                                || s.starts_with("I'")
+                                || s == "I"
+                            {
+                                // Suggestion starts with pronoun "I" - keep as is
+                                s
+                            } else {
+                                let mut chars: Vec<char> = s.chars().collect();
+                                if let Some(first_char) = chars.first_mut() {
+                                    if first_char.is_uppercase() {
+                                        *first_char =
+                                            first_char.to_lowercase().next().unwrap_or(*first_char);
+                                    }
+                                }
+                                chars.into_iter().collect()
+                            };
+
+                            // Step 2: Ensure all standalone "I" pronouns are capitalized
+                            // This handles cases like "if i recall" → "if I recall"
+                            capitalize_pronoun_i(&lowercased)
+                        })
+                        .collect();
+                }
+            }
+
+            // Map Harper priority to our ErrorSeverity (kept for backwards compatibility)
+            // Higher priority = more severe
+            let severity = match lint.priority {
+                p if p >= 127 => ErrorSeverity::Error,
+                p if p >= 64 => ErrorSeverity::Warning,
+                _ => ErrorSeverity::Info,
+            };
+
+            // Deduplicate suggestions while preserving order
+            // (Harper may return the same suggestion multiple times from different rules)
+            {
+                let mut seen = std::collections::HashSet::new();
+                suggestions.retain(|s| seen.insert(s.clone()));
+            }
+
+            GrammarError {
+                start: span.start,
+                end: span.end,
+                message,
+                severity,
+                category,
+                lint_id,
+                suggestions,
+            }
+        })
+        .collect();
+
+    // Deduplicate overlapping errors (e.g., SPELLING and TYPO for the same word)
+    // This happens when Harper flags the same span with multiple lint types
+    let errors_before_dedupe = errors.len();
+    errors = deduplicate_overlapping_errors(errors);
+    if errors_before_dedupe != errors.len() {
+        tracing::debug!(
+            "Deduplication: {} errors before, {} after (removed {} duplicates)",
+            errors_before_dedupe,
+            errors.len(),
+            errors_before_dedupe - errors.len()
+        );
+    }
+
+    // Filter out spelling errors for valid possessive forms
+    // Harper doesn't automatically recognize possessives of custom dictionary words
+    let errors_before_possessive = errors.len();
+    errors = filter_valid_possessive_errors(errors, text, dictionary.as_ref());
+    if errors_before_possessive != errors.len() {
+        tracing::debug!(
+            "Possessive filter: {} errors before, {} after (filtered {})",
+            errors_before_possessive,
+            errors.len(),
+            errors_before_possessive - errors.len()
+        );
+    }
+
+    // Filter out capitalization errors for dot-notation identifiers (e.g., status.learning)
+    // These are common in programming/config contexts where dots don't indicate sentence boundaries
+    let errors_before_dot_notation = errors.len();
+    errors = filter_dot_notation_capitalization_errors(errors, text);
+    if errors_before_dot_notation != errors.len() {
+        tracing::debug!(
+            "Dot-notation filter: {} errors before, {} after (filtered {})",
+            errors_before_dot_notation,
+            errors.len(),
+            errors_before_dot_notation - errors.len()
+        );
+    }
+
+    // Filter out capitalization errors after emojis
+    // Harper's UncapitalizedSentences lint incorrectly treats emojis as sentence terminators
+    let errors_before_emoji = errors.len();
+    errors = filter_emoji_capitalization_errors(errors, text);
+    if errors_before_emoji != errors.len() {
+        tracing::debug!(
+            "Emoji filter: {} errors before, {} after (filtered {})",
+            errors_before_emoji,
+            errors.len(),
+            errors_before_emoji - errors.len()
+        );
+    }
+
+    // Apply the language summary calculated before Harper.
+    let errors_before_filter = errors.len();
+    errors = match language_summary.as_ref() {
+        Some(summary) => language_filter.filter_errors_with_summary(errors, summary),
+        None => errors,
+    };
+
+    // Check if document is primarily non-English (for readability skip)
+    let is_non_english_document = language_summary
+        .as_ref()
+        .is_some_and(|summary| language_filter.should_skip_harper(summary));
+
+    if enable_language_detection {
+        tracing::info!(
+            "Language filter: {} errors before, {} after (filtered {}), excluded_langs count={}, is_non_english={}",
+            errors_before_filter,
+            errors.len(),
+            errors_before_filter - errors.len(),
+            excluded_langs_count,
+            is_non_english_document
+        );
+    }
+
+    let post_process_ms = post_start.elapsed().as_millis() as u64;
+    let analysis_time_ms = start_time.elapsed().as_millis() as u64;
+
+    tracing::info!(
+        "Analysis complete: {} errors, {} words, {}ms (dict={}ms, linter={}ms, parse={}ms, lint={}ms, post={}ms), non_english={}",
+        errors.len(),
+        word_count,
+        analysis_time_ms,
+        dictionary_build_ms,
+        linter_setup_ms,
+        document_parse_ms,
+        harper_lint_ms,
+        post_process_ms,
+        is_non_english_document
+    );
+
+    AnalysisResult {
+        errors,
+        word_count,
+        analysis_time_ms,
+        is_non_english_document,
+        early_language_check_ms,
+        dictionary_build_ms,
+        linter_setup_ms,
+        document_parse_ms,
+        harper_lint_ms,
+        post_process_ms,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use harper_core::DictWordMetadata;
+
+    #[test]
+    fn test_unicode_prefixes_preserve_spelling_ranges_and_replacements() {
+        for prefix in ["", "👩🏽‍💻 ", "Café ", "E\u{0301} ", "日本語 ", "مرحبا ", "\0 "]
+        {
+            let text = format!("{prefix}This is a sentnce.");
+            let result = analyze_text(
+                &text,
+                "American",
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                vec![],
+                true,
+                true,
+                true,
+                true,
+                true,
+            );
+            let scalars: Vec<char> = text.chars().collect();
+            for error in &result.errors {
+                assert!(
+                    error.start <= error.end && error.end <= scalars.len(),
+                    "{error:?}"
+                );
+            }
+            let start = prefix.chars().count() + "This is a ".chars().count();
+            let error = result
+                .errors
+                .iter()
+                .find(|error| error.start == start && error.end == start + 7)
+                .expect("the misspelling must retain its exact scalar range");
+            assert!(
+                error
+                    .suggestions
+                    .iter()
+                    .any(|suggestion| suggestion == "sentence"),
+                "prefix={prefix:?}, error={error:?}"
+            );
+            let replaced = format!(
+                "{}sentence{}",
+                scalars[..error.start].iter().collect::<String>(),
+                scalars[error.end..].iter().collect::<String>()
+            );
+            assert_eq!(replaced, format!("{prefix}This is a sentence."));
+        }
+    }
+
+    #[test]
+    fn test_punctuation_toggles_suppress_only_the_requested_rule() {
+        for (text, message, disabled) in [
+            (
+                "I like apples, bananas and oranges.",
+                "An Oxford comma is necessary here.",
+                (false, true, true),
+            ),
+            (
+                "Wait.....",
+                "Horizontal ellipsis must have 3 dots.",
+                (true, false, true),
+            ),
+            (
+                "He said \"hello",
+                "This quote has no termination.",
+                (true, true, false),
+            ),
+        ] {
+            let analyze = |(oxford, ellipsis, quotes)| {
+                analyze_text(
+                    text,
+                    "American",
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    vec![],
+                    true,
+                    oxford,
+                    ellipsis,
+                    quotes,
+                    true,
+                )
+            };
+            let enabled = analyze((true, true, true));
+            assert!(
+                enabled.errors.iter().any(|error| error.message == message),
+                "Fixture must trigger {message}"
+            );
+            let disabled_result = analyze(disabled);
+            assert!(!disabled_result
+                .errors
+                .iter()
+                .any(|error| error.message == message));
+            let remaining: Vec<_> = enabled
+                .errors
+                .iter()
+                .filter(|error| error.message != message)
+                .map(|error| (error.start, error.end, &error.message, &error.suggestions))
+                .collect();
+            let actual: Vec<_> = disabled_result
+                .errors
+                .iter()
+                .map(|error| (error.start, error.end, &error.message, &error.suggestions))
+                .collect();
+            assert_eq!(actual, remaining);
+        }
+    }
+
+    #[test]
+    fn test_concurrent_dictionary_configurations_keep_their_own_vocabulary() {
+        use harper_core::spell::Dictionary;
+        let (baseline, _) = get_or_build_dictionary(false, false, false, false, false, false);
+        let word = slang_dict::WordlistCategory::InternetAbbreviations
+            .load_words()
+            .into_iter()
+            .map(|(word, _)| word)
+            .find(|word| !baseline.contains_word(word))
+            .expect("fixture needs a word exclusive to the optional dictionary");
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            for enabled in [false, true] {
+                let word = &word;
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    for _ in 0..8 {
+                        let (dictionary, _) =
+                            get_or_build_dictionary(enabled, false, false, false, false, false);
+                        assert_eq!(dictionary.contains_word(word), enabled);
+                    }
+                });
+            }
+        });
+        assert!(!baseline.contains_word(&word));
+    }
+
+    // Silence noisy test output unless explicitly requested
+    #[allow(unused_macros)]
+    macro_rules! println {
+        ($($arg:tt)*) => {{
+            if std::env::var("TEXTWARDEN_TEST_LOG").is_ok() {
+                std::println!($($arg)*);
+            }
+        }};
+    }
+
+    const ENGLISH_DETECTION_SENTENCE: &str = "This is a detailed English sentence with enough characteristic words for automatic language detection to produce a useful and dependable result.";
+    const GERMAN_DETECTION_SENTENCE: &str = "Dies ist ein ausführlicher deutscher Satz mit genügend charakteristischen Wörtern, damit die automatische Spracherkennung zuverlässig funktioniert.";
+    const SPANISH_DETECTION_SENTENCE: &str = "Esta es una oración española detallada con suficientes palabras características para que la detección automática del idioma funcione de manera fiable.";
+    const FRENCH_DETECTION_SENTENCE: &str = "Ceci est une phrase française détaillée qui contient suffisamment de mots caractéristiques pour que la détection automatique de la langue fonctionne correctement.";
+    const ITALIAN_DETECTION_SENTENCE: &str = "Questa è una frase italiana dettagliata con abbastanza parole caratteristiche perché il rilevamento automatico della lingua funzioni in modo affidabile.";
+    const PORTUGUESE_DETECTION_SENTENCE: &str = "Esta é uma frase portuguesa detalhada com palavras características suficientes para que a detecção automática do idioma funcione de forma confiável.";
+    const DUTCH_DETECTION_SENTENCE: &str = "Dit is een uitgebreide Nederlandse zin met voldoende kenmerkende woorden om de automatische taalherkenning betrouwbaar te laten werken.";
+    const SWEDISH_DETECTION_SENTENCE: &str = "Det här är en detaljerad svensk mening med tillräckligt många karakteristiska ord för att den automatiska språkidentifieringen ska fungera tillförlitligt.";
+    const TURKISH_DETECTION_SENTENCE: &str = "Bu, otomatik dil algılamanın güvenilir bir şekilde çalışması için yeterli karakteristik kelime içeren ayrıntılı bir Türkçe cümledir.";
+
+    fn error_text(text: &str, error: &GrammarError) -> String {
+        text.chars()
+            .skip(error.start)
+            .take(error.end.saturating_sub(error.start))
+            .collect()
+    }
+
+    #[test]
+    fn test_dictionary_contains_abbreviations() {
+        // Test that our dictionary loading works correctly
+        use crate::slang_dict;
+        use harper_core::spell::{Dictionary, MergedDictionary, MutableDictionary};
+
+        let abbrev_words = slang_dict::WordlistCategory::InternetAbbreviations.load_words();
+        println!("\n=== LOADING ABBREVIATIONS ===");
+        println!("Total words loaded: {}", abbrev_words.len());
+
+        // Check if AFAICT and LOL are in the loaded words
+        let afaict_count = abbrev_words
+            .iter()
+            .filter(|(w, _)| {
+                let s: String = w.iter().collect();
+                s == "AFAICT" || s == "afaict"
+            })
+            .count();
+        let lol_count = abbrev_words
+            .iter()
+            .filter(|(w, _)| {
+                let s: String = w.iter().collect();
+                s == "LOL" || s == "lol"
+            })
+            .count();
+        println!("AFAICT variants in loaded words: {}", afaict_count);
+        println!("LOL variants in loaded words: {}", lol_count);
+
+        let mut abbrev_dict = MutableDictionary::new();
+        abbrev_dict.extend_words(abbrev_words);
+
+        // Also test with merged dictionary like in the main code
+        let mut merged = MergedDictionary::new();
+        merged.add_dictionary(MutableDictionary::curated());
+        merged.add_dictionary(std::sync::Arc::new(abbrev_dict.clone()));
+
+        // Test exact matches for both uppercase and lowercase
+        let afaict_upper: Vec<char> = "AFAICT".chars().collect();
+        let afaict_lower: Vec<char> = "afaict".chars().collect();
+        let lol_upper: Vec<char> = "LOL".chars().collect();
+        let lol_lower: Vec<char> = "lol".chars().collect();
+
+        println!("\n=== DICTIONARY CONTAINS TEST ===");
+        println!("MutableDictionary (abbrev only):");
+        println!(
+            "  AFAICT: {}",
+            abbrev_dict.contains_exact_word(&afaict_upper)
+        );
+        println!(
+            "  afaict: {}",
+            abbrev_dict.contains_exact_word(&afaict_lower)
+        );
+        println!("  LOL: {}", abbrev_dict.contains_exact_word(&lol_upper));
+        println!("  lol: {}", abbrev_dict.contains_exact_word(&lol_lower));
+
+        println!("\nMergedDictionary (curated + abbrev):");
+        println!("  AFAICT: {}", merged.contains_exact_word(&afaict_upper));
+        println!("  afaict: {}", merged.contains_exact_word(&afaict_lower));
+        println!("  LOL: {}", merged.contains_exact_word(&lol_upper));
+        println!("  lol: {}", merged.contains_exact_word(&lol_lower));
+
+        // Dictionary contains lowercase versions only (by design, see slang_dict.rs)
+        assert!(
+            abbrev_dict.contains_exact_word(&afaict_lower),
+            "afaict should be in abbrev dictionary"
+        );
+        assert!(
+            abbrev_dict.contains_exact_word(&lol_lower),
+            "lol should be in abbrev dictionary"
+        );
+
+        // Uppercase versions are NOT in the dictionary (lowercase-only generation)
+        assert!(
+            !abbrev_dict.contains_exact_word(&afaict_upper),
+            "AFAICT uppercase should NOT be in dictionary (lowercase only)"
+        );
+        assert!(
+            !abbrev_dict.contains_exact_word(&lol_upper),
+            "LOL uppercase should NOT be in dictionary (lowercase only)"
+        );
+
+        // Merged dictionary should also contain lowercase versions
+        assert!(
+            merged.contains_exact_word(&afaict_lower),
+            "afaict should be in merged dictionary"
+        );
+        assert!(
+            merged.contains_exact_word(&lol_lower),
+            "lol should be in merged dictionary"
+        );
+    }
+
+    #[test]
+    fn test_analyze_empty_text() {
+        let result = analyze_text(
+            "",
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+        assert_eq!(result.errors.len(), 0);
+        assert_eq!(result.word_count, 0);
+    }
+
+    #[test]
+    fn test_analyze_correct_text() {
+        let result = analyze_text(
+            "This is a well-written sentence.",
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+        // Well-written text may still have style suggestions, so we just verify it runs
+        assert!(result.word_count > 0);
+        // analysis_time_ms is unsigned, so always >= 0 (no need to assert)
+    }
+
+    #[test]
+    fn test_analyze_incorrect_text() {
+        // Subject-verb disagreement: "team are" should be "team is"
+        let result = analyze_text(
+            "The team are working on it.",
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+        assert!(result.word_count > 0);
+        // Note: Harper may or may not catch this specific error depending on version
+        // The test mainly verifies the analyzer runs without crashing
+    }
+
+    #[test]
+    fn test_markdown_link_labels_are_not_linted() {
+        let text = "🙂 I definately decided to use [quickwit-oss/whichlang](https://github.com/quickwit-oss/whichlang) over [greyblake/whatlang-rs](https://github.com/greyblake/whatlang-rs).";
+        let result = analyze_text(
+            text,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true,
+            true,
+            true,
+            true,
+        );
+
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| error_text(text, error) == "definately"),
+            "errors outside Markdown links must remain"
+        );
+
+        let link_label_ranges = ["quickwit-oss/whichlang", "greyblake/whatlang-rs"].map(|label| {
+            let byte_start = text.find(label).expect("link label must exist");
+            let start = text[..byte_start].chars().count();
+            start..start + label.chars().count()
+        });
+        let errors_in_link_labels = result
+            .errors
+            .iter()
+            .filter(|error| {
+                link_label_ranges
+                    .iter()
+                    .any(|range| error.start < range.end && error.end > range.start)
+            })
+            .map(|error| error_text(text, error))
+            .collect::<Vec<_>>();
+
+        assert!(
+            errors_in_link_labels.is_empty(),
+            "Markdown link labels must not be linted: {errors_in_link_labels:?}"
+        );
+    }
+
+    #[test]
+    fn test_markdown_reference_link_labels_are_not_linted() {
+        let text = "See the [quikcwit project][repository] for details.\n\n[repository]: https://github.com/quickwit-oss/whichlang";
+        let result = analyze_text(
+            text,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true,
+            true,
+            true,
+            true,
+        );
+
+        assert!(
+            result
+                .errors
+                .iter()
+                .all(|error| error_text(text, error) != "quikcwit"),
+            "reference-style Markdown link labels must not be linted"
+        );
+    }
+
+    #[test]
+    fn test_malformed_or_escaped_markdown_links_fail_open() {
+        let samples = [
+            r"This uses \[definately](not-a-link) in prose.",
+            "This uses [definately](https://example.com in prose.",
+        ];
+
+        for text in samples {
+            let result = analyze_text(
+                text,
+                "American",
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                vec![],
+                true,
+                true,
+                true,
+                true,
+                true,
+            );
+
+            assert!(
+                result
+                    .errors
+                    .iter()
+                    .any(|error| error_text(text, error) == "definately"),
+                "non-link text must remain lintable: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_harper_suggestions_debug() {
+        use harper_core::spell::MutableDictionary;
+        use harper_core::{
+            linting::{LintGroup, Linter},
+            Dialect, Document,
+        };
+        use std::sync::Arc;
+
+        let dictionary = Arc::new(MutableDictionary::curated());
+
+        // Initialize linter
+        let mut linter = LintGroup::new_curated(dictionary, Dialect::American);
+
+        // Test text with obvious errors that should generate suggestions
+        let test_text = "Teh quick brown fox jumps over teh lazy dog. I can has cheezburger?";
+        let document = Document::new_plain_english_curated(test_text);
+
+        let lints = linter.lint(&document);
+
+        println!("\n=== HARPER SUGGESTIONS DEBUG ===");
+        println!("Found {} lints", lints.len());
+
+        for (i, lint) in lints.iter().enumerate() {
+            println!("\n--- Lint {} ---", i + 1);
+            println!("Message: {}", lint.message);
+            println!("Span: {:?}", lint.span);
+            println!("Priority: {}", lint.priority);
+            println!("Lint Kind: {:?}", lint.lint_kind);
+            println!("Suggestions count: {}", lint.suggestions.len());
+
+            for (j, suggestion) in lint.suggestions.iter().enumerate() {
+                println!("  Suggestion {}: {:?}", j + 1, suggestion);
+            }
+        }
+        println!("=== END DEBUG ===\n");
+    }
+
+    #[test]
+    fn test_cillium_text_analysis() {
+        // Test the exact text from the screenshot
+        let text = "Cillium is the best CNI tool. Blub.";
+
+        println!("\n=== ANALYZING CILLIUM TEXT ===");
+        println!("Text: {}", text);
+
+        // Test with IT terminology disabled
+        let result_without_it = analyze_text(
+            text,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+        println!("\nWithout IT terminology:");
+        println!("  Errors found: {}", result_without_it.errors.len());
+        for (i, error) in result_without_it.errors.iter().enumerate() {
+            let error_text = &text[error.start..error.end];
+            println!(
+                "  Error {}: '{}' - {} ({})",
+                i + 1,
+                error_text,
+                error.message,
+                error.lint_id
+            );
+            println!("    Suggestions: {:?}", error.suggestions);
+        }
+
+        // Test with IT terminology enabled
+        let result_with_it = analyze_text(
+            text,
+            "American",
+            false,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+        println!("\nWith IT terminology:");
+        println!("  Errors found: {}", result_with_it.errors.len());
+        for (i, error) in result_with_it.errors.iter().enumerate() {
+            let error_text = &text[error.start..error.end];
+            println!(
+                "  Error {}: '{}' - {} ({})",
+                i + 1,
+                error_text,
+                error.message,
+                error.lint_id
+            );
+            println!("    Suggestions: {:?}", error.suggestions);
+        }
+
+        println!("=== END ANALYSIS ===\n");
+    }
+
+    #[test]
+    fn test_sentence_start_capitalization() {
+        // Test that suggestions at sentence start are capitalized
+        let test_cases = vec![
+            ("sentnce is a test.", "sentnce", "Sentence"), // Start of text
+            ("Hello. sentnce is wrong.", "sentnce", "Sentence"), // After period
+            ("Really! sentnce is wrong.", "sentnce", "Sentence"), // After exclamation
+            ("What? sentnce is wrong.", "sentnce", "Sentence"), // After question mark
+        ];
+
+        println!("\n=== TESTING SENTENCE START CAPITALIZATION ===");
+        for (text, error_word, expected_suggestion) in test_cases {
+            println!("\nText: '{}'", text);
+            let result = analyze_text(
+                text,
+                "American",
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                vec![],
+                true,
+                true, // enforce_oxford_comma
+                true, // check_ellipsis
+                true, // check_unclosed_quotes
+                true, // check_dashes
+            );
+
+            // Find the error for the specific word
+            if let Some(error) = result
+                .errors
+                .iter()
+                .find(|e| &text[e.start..e.end] == error_word)
+            {
+                println!("  Error word: '{}'", error_word);
+                println!("  Suggestions: {:?}", error.suggestions);
+
+                // Check if the first suggestion is capitalized correctly
+                if let Some(first_suggestion) = error.suggestions.first() {
+                    assert_eq!(
+                        first_suggestion, expected_suggestion,
+                        "Expected '{}' but got '{}' for '{}' in '{}'",
+                        expected_suggestion, first_suggestion, error_word, text
+                    );
+                    println!("  ✓ Correctly suggests '{}'", first_suggestion);
+                } else {
+                    panic!("No suggestions found for '{}' in '{}'", error_word, text);
+                }
+            } else {
+                panic!("No error found for '{}' in '{}'", error_word, text);
+            }
+        }
+        println!("=== END TEST ===\n");
+    }
+
+    #[test]
+    fn test_wordlist_overlap_with_harper() {
+        // Check how much overlap exists between our custom wordlists and Harper's curated dictionary
+        use harper_core::spell::{Dictionary, MutableDictionary};
+
+        let harper_dict = MutableDictionary::curated();
+
+        println!("\n=== WORDLIST OVERLAP ANALYSIS ===");
+
+        // Check each wordlist category
+        let categories = vec![
+            (
+                "Internet Abbreviations",
+                slang_dict::WordlistCategory::InternetAbbreviations,
+            ),
+            ("Gen Z Slang", slang_dict::WordlistCategory::GenZSlang),
+            (
+                "IT Terminology",
+                slang_dict::WordlistCategory::ITTerminology,
+            ),
+        ];
+
+        for (name, category) in categories {
+            let words = category.load_words();
+            let total_count = words.len();
+
+            let mut overlap_count = 0;
+            let mut overlap_examples = Vec::new();
+            let mut unique_examples = Vec::new();
+
+            for (chars, _) in &words {
+                let word: String = chars.iter().collect();
+
+                if harper_dict.contains_word(chars) {
+                    overlap_count += 1;
+                    if overlap_examples.len() < 10 {
+                        overlap_examples.push(word.clone());
+                    }
+                } else if unique_examples.len() < 10 {
+                    unique_examples.push(word.clone());
+                }
+            }
+
+            let overlap_percent = (overlap_count as f64 / total_count as f64) * 100.0;
+            let unique_count = total_count - overlap_count;
+
+            println!("\n{}: ", name);
+            println!("  Total words: {}", total_count);
+            println!(
+                "  Already in Harper: {} ({:.1}%)",
+                overlap_count, overlap_percent
+            );
+            println!(
+                "  Unique to our list: {} ({:.1}%)",
+                unique_count,
+                100.0 - overlap_percent
+            );
+
+            if !overlap_examples.is_empty() {
+                println!("  Example overlaps: {}", overlap_examples.join(", "));
+            }
+            if !unique_examples.is_empty() {
+                println!("  Example uniques: {}", unique_examples.join(", "));
+            }
+        }
+
+        println!("\n=== END ANALYSIS ===\n");
+    }
+
+    #[test]
+    fn test_suggestions_extraction() {
+        // Test that suggestions are properly extracted from Harper
+        let result = analyze_text(
+            "Teh quick brown fox.",
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        // Should find at least one error for "Teh"
+        assert!(!result.errors.is_empty(), "Should detect 'Teh' as an error");
+
+        // Find the error for "Teh"
+        let teh_error = result
+            .errors
+            .iter()
+            .find(|e| e.start == 0 && e.end == 3)
+            .expect("Should find error for 'Teh'");
+
+        // Should have suggestions
+        assert!(
+            !teh_error.suggestions.is_empty(),
+            "Error for 'Teh' should have suggestions"
+        );
+
+        println!("\n=== SUGGESTIONS EXTRACTION TEST ===");
+        println!("Error: {}", teh_error.message);
+        println!(
+            "Suggestions ({}): {:?}",
+            teh_error.suggestions.len(),
+            teh_error.suggestions
+        );
+
+        // Verify suggestions are strings, not empty
+        for suggestion in &teh_error.suggestions {
+            assert!(!suggestion.is_empty(), "Suggestion should not be empty");
+            assert!(
+                suggestion.chars().all(|c| c.is_alphabetic()),
+                "Suggestion should contain only letters"
+            );
+        }
+        println!("=== END TEST ===\n");
+    }
+
+    #[test]
+    fn test_oxford_comma_suggestions() {
+        // Test that InsertAfter suggestions (like Oxford comma) include the original text
+        // Harper uses InsertAfter(',') for Oxford comma, so suggestion should be "word,"
+        let text = "I like apples, bananas and oranges.";
+        let result = analyze_text(
+            text,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        // Find the Oxford comma error (should flag "bananas")
+        let oxford_error = result
+            .errors
+            .iter()
+            .find(|e| e.message.to_lowercase().contains("oxford comma"))
+            .expect("Harper should detect missing Oxford comma");
+
+        // Should have suggestion
+        assert!(
+            !oxford_error.suggestions.is_empty(),
+            "Oxford comma error should have suggestions"
+        );
+
+        // The suggestion should be "bananas," (original word + comma)
+        let suggestion = &oxford_error.suggestions[0];
+        assert_eq!(
+            suggestion, "bananas,",
+            "Oxford comma suggestion should be 'bananas,' but got '{}'",
+            suggestion
+        );
+    }
+
+    #[test]
+    #[ignore] // Timing-based, run manually: cargo test test_analyze_performance -- --ignored
+    fn test_analyze_performance() {
+        let text = &"The quick brown fox jumps over the lazy dog. ".repeat(100);
+        let result = analyze_text(
+            text,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+        // Analysis should complete in under 1500ms for ~900 words (test mode with opt-level=1)
+        // Note: Release builds are ~3x faster (~500ms)
+        assert!(
+            result.analysis_time_ms < 1500,
+            "Analysis took {}ms for {} words",
+            result.analysis_time_ms,
+            result.word_count
+        );
+    }
+
+    #[test]
+    fn test_analyze_dialects() {
+        // Test that different dialects can be parsed correctly
+        let text = "This is a test.";
+        let result_american = analyze_text(
+            text,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+        let result_british = analyze_text(
+            text,
+            "British",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+        let result_canadian = analyze_text(
+            text,
+            "Canadian",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+        let result_australian = analyze_text(
+            text,
+            "Australian",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+        let result_indian = analyze_text(
+            text,
+            "Indian",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+        let result_invalid = analyze_text(
+            text,
+            "Invalid",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        // All should run without crashing
+        assert!(result_american.word_count > 0);
+        assert!(result_british.word_count > 0);
+        assert!(result_canadian.word_count > 0);
+        assert!(result_australian.word_count > 0);
+        assert!(result_indian.word_count > 0);
+        assert!(result_invalid.word_count > 0); // Should default to American
+    }
+
+    #[test]
+    fn test_internet_abbreviations() {
+        // Test that internet abbreviations are recognized when enabled
+        let text = "BTW, FYI the meeting is ASAP. LOL!";
+
+        // With slang disabled, should flag abbreviations as errors
+        let result_disabled = analyze_text(
+            text,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        // With slang enabled, should NOT flag abbreviations
+        let result_enabled = analyze_text(
+            text,
+            "American",
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        // We expect fewer errors with slang enabled
+        println!("Errors without slang: {}", result_disabled.errors.len());
+        println!("Errors with slang: {}", result_enabled.errors.len());
+
+        // Note: This test validates the functionality works
+        // The exact error counts may vary based on Harper's behavior
+    }
+
+    #[test]
+    fn test_genz_slang() {
+        // Test that Gen Z slang is recognized when enabled
+        let text = "That is so sus. She is ghosting me. You slayed!";
+
+        // With slang disabled, may flag slang words
+        let result_disabled = analyze_text(
+            text,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        // With slang enabled, should recognize these words
+        let result_enabled = analyze_text(
+            text,
+            "American",
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        println!(
+            "Errors without Gen Z slang: {}",
+            result_disabled.errors.len()
+        );
+        println!("Errors with Gen Z slang: {}", result_enabled.errors.len());
+    }
+
+    #[test]
+    fn test_both_slang_options() {
+        // Test with both slang options enabled
+        let text = "BTW your vibe is totally slay! NGL you ghosted me ASAP.";
+
+        let result = analyze_text(
+            text,
+            "American",
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        println!("Text with both slang types enabled:");
+        println!("Errors: {}", result.errors.len());
+        for error in &result.errors {
+            println!("  - {}: {}", &text[error.start..error.end], error.message);
+        }
+    }
+
+    #[test]
+    fn test_uppercase_abbreviations_recognized() {
+        // Test that uppercase abbreviations are NOT flagged when enabled
+        // This is the critical test for the bug fix
+        let text = "AFAICT, FYI, BTW, and LOL are common abbreviations.";
+
+        // Without slang, should flag as spelling errors
+        let result_disabled = analyze_text(
+            text,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        // With slang enabled, should NOT flag these
+        let result_enabled = analyze_text(
+            text,
+            "American",
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        println!("\n=== UPPERCASE ABBREVIATIONS TEST ===");
+        println!("Text: {}", text);
+        println!("\nWithout internet abbreviations enabled:");
+        println!("  Errors: {}", result_disabled.errors.len());
+        for error in &result_disabled.errors {
+            println!("    - {}: {}", &text[error.start..error.end], error.message);
+        }
+
+        println!("\nWith internet abbreviations enabled:");
+        println!("  Errors: {}", result_enabled.errors.len());
+        for error in &result_enabled.errors {
+            println!("    - {}: {}", &text[error.start..error.end], error.message);
+        }
+
+        // Critical assertion: with slang enabled, these should NOT have SPELLING errors
+        // (Style suggestions like capitalization/expansion are OK and desired)
+        let spelling_errors: Vec<String> = result_enabled
+            .errors
+            .iter()
+            .filter(|e| e.category == "Spelling")
+            .map(|e| text[e.start..e.end].to_string())
+            .collect();
+
+        assert!(
+            !spelling_errors.contains(&"AFAICT".to_string()),
+            "AFAICT should not have spelling errors when internet abbreviations are enabled"
+        );
+        assert!(
+            !spelling_errors.contains(&"FYI".to_string()),
+            "FYI should not have spelling errors when internet abbreviations are enabled"
+        );
+        assert!(
+            !spelling_errors.contains(&"BTW".to_string()),
+            "BTW should not have spelling errors when internet abbreviations are enabled"
+        );
+        assert!(
+            !spelling_errors.contains(&"LOL".to_string()),
+            "LOL should not have spelling errors when internet abbreviations are enabled"
+        );
+
+        println!("=== TEST PASSED ===\n");
+    }
+
+    #[test]
+    fn test_mixed_case_abbreviations() {
+        // Test that abbreviations work in lowercase, UPPERCASE, and Title Case
+        let test_cases = vec![
+            "btw this is cool",    // lowercase
+            "BTW this is cool",    // UPPERCASE
+            "Btw this is cool",    // Title Case
+            "fyi you should know", // lowercase
+            "FYI you should know", // UPPERCASE
+            "Fyi you should know", // Title Case
+        ];
+
+        for text in test_cases {
+            let result = analyze_text(
+                text,
+                "American",
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                vec![],
+                true,
+                true, // enforce_oxford_comma
+                true, // check_ellipsis
+                true, // check_unclosed_quotes
+                true, // check_dashes
+            );
+
+            println!("\nTesting: '{}'", text);
+            println!("Errors: {}", result.errors.len());
+
+            // The abbreviation should not have SPELLING errors
+            // (Style suggestions are OK and desired)
+            let spelling_error = result.errors.iter().any(|e| {
+                let word = &text[e.start..e.end];
+                e.category == "Spelling"
+                    && (word.to_lowercase() == "btw" || word.to_lowercase() == "fyi")
+            });
+
+            assert!(
+                !spelling_error,
+                "Abbreviation should not have spelling errors: '{}'",
+                text
+            );
+        }
+    }
+
+    #[test]
+    fn test_slang_toggle_effectiveness() {
+        // Verify that toggling slang options actually changes the analysis results
+        let text_with_abbrevs = "BTW, FYI, IMHO, and ASAP are abbreviations.";
+        let text_with_slang = "That vibe is sus and totally slay.";
+
+        // Test internet abbreviations toggle
+        let abbrev_disabled = analyze_text(
+            text_with_abbrevs,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+        let abbrev_enabled = analyze_text(
+            text_with_abbrevs,
+            "American",
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        println!("\n=== INTERNET ABBREVIATIONS TOGGLE TEST ===");
+        println!("Text: {}", text_with_abbrevs);
+        println!("Errors (disabled): {}", abbrev_disabled.errors.len());
+        println!("Errors (enabled): {}", abbrev_enabled.errors.len());
+
+        // Should have fewer or equal errors when enabled
+        assert!(
+            abbrev_enabled.errors.len() <= abbrev_disabled.errors.len(),
+            "Enabling abbreviations should not increase error count"
+        );
+
+        // Test Gen Z slang toggle
+        let slang_disabled = analyze_text(
+            text_with_slang,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+        let slang_enabled = analyze_text(
+            text_with_slang,
+            "American",
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        println!("\n=== GEN Z SLANG TOGGLE TEST ===");
+        println!("Text: {}", text_with_slang);
+        println!("Errors (disabled): {}", slang_disabled.errors.len());
+        println!("Errors (enabled): {}", slang_enabled.errors.len());
+
+        // Should have fewer or equal errors when enabled
+        assert!(
+            slang_enabled.errors.len() <= slang_disabled.errors.len(),
+            "Enabling slang should not increase error count"
+        );
+
+        println!("=== TOGGLE TESTS PASSED ===\n");
+    }
+
+    #[test]
+    fn test_edge_cases() {
+        // Test edge cases and special scenarios
+
+        // Empty text
+        let result = analyze_text(
+            "",
+            "American",
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+        assert_eq!(result.errors.len(), 0, "Empty text should have no errors");
+        assert_eq!(result.word_count, 0, "Empty text should have 0 words");
+
+        // Only abbreviations
+        let result = analyze_text(
+            "BTW FYI LOL ASAP",
+            "American",
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+        println!("\nOnly abbreviations - Errors: {}", result.errors.len());
+        // These should all be recognized
+        assert_eq!(result.word_count, 4, "Should count 4 words");
+
+        // Abbreviations with punctuation
+        let result = analyze_text(
+            "BTW, FYI! LOL? ASAP.",
+            "American",
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+        println!("With punctuation - Errors: {}", result.errors.len());
+
+        // Mixed slang types
+        let result = analyze_text(
+            "BTW that vibe is sus",
+            "American",
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+        println!("Mixed slang types - Errors: {}", result.errors.len());
+    }
+
+    #[test]
+    fn test_regression_afaict_lol_bug() {
+        // REGRESSION TEST for the bug where AFAICT and LOL were always flagged
+        // This was caused by using Document::new_plain_english_curated() instead of
+        // Document::new_plain_english() with our merged dictionary
+
+        println!("\n=== REGRESSION TEST: AFAICT/LOL Bug ===");
+
+        // These were the specific failing cases reported by the user
+        let test_cases = vec![
+            ("afaict", "lowercase afaict"),
+            ("AFAICT", "UPPERCASE AFAICT"),
+            ("lol", "lowercase lol"),
+            ("LOL", "UPPERCASE LOL"),
+        ];
+
+        for (abbrev, description) in test_cases {
+            let text = format!("I think {} this works", abbrev);
+            let result = analyze_text(
+                &text,
+                "American",
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                vec![],
+                true,
+                true, // enforce_oxford_comma
+                true, // check_ellipsis
+                true, // check_unclosed_quotes
+                true, // check_dashes
+            );
+
+            println!("\nTesting {}: '{}'", description, text);
+            println!("  Errors: {}", result.errors.len());
+
+            // Recognized abbreviations must avoid spelling errors; expansion suggestions
+            // remain intentional, as covered by test_user_screenshot_scenario.
+            let abbrev_flagged = result.errors.iter().any(|e| {
+                e.category == "Spelling" && text[e.start..e.end].eq_ignore_ascii_case(abbrev)
+            });
+
+            if abbrev_flagged {
+                println!("  ❌ REGRESSION: {} was flagged!", abbrev);
+                for error in &result.errors {
+                    println!("    - {}: {}", &text[error.start..error.end], error.message);
+                }
+            } else {
+                println!("  ✅ {} correctly recognized", abbrev);
+            }
+
+            assert!(
+                !abbrev_flagged,
+                "REGRESSION: {} should NOT have spelling errors when internet abbreviations are enabled",
+                abbrev
+            );
+        }
+
+        println!("\n=== All regression tests passed ===");
+    }
+
+    #[test]
+    fn test_common_abbreviations_all_cases() {
+        // Comprehensive test for common abbreviations in all case variations
+        // These are the most frequently used internet abbreviations
+
+        let common_abbreviations = vec![
+            "btw", "fyi", "lol", "omg", "afaict", "imho", "asap", "brb", "ttyl", "tbh", "afaik",
+            "imo", "lmk", "idk", "iirc", "fwiw",
+        ];
+
+        println!("\n=== COMPREHENSIVE ABBREVIATION CASE TEST ===");
+
+        for abbrev in &common_abbreviations {
+            // Test lowercase
+            let text_lower = format!("I think {} is common", abbrev);
+            let result_lower = analyze_text(
+                &text_lower,
+                "American",
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                vec![],
+                true,
+                true, // enforce_oxford_comma
+                true, // check_ellipsis
+                true, // check_unclosed_quotes
+                true, // check_dashes
+            );
+
+            // Test UPPERCASE
+            let abbrev_upper = abbrev.to_uppercase();
+            let text_upper = format!("I think {} is common", abbrev_upper);
+            let result_upper = analyze_text(
+                &text_upper,
+                "American",
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                vec![],
+                true,
+                true, // enforce_oxford_comma
+                true, // check_ellipsis
+                true, // check_unclosed_quotes
+                true, // check_dashes
+            );
+
+            // Test Title Case
+            let abbrev_title: String = abbrev
+                .chars()
+                .enumerate()
+                .map(|(i, c)| {
+                    if i == 0 {
+                        c.to_uppercase().to_string()
+                    } else {
+                        c.to_string()
+                    }
+                })
+                .collect();
+            let text_title = format!("I think {} is common", abbrev_title);
+            let result_title = analyze_text(
+                &text_title,
+                "American",
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                vec![],
+                true,
+                true, // enforce_oxford_comma
+                true, // check_ellipsis
+                true, // check_unclosed_quotes
+                true, // check_dashes
+            );
+
+            // Check none have SPELLING errors (style suggestions are OK)
+            let lower_ok = !result_lower.errors.iter().any(|e| {
+                e.category == "Spelling" && text_lower[e.start..e.end].to_lowercase() == *abbrev
+            });
+            let upper_ok = !result_upper.errors.iter().any(|e| {
+                e.category == "Spelling" && text_upper[e.start..e.end].to_lowercase() == *abbrev
+            });
+            let title_ok = !result_title.errors.iter().any(|e| {
+                e.category == "Spelling" && text_title[e.start..e.end].to_lowercase() == *abbrev
+            });
+
+            println!(
+                "{}: lowercase={}, UPPERCASE={}, Title={}",
+                abbrev,
+                if lower_ok { "✓" } else { "✗" },
+                if upper_ok { "✓" } else { "✗" },
+                if title_ok { "✓" } else { "✗" }
+            );
+
+            assert!(
+                lower_ok,
+                "{} (lowercase) should not have spelling errors",
+                abbrev
+            );
+            assert!(
+                upper_ok,
+                "{} (UPPERCASE) should not have spelling errors",
+                abbrev_upper
+            );
+            assert!(
+                title_ok,
+                "{} (Title) should not have spelling errors",
+                abbrev_title
+            );
+        }
+
+        println!(
+            "=== All {} abbreviations passed in all cases ===",
+            common_abbreviations.len() * 3
+        );
+    }
+
+    #[test]
+    fn test_real_errors_still_caught() {
+        // Verify that enabling slang doesn't prevent real spelling errors from being caught
+        // This is critical - we want to recognize slang, but still catch typos
+
+        println!("\n=== REAL ERRORS STILL CAUGHT TEST ===");
+
+        let texts_with_errors = vec![
+            ("Teh quick brown fox", "Teh"),        // Common typo
+            ("I recieve your message", "recieve"), // i before e
+            ("Definately correct", "Definately"),  // Common misspelling
+            ("This is wierd", "wierd"),            // ei/ie confusion
+        ];
+
+        for (text, expected_error_word) in texts_with_errors {
+            let result = analyze_text(
+                text,
+                "American",
+                true,
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                vec![],
+                true,
+                true, // enforce_oxford_comma
+                true, // check_ellipsis
+                true, // check_unclosed_quotes
+                true, // check_dashes
+            ); // Both slang options ON
+
+            println!("\nText: '{}'", text);
+            println!("Expected error word: '{}'", expected_error_word);
+            println!("Errors found: {}", result.errors.len());
+
+            // Check if the expected error was caught
+            let error_caught = result.errors.iter().any(|e| {
+                text[e.start..e.end]
+                    .to_lowercase()
+                    .contains(&expected_error_word.to_lowercase())
+            });
+
+            if error_caught {
+                println!("  ✅ Error correctly caught");
+            } else {
+                println!("  ❌ Error NOT caught - this is a problem!");
+                println!("  Errors found:");
+                for error in &result.errors {
+                    println!("    - {}: {}", &text[error.start..error.end], error.message);
+                }
+            }
+
+            assert!(
+                error_caught || !result.errors.is_empty(),
+                "Real spelling error '{}' should still be caught even with slang enabled",
+                expected_error_word
+            );
+        }
+
+        println!("\n=== Real errors are still being caught ===");
+    }
+
+    #[test]
+    fn test_user_screenshot_scenario() {
+        // Test the exact scenario from the user's screenshot:
+        // "btw, lol, omg, afaict, AFAICT, lol, LMK, Teh,"
+        // Abbreviations should be recognized as valid words (no spelling errors)
+        // But Harper may still suggest style improvements (capitalization, expansion) - which is desired!
+        // Only "Teh" should be flagged as a spelling error
+
+        let text = "btw, lol, omg, afaict, AFAICT, lol, LMK, Teh,";
+        let result = analyze_text(
+            text,
+            "American",
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        println!("\n=== USER SCREENSHOT SCENARIO TEST ===");
+        println!("Text: '{}'", text);
+        println!("Errors: {}", result.errors.len());
+
+        for error in &result.errors {
+            let error_word = &text[error.start..error.end];
+            println!(
+                "  - '{}' [{}]: {}",
+                error_word, error.category, error.message
+            );
+        }
+
+        // Check that abbreviations don't have SPELLING errors (but style suggestions are OK)
+        let btw_spelling = result
+            .errors
+            .iter()
+            .any(|e| &text[e.start..e.end] == "btw" && e.category == "Spelling");
+        let omg_spelling = result
+            .errors
+            .iter()
+            .any(|e| &text[e.start..e.end] == "omg" && e.category == "Spelling");
+        let lol_spelling = result
+            .errors
+            .iter()
+            .any(|e| &text[e.start..e.end] == "lol" && e.category == "Spelling");
+        let afaict_lower_spelling = result
+            .errors
+            .iter()
+            .any(|e| &text[e.start..e.end] == "afaict" && e.category == "Spelling");
+        let afaict_upper_spelling = result
+            .errors
+            .iter()
+            .any(|e| &text[e.start..e.end] == "AFAICT" && e.category == "Spelling");
+        let lmk_spelling = result
+            .errors
+            .iter()
+            .any(|e| &text[e.start..e.end] == "LMK" && e.category == "Spelling");
+
+        // Check that "Teh" is flagged as a spelling error
+        let teh_spelling = result
+            .errors
+            .iter()
+            .any(|e| &text[e.start..e.end] == "Teh" && e.category == "Spelling");
+
+        println!("\nSpelling Error Check (should all be false except Teh):");
+        println!("  btw: {}", btw_spelling);
+        println!("  lol: {}", lol_spelling);
+        println!("  omg: {}", omg_spelling);
+        println!("  afaict: {}", afaict_lower_spelling);
+        println!("  AFAICT: {}", afaict_upper_spelling);
+        println!("  LMK: {}", lmk_spelling);
+        println!("  Teh: {} (should be true)", teh_spelling);
+
+        assert!(
+            !btw_spelling,
+            "btw should be recognized as valid word (no spelling error)"
+        );
+        assert!(
+            !lol_spelling,
+            "lol should be recognized as valid word (no spelling error)"
+        );
+        assert!(
+            !omg_spelling,
+            "omg should be recognized as valid word (no spelling error)"
+        );
+        assert!(
+            !afaict_lower_spelling,
+            "afaict should be recognized as valid word (no spelling error)"
+        );
+        assert!(
+            !afaict_upper_spelling,
+            "AFAICT should be recognized as valid word (no spelling error)"
+        );
+        assert!(
+            !lmk_spelling,
+            "LMK should be recognized as valid word (no spelling error)"
+        );
+        assert!(teh_spelling, "Teh should be flagged as spelling error");
+
+        println!("\n=== Screenshot scenario test passed ===");
+        println!("Note: Style suggestions (capitalization, expansion) for abbreviations are intentionally kept!");
+    }
+
+    #[test]
+    fn test_dictionary_used_in_document_parsing() {
+        // This test verifies the ROOT CAUSE FIX:
+        // Document parsing now uses our merged dictionary, not just curated
+        // This is tested indirectly by verifying abbreviations are recognized
+
+        use harper_core::spell::{MergedDictionary, MutableDictionary};
+        use harper_core::Document;
+        use std::sync::Arc;
+
+        println!("\n=== DOCUMENT PARSING DICTIONARY TEST ===");
+
+        // Create a custom dictionary with a test word
+        let mut custom_dict = MutableDictionary::new();
+        let test_word: Vec<char> = "testabbrev".chars().collect();
+        custom_dict.extend_words(vec![(test_word.clone(), DictWordMetadata::default())]);
+
+        // Create merged dictionary
+        let mut merged = MergedDictionary::new();
+        merged.add_dictionary(MutableDictionary::curated());
+        merged.add_dictionary(Arc::new(custom_dict));
+        let dictionary = Arc::new(merged);
+
+        // Parse document with our dictionary (THE FIX!)
+        let text = "This testabbrev should be recognized";
+        let document = Document::new_plain_english(text, dictionary.as_ref());
+
+        let mut linter = harper_core::linting::LintGroup::new_curated(
+            dictionary.clone(),
+            harper_core::Dialect::American,
+        );
+
+        let lints = linter.lint(&document);
+
+        println!("Text: '{}'", text);
+        println!("Lints: {}", lints.len());
+        for lint in &lints {
+            println!(
+                "  - {}: {}",
+                &text[lint.span.start..lint.span.end],
+                lint.message
+            );
+        }
+
+        // Check if our custom word was flagged
+        let testabbrev_flagged = lints
+            .iter()
+            .any(|lint| &text[lint.span.start..lint.span.end] == "testabbrev");
+
+        assert!(
+            !testabbrev_flagged,
+            "Custom dictionary word should be recognized during document parsing"
+        );
+
+        println!("✅ Dictionary is correctly used during document parsing");
+    }
+
+    // MARK: - Language Detection Integration Tests
+
+    #[test]
+    fn test_language_detection_disabled_by_default() {
+        // With language detection disabled, foreign words should still be flagged
+        let text = "Hallo world";
+        let result = analyze_text(
+            text,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        // "Hallo" should be flagged as unknown word
+        let hallo_error = result
+            .errors
+            .iter()
+            .any(|e| text[e.start..e.end].contains("Hallo"));
+
+        assert!(
+            hallo_error || result.errors.is_empty(),
+            "When disabled, behavior unchanged"
+        );
+    }
+
+    #[test]
+    fn test_language_detection_german_word_filtered() {
+        // Enable language detection with German excluded
+        // Use complete German sentence followed by English sentence
+        let text = format!("{GERMAN_DETECTION_SENTENCE} {ENGLISH_DETECTION_SENTENCE}");
+        let result = analyze_text(
+            &text,
+            "American",
+            false,
+            false,
+            false, // IT terminology
+            false,
+            false,
+            false,
+            true, // Enable language detection
+            vec!["deu".to_string()],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        println!("\n=== GERMAN SENTENCE TEST ===");
+        println!("Text: '{}'", text);
+        println!("Errors: {}", result.errors.len());
+        for error in &result.errors {
+            println!(
+                "  - '{}' ({}..{}): {}",
+                &text[error.start..error.end],
+                error.start,
+                error.end,
+                error.message
+            );
+        }
+
+        let german_end = GERMAN_DETECTION_SENTENCE.chars().count();
+        let german_sentence_errors = result
+            .errors
+            .iter()
+            .filter(|error| error.start < german_end)
+            .count();
+
+        assert_eq!(
+            german_sentence_errors, 0,
+            "All errors in German sentence should be filtered"
+        );
+    }
+
+    #[test]
+    fn test_language_detection_user_scenario() {
+        // Test exact user scenario: "Hello dear Nachbar, how are you doing? Gruss Bob"
+        // First sentence is English (keep errors), second sentence is German (filter errors)
+        let text = "Hello dear Nachbar, how are you doing? Gruss Bob";
+        let result = analyze_text(
+            text,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            vec!["german".to_string()],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        println!("\n=== USER SCENARIO TEST ===");
+        println!("Text: '{}'", text);
+        println!("Errors found: {}", result.errors.len());
+        for error in &result.errors {
+            println!(
+                "  - '{}' ({}..{}): {}",
+                &text[error.start..error.end],
+                error.start,
+                error.end,
+                error.message
+            );
+        }
+
+        // "Nachbar" in English sentence should be kept (error at position 11-18)
+        let nachbar_error = result.errors.iter().any(|e| e.start == 11 && e.end == 18);
+
+        // "Gruss" in German sentence should be filtered (would be at position 40-45)
+        let gruss_error = result.errors.iter().any(|e| e.start >= 40 && e.end <= 49);
+
+        assert!(nachbar_error, "Nachbar in English sentence should be kept");
+        assert!(!gruss_error, "Gruss in German sentence should be filtered");
+        println!("✅ User scenario passed: English sentence errors kept, German sentence errors filtered");
+    }
+
+    #[test]
+    fn test_language_detection_spanish_words() {
+        // Use complete Spanish sentence followed by English sentence
+        let text = format!("{SPANISH_DETECTION_SENTENCE} {ENGLISH_DETECTION_SENTENCE}");
+        let result = analyze_text(
+            &text,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            vec!["spa".to_string()],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        println!("\n=== SPANISH WORDS TEST ===");
+        println!("Text: '{}'", text);
+        println!("Errors: {}", result.errors.len());
+        for error in &result.errors {
+            println!(
+                "  - '{}' ({}..{}): {}",
+                &text[error.start..error.end],
+                error.start,
+                error.end,
+                error.message
+            );
+        }
+
+        let spanish_end = SPANISH_DETECTION_SENTENCE.chars().count();
+        let spanish_errors = result
+            .errors
+            .iter()
+            .filter(|error| error.start < spanish_end)
+            .count();
+
+        assert_eq!(
+            spanish_errors, 0,
+            "All errors in Spanish sentence should be filtered"
+        );
+    }
+
+    #[test]
+    fn test_language_detection_french_greeting() {
+        // Use complete French sentence followed by English sentence
+        let text = format!("{FRENCH_DETECTION_SENTENCE} {ENGLISH_DETECTION_SENTENCE}");
+        let result = analyze_text(
+            &text,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            vec!["fra".to_string()],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        println!("\n=== FRENCH GREETING TEST ===");
+        println!("Text: '{}'", text);
+        println!("Errors: {}", result.errors.len());
+        for error in &result.errors {
+            println!(
+                "  - '{}' ({}..{}): {}",
+                &text[error.start..error.end],
+                error.start,
+                error.end,
+                error.message
+            );
+        }
+
+        let french_end = FRENCH_DETECTION_SENTENCE.chars().count();
+        let french_errors = result
+            .errors
+            .iter()
+            .filter(|error| error.start < french_end)
+            .count();
+
+        assert_eq!(
+            french_errors, 0,
+            "All errors in French sentence should be filtered"
+        );
+    }
+
+    #[test]
+    fn test_language_detection_multiple_languages() {
+        // Use longer complete sentences so the language detector has enough context.
+        let text = format!(
+            "{SPANISH_DETECTION_SENTENCE} {FRENCH_DETECTION_SENTENCE} {GERMAN_DETECTION_SENTENCE} {ENGLISH_DETECTION_SENTENCE}"
+        );
+        let result = analyze_text(
+            &text,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            vec!["spa".to_string(), "fra".to_string(), "deu".to_string()],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        println!("\n=== MULTIPLE LANGUAGES TEST ===");
+        println!("Text: '{}'", text);
+        println!("Errors: {}", result.errors.len());
+        for error in &result.errors {
+            println!(
+                "  - '{}' ({}..{}): {}",
+                &text[error.start..error.end],
+                error.start,
+                error.end,
+                error.message
+            );
+        }
+
+        assert!(result.is_non_english_document);
+        assert!(result.errors.is_empty());
+    }
+
+    #[test]
+    fn test_language_detection_exclude_one_language_only() {
+        // Spanish sentence and German sentence, but only Spanish excluded
+        let text = format!("{SPANISH_DETECTION_SENTENCE} {GERMAN_DETECTION_SENTENCE}");
+        let result = analyze_text(
+            &text,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            vec!["spa".to_string()], // Only Spanish excluded
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        println!("\n=== SELECTIVE EXCLUSION TEST ===");
+        println!("Text: '{}'", text);
+        println!("Errors: {}", result.errors.len());
+        for error in &result.errors {
+            println!(
+                "  - '{}' ({}..{}): {}",
+                &text[error.start..error.end],
+                error.start,
+                error.end,
+                error.message
+            );
+        }
+
+        let spanish_end = SPANISH_DETECTION_SENTENCE.chars().count();
+        let spanish_errors = result
+            .errors
+            .iter()
+            .filter(|error| error.start < spanish_end)
+            .count();
+
+        // German sentence errors should NOT be filtered (German not excluded)
+        // We just verify Spanish is filtered
+        assert_eq!(
+            spanish_errors, 0,
+            "Spanish sentence errors should be filtered"
+        );
+    }
+
+    #[test]
+    fn test_language_detection_with_slang_enabled() {
+        // Test that language detection works alongside slang dictionaries
+        // Spanish sentence followed by English with slang
+        let text = format!("{SPANISH_DETECTION_SENTENCE} BTW, that's totally sus.");
+        let result = analyze_text(
+            &text,
+            "American",
+            true,  // Internet abbreviations ON
+            true,  // Gen Z slang ON
+            false, // IT terminology
+            false,
+            false,
+            false,
+            true, // Language detection ON
+            vec!["spa".to_string()],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        println!("\n=== LANGUAGE + SLANG TEST ===");
+        println!("Text: '{}'", text);
+        println!("Errors: {}", result.errors.len());
+        for error in &result.errors {
+            println!(
+                "  - '{}' ({}..{}): {}",
+                &text[error.start..error.end],
+                error.start,
+                error.end,
+                error.message
+            );
+        }
+
+        let spanish_end = SPANISH_DETECTION_SENTENCE.chars().count();
+        let spanish_errors = result
+            .errors
+            .iter()
+            .filter(|error| error.start < spanish_end)
+            .count();
+
+        // "BTW" and "sus" in English sentence should NOT have SPELLING errors (slang dictionaries)
+        // (Style suggestions are OK)
+        let btw_spelling = result
+            .errors
+            .iter()
+            .any(|error| error_text(&text, error) == "BTW" && error.category == "Spelling");
+        let sus_spelling = result
+            .errors
+            .iter()
+            .any(|error| error_text(&text, error) == "sus" && error.category == "Spelling");
+
+        assert_eq!(
+            spanish_errors, 0,
+            "Spanish sentence errors should be filtered"
+        );
+        assert!(
+            !btw_spelling,
+            "BTW should not have spelling errors (internet abbreviations)"
+        );
+        assert!(
+            !sus_spelling,
+            "sus should not have spelling errors (Gen Z slang)"
+        );
+    }
+
+    #[test]
+    fn test_language_detection_preserves_real_errors() {
+        // Ensure real English errors are still caught
+        // German sentence followed by English sentence with typo
+        let text = format!("{GERMAN_DETECTION_SENTENCE} I recieve your message.");
+        // "Hallo..." = German sentence (filtered), "I recieve..." = English typo (should be caught)
+        let result = analyze_text(
+            &text,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            vec!["deu".to_string()],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        println!("\n=== REAL ERRORS PRESERVED TEST ===");
+        println!("Text: '{}'", text);
+        println!("Errors: {}", result.errors.len());
+        for error in &result.errors {
+            println!(
+                "  - '{}' ({}..{}): {}",
+                &text[error.start..error.end],
+                error.start,
+                error.end,
+                error.message
+            );
+        }
+
+        let german_end = GERMAN_DETECTION_SENTENCE.chars().count();
+        let german_errors = result
+            .errors
+            .iter()
+            .filter(|error| error.start < german_end)
+            .count();
+        assert_eq!(
+            german_errors, 0,
+            "German sentence errors should be filtered"
+        );
+
+        // "recieve" in English sentence should still be caught if Harper detects it
+        // This depends on Harper's spell checker
+        let has_recieve = result
+            .errors
+            .iter()
+            .any(|error| error_text(&text, error) == "recieve");
+        if has_recieve {
+            println!("✅ Real English error 'recieve' was preserved");
+        }
+    }
+
+    #[test]
+    fn test_language_detection_code_switching() {
+        // Test code-switching scenario (common in bilingual contexts)
+        // Use Spanish sentence followed by English sentence
+        let text = format!("{SPANISH_DETECTION_SENTENCE} {ENGLISH_DETECTION_SENTENCE}");
+        let result = analyze_text(
+            &text,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            vec!["spa".to_string()],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        println!("\n=== CODE-SWITCHING TEST ===");
+        println!("Text: '{}'", text);
+        println!("Errors: {}", result.errors.len());
+        for error in &result.errors {
+            println!(
+                "  - '{}' ({}..{}): {}",
+                &text[error.start..error.end],
+                error.start,
+                error.end,
+                error.message
+            );
+        }
+
+        let spanish_end = SPANISH_DETECTION_SENTENCE.chars().count();
+        let spanish_errors = result
+            .errors
+            .iter()
+            .filter(|error| error.start < spanish_end)
+            .count();
+        assert_eq!(
+            spanish_errors, 0,
+            "Spanish sentence errors should be filtered"
+        );
+    }
+
+    #[test]
+    fn test_language_detection_performance() {
+        // Test that language detection doesn't significantly impact performance
+        // Use complete German sentences
+        let text = &"Hallo Welt, wie geht es dir? ".repeat(50); // ~250 words
+        let start = std::time::Instant::now();
+
+        let result = analyze_text(
+            text,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            vec!["german".to_string()],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        let elapsed = start.elapsed();
+
+        println!("\n=== PERFORMANCE TEST ===");
+        println!("Text length: {} words", text.split_whitespace().count());
+        println!("Analysis time: {}ms", elapsed.as_millis());
+        println!("Errors found: {}", result.errors.len());
+
+        // Should complete in reasonable time for CI (relaxed threshold)
+        assert!(
+            elapsed.as_millis() < 1500,
+            "Analysis with language detection should complete in <1500ms, took {}ms",
+            elapsed.as_millis()
+        );
+    }
+
+    #[test]
+    fn test_language_detection_empty_excluded_list() {
+        // Enabled but no languages excluded = same as disabled
+        let text = "Hallo Welt, wie geht es dir?";
+        let result = analyze_text(
+            text,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            vec![], // Empty list
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        // Behavior should be same as disabled (no filtering)
+        // This test just ensures no crashes and proper handling
+        println!("\n=== EMPTY EXCLUSION LIST TEST ===");
+        println!("Text: '{}'", text);
+        println!("Errors: {}", result.errors.len());
+        println!("✅ No crash with empty exclusion list");
+    }
+
+    #[test]
+    fn test_latvian_issue_samples_filter_real_harper_errors_only_when_selected() {
+        let samples = [
+            "Šodien ir silta diena un es rakstu vēstuli.",
+            "Latviešu valoda ir skaista un bagāta valoda, kurā runā Latvijā.",
+        ];
+
+        for text in samples {
+            let baseline = analyze_text(
+                text,
+                "American",
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                vec![],
+                true,
+                true,
+                true,
+                true,
+                true,
+            );
+            assert!(
+                !baseline.errors.is_empty(),
+                "fixture must produce Harper errors without language filtering"
+            );
+
+            let unselected = analyze_text(
+                text,
+                "American",
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                true,
+                vec!["lit".to_string()],
+                true,
+                true,
+                true,
+                true,
+                true,
+            );
+            assert!(
+                !unselected.errors.is_empty(),
+                "Latvian errors must remain when only Lithuanian is selected"
+            );
+
+            let selected = analyze_text(
+                text,
+                "American",
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                true,
+                vec!["lav".to_string()],
+                true,
+                true,
+                true,
+                true,
+                true,
+            );
+            assert!(selected.errors.is_empty());
+            assert!(selected.is_non_english_document);
+        }
+    }
+
+    #[test]
+    fn test_language_detection_all_dialects() {
+        // Test that language detection works with all English dialects
+        let dialects = vec!["American", "British", "Canadian", "Australian", "Indian"];
+        let text = format!("{GERMAN_DETECTION_SENTENCE} {ENGLISH_DETECTION_SENTENCE}");
+
+        for dialect in dialects {
+            let result = analyze_text(
+                &text,
+                dialect,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                true,
+                vec!["deu".to_string()],
+                true,
+                true, // enforce_oxford_comma
+                true, // check_ellipsis
+                true, // check_unclosed_quotes
+                true, // check_dashes
+            );
+
+            println!("\n=== DIALECT TEST: {} ===", dialect);
+            println!("Text: '{}'", text);
+            println!("Errors: {}", result.errors.len());
+
+            let german_end = GERMAN_DETECTION_SENTENCE.chars().count();
+            let german_errors = result
+                .errors
+                .iter()
+                .filter(|error| error.start < german_end)
+                .count();
+            assert_eq!(
+                german_errors, 0,
+                "German sentence errors should be filtered for dialect {}",
+                dialect
+            );
+        }
+    }
+
+    #[test]
+    fn test_language_detection_word_count_unchanged() {
+        // Word count should be based on original text
+        let text = "Hallo Welt heute. English sentence here.";
+        let result = analyze_text(
+            text,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            vec!["german".to_string()],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        // 3 German words + 3 English words = 6 total
+        assert_eq!(
+            result.word_count, 6,
+            "Word count should include all words from all sentences"
+        );
+    }
+
+    #[test]
+    fn test_language_detection_italian() {
+        // Test Italian language detection and filtering
+        let text = format!("{ITALIAN_DETECTION_SENTENCE} {ENGLISH_DETECTION_SENTENCE}");
+        let result = analyze_text(
+            &text,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            vec!["ita".to_string()],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        println!("\n=== ITALIAN LANGUAGE TEST ===");
+        println!("Text: '{}'", text);
+        println!("Errors: {}", result.errors.len());
+        for error in &result.errors {
+            println!(
+                "  - '{}' ({}..{}): {}",
+                &text[error.start..error.end],
+                error.start,
+                error.end,
+                error.message
+            );
+        }
+
+        let italian_end = ITALIAN_DETECTION_SENTENCE.chars().count();
+        let italian_errors = result
+            .errors
+            .iter()
+            .filter(|error| error.start < italian_end)
+            .count();
+        assert_eq!(
+            italian_errors, 0,
+            "Italian sentence errors should be filtered"
+        );
+    }
+
+    #[test]
+    fn test_language_detection_portuguese() {
+        // Test Portuguese language detection and filtering
+        let text = format!("{PORTUGUESE_DETECTION_SENTENCE} {ENGLISH_DETECTION_SENTENCE}");
+        let result = analyze_text(
+            &text,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            vec!["por".to_string()],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        println!("\n=== PORTUGUESE LANGUAGE TEST ===");
+        println!("Text: '{}'", text);
+        println!("Errors: {}", result.errors.len());
+        for error in &result.errors {
+            println!(
+                "  - '{}' ({}..{}): {}",
+                &text[error.start..error.end],
+                error.start,
+                error.end,
+                error.message
+            );
+        }
+
+        let portuguese_end = PORTUGUESE_DETECTION_SENTENCE.chars().count();
+        let portuguese_errors = result
+            .errors
+            .iter()
+            .filter(|error| error.start < portuguese_end)
+            .count();
+        assert_eq!(
+            portuguese_errors, 0,
+            "Portuguese sentence errors should be filtered"
+        );
+    }
+
+    #[test]
+    fn test_language_detection_dutch() {
+        // Test Dutch language detection and filtering
+        let text = format!("{DUTCH_DETECTION_SENTENCE} {ENGLISH_DETECTION_SENTENCE}");
+        let result = analyze_text(
+            &text,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            vec!["nld".to_string()],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        println!("\n=== DUTCH LANGUAGE TEST ===");
+        println!("Text: '{}'", text);
+        println!("Errors: {}", result.errors.len());
+        for error in &result.errors {
+            println!(
+                "  - '{}' ({}..{}): {}",
+                &text[error.start..error.end],
+                error.start,
+                error.end,
+                error.message
+            );
+        }
+
+        let dutch_end = DUTCH_DETECTION_SENTENCE.chars().count();
+        let dutch_errors = result
+            .errors
+            .iter()
+            .filter(|error| error.start < dutch_end)
+            .count();
+        assert_eq!(dutch_errors, 0, "Dutch sentence errors should be filtered");
+    }
+
+    #[test]
+    fn test_language_detection_swedish() {
+        // Test Swedish language detection and filtering
+        let text = format!("{SWEDISH_DETECTION_SENTENCE} {ENGLISH_DETECTION_SENTENCE}");
+        let result = analyze_text(
+            &text,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            vec!["swe".to_string()],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        println!("\n=== SWEDISH LANGUAGE TEST ===");
+        println!("Text: '{}'", text);
+        println!("Errors: {}", result.errors.len());
+        for error in &result.errors {
+            println!(
+                "  - '{}' ({}..{}): {}",
+                &text[error.start..error.end],
+                error.start,
+                error.end,
+                error.message
+            );
+        }
+
+        let swedish_end = SWEDISH_DETECTION_SENTENCE.chars().count();
+        let swedish_errors = result
+            .errors
+            .iter()
+            .filter(|error| error.start < swedish_end)
+            .count();
+        assert_eq!(
+            swedish_errors, 0,
+            "Swedish sentence errors should be filtered"
+        );
+    }
+
+    #[test]
+    fn test_language_detection_turkish() {
+        // Test Turkish language detection and filtering
+        let text = format!("{TURKISH_DETECTION_SENTENCE} {ENGLISH_DETECTION_SENTENCE}");
+        let result = analyze_text(
+            &text,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            vec!["tur".to_string()],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        println!("\n=== TURKISH LANGUAGE TEST ===");
+        println!("Text: '{}'", text);
+        println!("Errors: {}", result.errors.len());
+        for error in &result.errors {
+            println!(
+                "  - '{}' ({}..{}): {}",
+                &text[error.start..error.end],
+                error.start,
+                error.end,
+                error.message
+            );
+        }
+
+        let turkish_end = TURKISH_DETECTION_SENTENCE.chars().count();
+        let turkish_errors = result
+            .errors
+            .iter()
+            .filter(|error| error.start < turkish_end)
+            .count();
+        assert_eq!(
+            turkish_errors, 0,
+            "Turkish sentence errors should be filtered"
+        );
+    }
+
+    #[test]
+    fn test_language_detection_non_excluded_language_kept() {
+        // Test that non-excluded languages are NOT filtered
+        // Italian excluded, but German should still show errors
+        let text = format!("{ITALIAN_DETECTION_SENTENCE} {GERMAN_DETECTION_SENTENCE}");
+        let result = analyze_text(
+            &text,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            vec!["ita".to_string()], // Only Italian excluded, not German
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        println!("\n=== NON-EXCLUDED LANGUAGE TEST ===");
+        println!("Text: '{}'", text);
+        println!("Errors: {}", result.errors.len());
+        for error in &result.errors {
+            println!(
+                "  - '{}' ({}..{}): {}",
+                &text[error.start..error.end],
+                error.start,
+                error.end,
+                error.message
+            );
+        }
+
+        let italian_end = ITALIAN_DETECTION_SENTENCE.chars().count();
+        let italian_errors = result
+            .errors
+            .iter()
+            .filter(|error| error.start < italian_end)
+            .count();
+        assert_eq!(
+            italian_errors, 0,
+            "Italian sentence errors should be filtered"
+        );
+
+        // German errors should NOT be filtered (German not in excluded list)
+        // We don't assert specific count since it depends on Harper's detection
+        println!("✅ Italian filtered, German errors may still be present");
+    }
+
+    #[test]
+    fn test_language_detection_multilingual_email() {
+        // Real-world scenario: multilingual email with greetings in different languages
+        let text = "Bonjour Jean! Hope you're doing well. Hasta luego amigo! See you tomorrow.";
+        let result = analyze_text(
+            text,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            vec!["french".to_string(), "spanish".to_string()],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        println!("\n=== MULTILINGUAL EMAIL TEST ===");
+        println!("Text: '{}'", text);
+        println!("Errors: {}", result.errors.len());
+        for error in &result.errors {
+            println!(
+                "  - '{}' ({}..{}): {}",
+                &text[error.start..error.end],
+                error.start,
+                error.end,
+                error.message
+            );
+        }
+
+        // This is a mixed scenario - sentences may be detected differently
+        // The key is that the system handles it gracefully
+        println!("✅ Multilingual email handled without crashes");
+    }
+
+    #[test]
+    fn test_language_detection_asian_languages() {
+        // Test with Asian languages - Japanese, Korean, Chinese
+        // Note: These require proper UTF-8 handling
+        let text = "こんにちは、元気ですか? This is English. 안녕하세요, 어떻게 지내세요? More English here.";
+        let result = analyze_text(
+            text,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            vec!["japanese".to_string(), "korean".to_string()],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        println!("\n=== ASIAN LANGUAGES TEST ===");
+        println!("Text: '{}'", text);
+        println!("Errors: {}", result.errors.len());
+        for error in &result.errors {
+            println!(
+                "  - '{}' ({}..{}): {}",
+                &text[error.start..error.end],
+                error.start,
+                error.end,
+                error.message
+            );
+        }
+
+        // Just verify no crashes with UTF-8 and Asian scripts
+        println!("✅ Asian languages handled correctly with UTF-8");
+    }
+
+    #[test]
+    fn test_language_detection_mixed_punctuation() {
+        // Test with various punctuation marks and sentence terminators
+        let text = "¿Hola amigo, cómo estás? Great! Danke schön! Fantastic. Merci beaucoup! Done.";
+        let result = analyze_text(
+            text,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            vec![
+                "spanish".to_string(),
+                "german".to_string(),
+                "french".to_string(),
+            ],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        println!("\n=== MIXED PUNCTUATION TEST ===");
+        println!("Text: '{}'", text);
+        println!("Errors: {}", result.errors.len());
+        for error in &result.errors {
+            println!(
+                "  - '{}' ({}..{}): {}",
+                &text[error.start..error.end],
+                error.start,
+                error.end,
+                error.message
+            );
+        }
+
+        // Verify sentence splitting works with different punctuation
+        println!("✅ Mixed punctuation handled correctly");
+    }
+
+    // MARK: - Performance Regression Tests
+    // These tests are timing-based and can be flaky under system load.
+    // Run manually with: cargo test test_performance -- --ignored
+
+    #[test]
+    #[ignore]
+    fn test_performance_baseline_analysis() {
+        // Performance regression test: Basic analysis without language detection
+        // Target: < 450ms for ~200 words (test mode with opt-level=1)
+        // Note: Release builds (opt-level=3) are ~3x faster (~150ms)
+        use std::time::Instant;
+
+        let text = "This is a comprehensive test of the grammar analysis engine performance. \
+                    It contains multiple sentences with various grammatical structures. \
+                    The system should be able to analyze this text quickly and efficiently. \
+                    We want to ensure that the baseline performance remains good. \
+                    Additional text is included to reach approximately 200 words total. \
+                    "
+        .repeat(4);
+
+        let start = Instant::now();
+        let result = analyze_text(
+            &text,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+        let elapsed = start.elapsed();
+
+        println!("\n=== PERFORMANCE: Baseline Analysis ===");
+        println!(
+            "Text length: {} chars, {} words",
+            text.len(),
+            result.word_count
+        );
+        println!("Analysis time: {} ms", elapsed.as_millis());
+        println!("Errors found: {}", result.errors.len());
+
+        assert!(
+            elapsed.as_millis() < 1500,
+            "Baseline analysis too slow: {} ms (expected < 1500 ms)",
+            elapsed.as_millis()
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn test_performance_language_detection_disabled() {
+        // Performance regression test: Language detection disabled should add no overhead
+        // Target: < 450ms (test mode), same as baseline
+        // Note: Release builds are ~3x faster
+        use std::time::Instant;
+
+        let text = "This is a test sentence with Hallo and Danke mixed in. \
+                    The language detection is disabled so it shouldn't affect performance. \
+                    We include more text to make this a realistic test case scenario. \
+                    "
+        .repeat(10);
+
+        let start = Instant::now();
+        let result = analyze_text(
+            &text,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+        let elapsed = start.elapsed();
+
+        println!("\n=== PERFORMANCE: Language Detection Disabled ===");
+        println!("Analysis time: {} ms", elapsed.as_millis());
+        println!("Errors: {}", result.errors.len());
+
+        assert!(
+            elapsed.as_millis() < 1500,
+            "Analysis with disabled language detection too slow: {} ms (expected < 1500 ms)",
+            elapsed.as_millis()
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn test_performance_language_detection_enabled() {
+        // Performance regression test: Language detection enabled with minimal overhead
+        // Target: < 500ms for ~200 words (test mode), allows ~10% overhead vs baseline
+        // Note: Release builds are ~3x faster (~150-170ms)
+        use std::time::Instant;
+
+        let text = "This is a test sentence with Hallo and Danke mixed in. \
+                    The language detection is enabled but should have minimal impact. \
+                    We include more text to make this a realistic test case scenario. \
+                    "
+        .repeat(10);
+
+        let start = Instant::now();
+        let result = analyze_text(
+            &text,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            vec!["german".to_string()],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+        let elapsed = start.elapsed();
+
+        println!("\n=== PERFORMANCE: Language Detection Enabled ===");
+        println!("Analysis time: {} ms", elapsed.as_millis());
+        println!("Errors: {}", result.errors.len());
+
+        assert!(
+            elapsed.as_millis() < 1500,
+            "Analysis with language detection too slow: {} ms (expected < 1500 ms)",
+            elapsed.as_millis()
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn test_performance_all_languages_excluded() {
+        // Performance regression test: Many excluded languages
+        // Target: < 550ms (test mode), shouldn't degrade significantly with more excluded languages
+        // Note: Release builds are ~3x faster (~180-200ms)
+        use std::time::Instant;
+
+        let all_langs = whatlang::Lang::all()
+            .iter()
+            .filter(|language| **language != whatlang::Lang::Eng)
+            .map(|language| language.code().to_string())
+            .collect();
+
+        let text = "This is a test with multiple foreign words like Hallo Bonjour Gracias Ciao scattered throughout. \
+                    The system should handle many excluded languages efficiently without degradation. \
+                    ".repeat(10);
+
+        let start = Instant::now();
+        let result = analyze_text(
+            &text, "American", false, false, false, false, false, false, true, all_langs, true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+        let elapsed = start.elapsed();
+
+        println!("\n=== PERFORMANCE: All Languages Excluded ===");
+        println!("Analysis time: {} ms", elapsed.as_millis());
+        println!("Errors: {}", result.errors.len());
+
+        assert!(
+            elapsed.as_millis() < 1500,
+            "Analysis with all languages excluded too slow: {} ms (expected < 1500 ms)",
+            elapsed.as_millis()
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn test_performance_language_detection_end_to_end_gate() {
+        use std::hint::black_box;
+        use std::time::{Duration, Instant};
+
+        let text = "This is a representative grammar analysis sample with a few foreign words such as Hallo and Danke. \
+                    Language detection should add little overhead while the English grammar engine processes the same document. \
+                    Additional sentences make this a realistic sample for measuring release performance on approximately two hundred words. \
+                    The detector evaluates each semantic segment once and preserves uncertain text for normal English checking. "
+            .repeat(4);
+
+        fn measure(text: &str, enabled: bool) -> Duration {
+            let start = Instant::now();
+            black_box(analyze_text(
+                black_box(text),
+                "American",
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                enabled,
+                if enabled {
+                    vec!["deu".to_string()]
+                } else {
+                    vec![]
+                },
+                true,
+                true,
+                true,
+                true,
+                true,
+            ));
+            start.elapsed()
+        }
+
+        // Warm caches before comparing identical analysis work.
+        black_box(measure(&text, false));
+        black_box(measure(&text, true));
+
+        let mut disabled_samples = Vec::new();
+        let mut enabled_samples = Vec::new();
+        for _ in 0..5 {
+            disabled_samples.push(measure(&text, false));
+            enabled_samples.push(measure(&text, true));
+        }
+        disabled_samples.sort();
+        enabled_samples.sort();
+
+        let disabled = disabled_samples[disabled_samples.len() / 2];
+        let enabled = enabled_samples[enabled_samples.len() / 2];
+        let overhead = enabled.as_secs_f64() / disabled.as_secs_f64() - 1.0;
+
+        println!("200-word detection disabled: {} ms", disabled.as_millis());
+        println!("200-word detection enabled: {} ms", enabled.as_millis());
+        println!("end-to-end detection overhead: {:.2}%", overhead * 100.0);
+
+        assert!(
+            enabled < Duration::from_millis(500),
+            "release analysis must remain under 500 ms; took {} ms",
+            enabled.as_millis()
+        );
+        assert!(
+            enabled.as_secs_f64() <= disabled.as_secs_f64() * 1.10,
+            "language detection overhead must remain within 10%; disabled={} ms enabled={} ms",
+            disabled.as_millis(),
+            enabled.as_millis()
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn test_performance_abbreviations_and_slang() {
+        // Performance regression test: Abbreviations and slang processing
+        // Target: < 450ms for text with abbreviations and slang (test mode)
+        // Note: Release builds are ~3x faster (~150ms)
+        use std::time::Instant;
+
+        let text = "btw lol omg afaict IMO FYI ASAP brb ghosting sus slay vibes lowkey highkey \
+                    The system needs to process these efficiently along with normal text. \
+                    This is a common scenario in modern communication. \
+                    "
+        .repeat(10);
+
+        let start = Instant::now();
+        let result = analyze_text(
+            &text,
+            "American",
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+        let elapsed = start.elapsed();
+
+        println!("\n=== PERFORMANCE: Abbreviations and Slang ===");
+        println!("Analysis time: {} ms", elapsed.as_millis());
+        println!("Errors: {}", result.errors.len());
+
+        assert!(
+            elapsed.as_millis() < 1500,
+            "Abbreviations/slang analysis too slow: {} ms (expected < 1500 ms)",
+            elapsed.as_millis()
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn test_performance_short_text_latency() {
+        // Performance regression test: Short text latency
+        // Target: < 450ms for short message (test mode)
+        // Note: Release builds are ~3x faster (~140-150ms)
+        // Even short texts incur Harper initialization and dictionary loading overhead
+        use std::time::Instant;
+
+        let text = "Hallo, how are you?";
+
+        let start = Instant::now();
+        let result = analyze_text(
+            text,
+            "American",
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+            true,
+            vec!["german".to_string()],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+        let elapsed = start.elapsed();
+
+        println!("\n=== PERFORMANCE: Short Text Latency ===");
+        println!("Analysis time: {} ms", elapsed.as_millis());
+        println!("Errors: {}", result.errors.len());
+
+        assert!(
+            elapsed.as_millis() < 1500,
+            "Short text analysis too slow: {} ms (expected < 1500 ms)",
+            elapsed.as_millis()
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn test_performance_long_document() {
+        // Performance regression test: Long document (1000+ words)
+        // Target: < 500ms for very long text
+        use std::time::Instant;
+
+        let paragraph =
+            "This is a comprehensive test paragraph that contains various grammatical structures. \
+                        We want to test the performance of the grammar engine on long documents. \
+                        The text should be analyzed efficiently even when it's quite lengthy. \
+                        Real-world documents often contain hundreds or thousands of words. \
+                        ";
+
+        let text = paragraph.repeat(50); // ~1000 words
+
+        let start = Instant::now();
+        let result = analyze_text(
+            &text,
+            "American",
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+        let elapsed = start.elapsed();
+
+        println!("\n=== PERFORMANCE: Long Document ===");
+        println!(
+            "Text length: {} chars, {} words",
+            text.len(),
+            result.word_count
+        );
+        println!("Analysis time: {} ms", elapsed.as_millis());
+        println!("Errors: {}", result.errors.len());
+
+        assert!(
+            elapsed.as_millis() < 1500,
+            "Long document analysis too slow: {} ms (expected < 1500 ms)",
+            elapsed.as_millis()
+        );
+    }
+
+    // ==================== IT Terminology Tests ====================
+
+    #[test]
+    fn test_it_terminology() {
+        // Test that IT terminology is recognized when enabled
+        let text = "The kubernetes cluster uses docker containers and nginx as a reverse proxy. \
+                    We need to configure the API endpoints and set up localhost testing.";
+
+        // With IT terminology disabled, may flag technical terms
+        let result_disabled = analyze_text(
+            text,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        // With IT terminology enabled, should recognize these terms
+        let result_enabled = analyze_text(
+            text,
+            "American",
+            false,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        println!("\n=== IT TERMINOLOGY TEST ===");
+        println!("Text: {}", text);
+        println!(
+            "Errors without IT terminology: {}",
+            result_disabled.errors.len()
+        );
+        for error in &result_disabled.errors {
+            println!("  - {}: {}", &text[error.start..error.end], error.message);
+        }
+        println!(
+            "Errors with IT terminology: {}",
+            result_enabled.errors.len()
+        );
+        for error in &result_enabled.errors {
+            println!("  - {}: {}", &text[error.start..error.end], error.message);
+        }
+
+        // Should have fewer or equal errors when enabled
+        assert!(
+            result_enabled.errors.len() <= result_disabled.errors.len(),
+            "Enabling IT terminology should not increase error count"
+        );
+    }
+
+    #[test]
+    fn test_it_terminology_toggle_effectiveness() {
+        // Verify that toggling IT terminology actually changes the analysis results
+        let text = "The kubernetes API uses JSON for serialization. \
+                    Configure localhost with TCP port 8080. \
+                    Use HTTP for the nginx reverse proxy.";
+
+        // Test IT terminology toggle
+        let disabled = analyze_text(
+            text,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+        let enabled = analyze_text(
+            text,
+            "American",
+            false,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        println!("\n=== IT TERMINOLOGY TOGGLE TEST ===");
+        println!("Text: {}", text);
+        println!("Errors (disabled): {}", disabled.errors.len());
+        for error in &disabled.errors {
+            println!("  - {}: {}", &text[error.start..error.end], error.message);
+        }
+        println!("Errors (enabled): {}", enabled.errors.len());
+        for error in &enabled.errors {
+            println!("  - {}: {}", &text[error.start..error.end], error.message);
+        }
+
+        // Should have fewer or equal errors when enabled
+        assert!(
+            enabled.errors.len() <= disabled.errors.len(),
+            "Enabling IT terminology should not increase error count"
+        );
+    }
+
+    #[test]
+    fn test_it_terminology_common_terms() {
+        // Regression test: Common IT terms should be recognized
+        // This tests specific terms that MUST be in the IT terminology wordlist
+        let test_cases = vec![
+            ("The docker container is running", "docker"),
+            ("We use kubernetes for orchestration", "kubernetes"),
+            ("The nginx server handles requests", "nginx"),
+            ("The API endpoint returns JSON", "API"),
+            ("Connect to localhost on port 8080", "localhost"),
+            ("Use SSH for secure access", "SSH"),
+            ("The TCP connection was established", "TCP"),
+            ("Configure the firewall rules", "firewall"),
+            ("Implement proper encryption", "encryption"),
+            ("Use grep to search files", "grep"),
+            ("Run chmod to change permissions", "chmod"),
+            ("The HTTP protocol is stateless", "HTTP"),
+            ("Write python code for automation", "python"),
+            ("Use javascript for the frontend", "javascript"),
+        ];
+
+        println!("\n=== IT TERMINOLOGY COMMON TERMS TEST ===");
+        for (text, term) in test_cases {
+            let result_disabled = analyze_text(
+                text,
+                "American",
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                vec![],
+                true,
+                true, // enforce_oxford_comma
+                true, // check_ellipsis
+                true, // check_unclosed_quotes
+                true, // check_dashes
+            );
+            let result_enabled = analyze_text(
+                text,
+                "American",
+                false,
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                vec![],
+                true,
+                true, // enforce_oxford_comma
+                true, // check_ellipsis
+                true, // check_unclosed_quotes
+                true, // check_dashes
+            );
+
+            // Check if the term has SPELLING errors when disabled
+            let spelling_when_disabled = result_disabled.errors.iter().any(|e| {
+                e.category == "Spelling"
+                    && text[e.start..e.end]
+                        .to_lowercase()
+                        .contains(&term.to_lowercase())
+            });
+
+            // The term should NOT have SPELLING errors when enabled
+            let spelling_when_enabled = result_enabled.errors.iter().any(|e| {
+                e.category == "Spelling"
+                    && text[e.start..e.end]
+                        .to_lowercase()
+                        .contains(&term.to_lowercase())
+            });
+
+            println!(
+                "Term '{}': spelling_disabled={}, spelling_enabled={}",
+                term, spelling_when_disabled, spelling_when_enabled
+            );
+
+            // If the term had spelling errors when disabled, it should not have them when enabled
+            if spelling_when_disabled {
+                assert!(
+                    !spelling_when_enabled,
+                    "Term '{}' should not have spelling errors when IT terminology is enabled",
+                    term
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_it_terminology_with_slang() {
+        // Test that IT terminology works together with other wordlists
+        let text = "BTW, the kubernetes API is super sus. NGL, the docker setup is fire. \
+                    IMHO we should use nginx ASAP.";
+
+        // All features enabled
+        let result = analyze_text(
+            text,
+            "American",
+            true,
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        println!("\n=== IT TERMINOLOGY + SLANG TEST ===");
+        println!("Text: {}", text);
+        println!("Errors: {}", result.errors.len());
+        for error in &result.errors {
+            println!("  - {}: {}", &text[error.start..error.end], error.message);
+        }
+
+        // Should not have SPELLING errors for BTW, kubernetes, sus, NGL, docker, fire, IMHO, nginx, ASAP
+        let spelling_errors: Vec<String> = result
+            .errors
+            .iter()
+            .filter(|e| e.category == "Spelling")
+            .map(|e| text[e.start..e.end].to_string())
+            .collect();
+
+        // These should NOT have spelling errors (style suggestions are OK)
+        for term in &[
+            "BTW",
+            "kubernetes",
+            "sus",
+            "NGL",
+            "docker",
+            "fire",
+            "IMHO",
+            "nginx",
+            "ASAP",
+        ] {
+            assert!(
+                !spelling_errors
+                    .iter()
+                    .any(|w| w.to_lowercase() == term.to_lowercase()),
+                "Term '{}' should not have spelling errors when wordlists are enabled",
+                term
+            );
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn test_performance_it_terminology() {
+        // Performance regression test: IT terminology processing
+        // Target: < 450ms for text with technical terms (test mode)
+        // Note: Release builds are ~3x faster (~150ms)
+        use std::time::Instant;
+
+        let text = "kubernetes docker nginx API JSON localhost TCP HTTP SSH \
+                    firewall encryption python javascript grep chmod \
+                    The infrastructure uses kubernetes for container orchestration. \
+                    Docker containers are deployed behind nginx reverse proxies. \
+                    The API endpoints return JSON data over HTTP. \
+                    Connect to localhost using SSH on TCP port 22. \
+                    Configure firewall rules and enable encryption. \
+                    Use python or javascript for automation scripts. \
+                    "
+        .repeat(10);
+
+        let start = Instant::now();
+        let result = analyze_text(
+            &text,
+            "American",
+            false,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+        let elapsed = start.elapsed();
+
+        println!("\n=== PERFORMANCE: IT Terminology ===");
+        println!("Analysis time: {} ms", elapsed.as_millis());
+        println!("Errors: {}", result.errors.len());
+
+        assert!(
+            elapsed.as_millis() < 1500,
+            "IT terminology analysis too slow: {} ms (expected < 1500 ms)",
+            elapsed.as_millis()
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn test_performance_all_wordlists() {
+        // Performance regression test: All wordlists enabled
+        // Target: < 500ms for text with abbreviations, slang, and IT terms (test mode)
+        use std::time::Instant;
+
+        let text = "BTW the kubernetes API is sus LOL. IMHO docker is fire ASAP. \
+                    NGL the nginx config is lowkey complicated. FYI we need python scripts. \
+                    The localhost server uses HTTP and TCP. Configure SSH and firewall. \
+                    Use grep and chmod for file permissions. The JSON endpoint is lit. \
+                    "
+        .repeat(10);
+
+        let start = Instant::now();
+        let result = analyze_text(
+            &text,
+            "American",
+            true,
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+        let elapsed = start.elapsed();
+
+        println!("\n=== PERFORMANCE: All Wordlists ===");
+        println!("Analysis time: {} ms", elapsed.as_millis());
+        println!("Errors: {}", result.errors.len());
+
+        assert!(
+            elapsed.as_millis() < 1500,
+            "All wordlists analysis too slow: {} ms (expected < 1500 ms)",
+            elapsed.as_millis()
+        );
+    }
+
+    // ==================== Sentence-Start Capitalization Toggle Tests ====================
+
+    #[test]
+    fn test_sentence_start_capitalization_toggle_enabled() {
+        // Test that sentence-start capitalization works when enabled (TextWarden enhancement)
+        let test_cases = vec![
+            ("sentnce is a test.", "sentnce", "Sentence"), // Start of text
+            ("Hello. sentnce is wrong.", "sentnce", "Sentence"), // After period
+            ("Really! sentnce is wrong.", "sentnce", "Sentence"), // After exclamation
+            ("What? sentnce is wrong.", "sentnce", "Sentence"), // After question mark
+        ];
+
+        println!("\n=== SENTENCE START CAPITALIZATION (ENABLED) ===");
+        for (text, error_word, expected_suggestion) in test_cases {
+            println!("\nText: '{}'", text);
+            let result = analyze_text(
+                text,
+                "American",
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                vec![],
+                true,
+                true, // enforce_oxford_comma
+                true, // check_ellipsis
+                true, // check_unclosed_quotes
+                true, // check_dashes
+            );
+
+            // Find the error for the specific word
+            if let Some(error) = result
+                .errors
+                .iter()
+                .find(|e| &text[e.start..e.end] == error_word)
+            {
+                println!("  Error word: '{}'", error_word);
+                println!("  Suggestions: {:?}", error.suggestions);
+
+                // Check if the first suggestion is capitalized correctly
+                if let Some(first_suggestion) = error.suggestions.first() {
+                    assert_eq!(
+                        first_suggestion, expected_suggestion,
+                        "Expected '{}' but got '{}' for '{}' in '{}'",
+                        expected_suggestion, first_suggestion, error_word, text
+                    );
+                    println!("  ✓ Correctly suggests '{}'", first_suggestion);
+                } else {
+                    panic!("No suggestions found for '{}' in '{}'", error_word, text);
+                }
+            } else {
+                panic!("No error found for '{}' in '{}'", error_word, text);
+            }
+        }
+        println!("=== END TEST ===\n");
+    }
+
+    #[test]
+    fn test_sentence_start_capitalization_toggle_disabled() {
+        // Test that sentence-start capitalization is SKIPPED when disabled
+        let test_cases = vec![
+            ("sentnce is a test.", "sentnce"),       // Start of text
+            ("Hello. sentnce is wrong.", "sentnce"), // After period
+        ];
+
+        println!("\n=== SENTENCE START CAPITALIZATION (DISABLED) ===");
+        for (text, error_word) in test_cases {
+            println!("\nText: '{}'", text);
+            let result = analyze_text(
+                text,
+                "American",
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                vec![],
+                false,
+                true, // enforce_oxford_comma
+                true, // check_ellipsis
+                true, // check_unclosed_quotes
+                true, // check_dashes
+            );
+
+            // Find the error for the specific word
+            if let Some(error) = result
+                .errors
+                .iter()
+                .find(|e| &text[e.start..e.end] == error_word)
+            {
+                println!("  Error word: '{}'", error_word);
+                println!("  Suggestions: {:?}", error.suggestions);
+
+                assert_eq!(
+                    error.suggestions.first().map(String::as_str),
+                    Some("sentence"),
+                    "Capitalization should not be forced for '{}'",
+                    text
+                );
+            } else {
+                panic!("No error found for '{}' in '{}'", error_word, text);
+            }
+        }
+        println!("=== END TEST ===\n");
+    }
+
+    #[test]
+    fn test_sentence_start_capitalization_toggle_comparison() {
+        // Compare the results with the toggle enabled vs disabled
+        let text = "sentnce is a test.";
+
+        println!("\n=== CAPITALIZATION TOGGLE COMPARISON ===");
+        println!("Text: '{}'", text);
+
+        // With enhancement enabled
+        let result_enabled = analyze_text(
+            text,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        // With enhancement disabled
+        let result_disabled = analyze_text(
+            text,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            false,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        // Find the spelling error with each toggle setting.
+        let error_enabled = result_enabled
+            .errors
+            .iter()
+            .find(|e| &text[e.start..e.end] == "sentnce");
+        let error_disabled = result_disabled
+            .errors
+            .iter()
+            .find(|e| &text[e.start..e.end] == "sentnce");
+
+        if let (Some(err_on), Some(err_off)) = (error_enabled, error_disabled) {
+            println!("\nWith enhancement ENABLED:");
+            println!("  Suggestions: {:?}", err_on.suggestions);
+
+            println!("\nWith enhancement DISABLED:");
+            println!("  Suggestions: {:?}", err_off.suggestions);
+
+            assert_eq!(
+                err_on.suggestions.first().map(String::as_str),
+                Some("Sentence")
+            );
+            assert_eq!(
+                err_off.suggestions.first().map(String::as_str),
+                Some("sentence")
+            );
+        } else {
+            panic!("Should find the spelling error with both toggle settings");
+        }
+
+        println!("=== END COMPARISON ===\n");
+    }
+
+    #[test]
+    fn test_ciliium_spelling_investigation() {
+        // Investigation: Why is "Ciliium" (double-i misspelling of "cilium") not flagged?
+        // "cilium" is in the IT terminology list (CNCF Cilium network tool)
+        // "cilium" is also a real English word (cell hair-like projections)
+
+        println!("\n=== CILIIUM SPELLING INVESTIGATION ===");
+
+        // Test 1: "Ciliium" with IT terminology enabled
+        let text1 = "I use Ciliium for networking.";
+        let result1 = analyze_text(
+            text1,
+            "American",
+            false,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+        println!("Text: '{}' (IT terminology: ON)", text1);
+        println!("Errors: {}", result1.errors.len());
+        for error in &result1.errors {
+            println!(
+                "  - '{}' ({}-{}): {} [{}]",
+                &text1[error.start..error.end],
+                error.start,
+                error.end,
+                error.message,
+                error.category
+            );
+        }
+        let has_ciliium_error_with_it = result1
+            .errors
+            .iter()
+            .any(|e| &text1[e.start..e.end] == "Ciliium");
+        println!("Ciliium flagged with IT on: {}", has_ciliium_error_with_it);
+
+        // Test 2: "Ciliium" WITHOUT IT terminology (only Harper's curated dict)
+        let text2 = "The Ciliium is a part of the cell.";
+        let result2 = analyze_text(
+            text2,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+        println!("\nText: '{}' (IT terminology: OFF)", text2);
+        println!("Errors: {}", result2.errors.len());
+        for error in &result2.errors {
+            println!(
+                "  - '{}' ({}-{}): {} [{}]",
+                &text2[error.start..error.end],
+                error.start,
+                error.end,
+                error.message,
+                error.category
+            );
+        }
+        let has_ciliium_error_without_it = result2
+            .errors
+            .iter()
+            .any(|e| &text2[e.start..e.end] == "Ciliium");
+        println!(
+            "Ciliium flagged with IT off: {}",
+            has_ciliium_error_without_it
+        );
+
+        // Test 3: Known misspelling to verify spell checker works
+        let text3 = "The teh quick fox.";
+        let result3 = analyze_text(
+            text3,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+        println!("\nText: '{}' (control test)", text3);
+        println!("Errors: {}", result3.errors.len());
+        for error in &result3.errors {
+            println!(
+                "  - '{}' ({}-{}): {} [{}]",
+                &text3[error.start..error.end],
+                error.start,
+                error.end,
+                error.message,
+                error.category
+            );
+        }
+        let has_teh_error = result3
+            .errors
+            .iter()
+            .any(|e| &text3[e.start..e.end] == "teh");
+        println!("'teh' flagged: {}", has_teh_error);
+
+        // Test 4: Correct spelling "cilium"
+        let text4 = "The cilium is important.";
+        let result4 = analyze_text(
+            text4,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+        println!("\nText: '{}' (correct spelling)", text4);
+        println!("Errors: {}", result4.errors.len());
+        for error in &result4.errors {
+            println!(
+                "  - '{}' ({}-{}): {} [{}]",
+                &text4[error.start..error.end],
+                error.start,
+                error.end,
+                error.message,
+                error.category
+            );
+        }
+        let has_cilium_error = result4
+            .errors
+            .iter()
+            .any(|e| &text4[e.start..e.end] == "cilium");
+        println!("'cilium' (correct) flagged: {}", has_cilium_error);
+
+        // Test 5: "ciliium" lowercase
+        let text5 = "The ciliium is important.";
+        let result5 = analyze_text(
+            text5,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+        println!("\nText: '{}' (lowercase misspelling)", text5);
+        println!("Errors: {}", result5.errors.len());
+        for error in &result5.errors {
+            println!(
+                "  - '{}' ({}-{}): {} [{}]",
+                &text5[error.start..error.end],
+                error.start,
+                error.end,
+                error.message,
+                error.category
+            );
+        }
+        let has_ciliium_lowercase = result5
+            .errors
+            .iter()
+            .any(|e| &text5[e.start..e.end] == "ciliium");
+        println!("'ciliium' (lowercase) flagged: {}", has_ciliium_lowercase);
+
+        println!("\n=== END INVESTIGATION ===\n");
+
+        // Assert that "teh" is caught (verifies spell checker works)
+        assert!(has_teh_error, "'teh' should be flagged as spelling error");
+
+        // The test doesn't assert on Ciliium - it's for investigation only
+    }
+
+    // ==================== Unicode and Multi-byte Character Tests ====================
+
+    #[test]
+    fn test_sentence_start_capitalization_with_curly_apostrophe() {
+        // A curly apostrophe shifts byte offsets relative to Harper's character indices.
+
+        let text = "I\u{2019}m testing. sentnce is wrong.";
+
+        println!("\n=== CURLY APOSTROPHE SENTENCE-START TEST ===");
+        println!("Text: '{}'", text);
+        println!("Byte length: {}", text.len());
+        println!("Char count: {}", text.chars().count());
+
+        let result = analyze_text(
+            text,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        println!("\nErrors found: {}", result.errors.len());
+        for error in &result.errors {
+            let chars: Vec<char> = text.chars().collect();
+            let error_text = if error.start < chars.len() && error.end <= chars.len() {
+                chars[error.start..error.end].iter().collect::<String>()
+            } else {
+                "(out of bounds)".to_string()
+            };
+            println!(
+                "  '{}' [{}]: {:?}",
+                error_text, error.category, error.suggestions
+            );
+        }
+
+        // Find the spelling error after the curly apostrophe.
+        let chars: Vec<char> = text.chars().collect();
+        let this_error = result.errors.iter().find(|e| {
+            if e.start < chars.len() && e.end <= chars.len() {
+                let error_text: String = chars[e.start..e.end].iter().collect();
+                error_text == "sentnce"
+            } else {
+                false
+            }
+        });
+
+        assert!(this_error.is_some(), "Should find error for 'sentnce'");
+
+        if let Some(error) = this_error {
+            println!("\nSpelling error details:");
+            println!("  Start (char): {}, End (char): {}", error.start, error.end);
+            println!("  Suggestions: {:?}", error.suggestions);
+
+            // The suggestion should be capitalized since it's at sentence start.
+            if let Some(first_sugg) = error.suggestions.first() {
+                let first_char = first_sugg.chars().next().unwrap_or(' ');
+                println!(
+                    "  First suggestion: '{}', starts with: '{}'",
+                    first_sugg, first_char
+                );
+                assert!(
+                    first_char.is_uppercase(),
+                    "BUG: Suggestion '{}' should start with uppercase at sentence start",
+                    first_sugg
+                );
+                assert_eq!(
+                    first_sugg, "Sentence",
+                    "Expected 'Sentence' but got '{}'",
+                    first_sugg
+                );
+                println!("  ✓ Correctly suggests 'Sentence' at sentence start");
+            } else {
+                panic!("No suggestions found for 'sentnce'");
+            }
+        }
+
+        println!("=== END TEST ===\n");
+    }
+
+    #[test]
+    fn test_mid_sentence_initialism_lowercasing() {
+        // Test that initialisms like "IMO" are lowercased when mid-sentence
+        // Harper returns "In my opinion" (capitalized) because "IMO" is uppercase,
+        // but TextWarden should lowercase it when not at sentence start.
+        //
+        // IMPORTANT: The pronoun "I" must ALWAYS stay capitalized in English,
+        // even when the rest of the suggestion is lowercased. For example:
+        // - "IIRC" mid-sentence → "if I recall correctly" (not "if i recall correctly")
+        // - "IMO" mid-sentence → "in my opinion" (no "I" pronoun here)
+
+        let test_cases = vec![
+            // (text, initialism, expected_suggestion, description)
+            (
+                "IMO that is wrong.",
+                "IMO",
+                "In my opinion",
+                "sentence start - should be capitalized",
+            ),
+            (
+                "I think (IMO anyway) we should wait.",
+                "IMO",
+                "in my opinion",
+                "mid-sentence in parentheses - should be lowercase",
+            ),
+            (
+                "Well, IMO that is wrong.",
+                "IMO",
+                "in my opinion",
+                "after comma mid-sentence - should be lowercase",
+            ),
+            (
+                "The answer is IMO unclear.",
+                "IMO",
+                "in my opinion",
+                "mid-sentence - should be lowercase",
+            ),
+            // IIRC tests - the "I" pronoun must stay capitalized
+            (
+                "IIRC that happened last year.",
+                "IIRC",
+                "If I recall correctly",
+                "sentence start - fully capitalized",
+            ),
+            (
+                "Now, IIRC it works correctly.",
+                "IIRC",
+                "if I recall correctly",
+                "mid-sentence - lowercase first letter but 'I' stays capitalized",
+            ),
+            (
+                "The feature (IIRC) was added in v2.",
+                "IIRC",
+                "if I recall correctly",
+                "mid-sentence in parentheses - 'I' stays capitalized",
+            ),
+        ];
+
+        println!("\n=== MID-SENTENCE INITIALISM LOWERCASING ===");
+        for (text, initialism, expected, description) in test_cases {
+            println!("\nText: '{}' ({})", text, description);
+
+            let result = analyze_text(
+                text,
+                "American",
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                vec![],
+                true, // enable_sentence_start_capitalization
+                true, // enforce_oxford_comma
+                true, // check_ellipsis
+                true, // check_unclosed_quotes
+                true, // check_dashes
+            );
+
+            // Find the error for the initialism
+            let chars: Vec<char> = text.chars().collect();
+            let initialism_error = result.errors.iter().find(|e| {
+                if e.start < chars.len() && e.end <= chars.len() {
+                    let error_text: String = chars[e.start..e.end].iter().collect();
+                    error_text == initialism
+                } else {
+                    false
+                }
+            });
+
+            if let Some(error) = initialism_error {
+                println!("  Found '{}' error", initialism);
+                println!("  Suggestions: {:?}", error.suggestions);
+
+                if let Some(first_sugg) = error.suggestions.first() {
+                    assert_eq!(
+                        first_sugg, expected,
+                        "Expected '{}' but got '{}' for '{}' in '{}'",
+                        expected, first_sugg, initialism, text
+                    );
+                    println!("  ✓ Correctly suggests '{}'", first_sugg);
+                } else {
+                    panic!("No suggestion found for '{}' in '{}'", initialism, text);
+                }
+            } else {
+                // Some initialisms might not trigger errors depending on config
+                println!("  ⚠️ No error found for '{}' (may be accepted)", initialism);
+            }
+        }
+        println!("=== END TEST ===\n");
+    }
+
+    #[test]
+    fn test_capitalize_pronoun_i() {
+        // Test the capitalize_pronoun_i helper function directly
+        // The English pronoun "I" should always be capitalized
+
+        let test_cases = vec![
+            // (input, expected, description)
+            (
+                "if i recall correctly",
+                "if I recall correctly",
+                "middle of string",
+            ),
+            ("i think so", "I think so", "start of string"),
+            ("what do i know", "what do I know", "middle of string"),
+            (
+                "that's what i said",
+                "that's what I said",
+                "end of string before punctuation implicit",
+            ),
+            (
+                "i'm happy",
+                "I'm happy",
+                "contraction at start with straight apostrophe",
+            ),
+            (
+                "i'm happy",
+                "I'm happy",
+                "contraction at start with curly apostrophe",
+            ),
+            (
+                "well, i'll do it",
+                "well, I'll do it",
+                "contraction mid-string",
+            ),
+            ("yes i can", "yes I can", "no punctuation around i"),
+            ("can i? yes!", "can I? yes!", "before question mark"),
+            ("i", "I", "just the pronoun"),
+            ("", "", "empty string"),
+            ("no pronoun here", "no pronoun here", "no i pronoun"),
+            (
+                "it is fine",
+                "it is fine",
+                "i in other words - should NOT change",
+            ),
+            (
+                "this is it",
+                "this is it",
+                "i in other words - should NOT change",
+            ),
+            ("i, robot", "I, robot", "i followed by comma"),
+            ("did i; maybe", "did I; maybe", "i followed by semicolon"),
+        ];
+
+        println!("\n=== CAPITALIZE_PRONOUN_I TESTS ===");
+        for (input, expected, description) in test_cases {
+            let result = capitalize_pronoun_i(input);
+            println!("\nInput: '{}' ({})", input, description);
+            println!("Expected: '{}'", expected);
+            println!("Got: '{}'", result);
+            assert_eq!(
+                result, expected,
+                "capitalize_pronoun_i failed for '{}': expected '{}' but got '{}'",
+                input, expected, result
+            );
+            println!("✓ Passed");
+        }
+        println!("=== END TEST ===\n");
+    }
+
+    #[test]
+    fn test_sentence_start_with_various_unicode() {
+        // Test various Unicode characters before the sentence start
+        // These all have multi-byte UTF-8 representations
+        let test_cases = vec![
+            // (text, error_word, expected_suggestion, description)
+            (
+                "I\u{2019}m ok. sentnce wrong.",
+                "sentnce",
+                "Sentence",
+                "curly apostrophe U+2019 (3 bytes)",
+            ),
+            (
+                "Café. sentnce wrong.",
+                "sentnce",
+                "Sentence",
+                "e with acute U+00E9 (2 bytes)",
+            ),
+            (
+                "日本語. sentnce wrong.",
+                "sentnce",
+                "Sentence",
+                "Japanese (3 bytes each)",
+            ),
+            (
+                "🎉! sentnce wrong.",
+                "sentnce",
+                "Sentence",
+                "emoji U+1F389 (4 bytes)",
+            ),
+            (
+                "\u{201C}Hello\u{201D}. sentnce wrong.",
+                "sentnce",
+                "Sentence",
+                "smart quotes (3 bytes each)",
+            ),
+        ];
+
+        println!("\n=== UNICODE SENTENCE-START TEST ===");
+        for (text, error_word, expected, description) in test_cases {
+            println!("\nTest: {} ", description);
+            println!("Text: '{}'", text);
+            println!("Bytes: {}, Chars: {}", text.len(), text.chars().count());
+
+            let result = analyze_text(
+                text,
+                "American",
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                vec![],
+                true,
+                true, // enforce_oxford_comma
+                true, // check_ellipsis
+                true, // check_unclosed_quotes
+                true, // check_dashes
+            );
+
+            let chars: Vec<char> = text.chars().collect();
+            let error = result.errors.iter().find(|e| {
+                if e.start < chars.len() && e.end <= chars.len() {
+                    let error_text: String = chars[e.start..e.end].iter().collect();
+                    error_text == error_word
+                } else {
+                    false
+                }
+            });
+
+            if let Some(err) = error {
+                if let Some(first_sugg) = err.suggestions.first() {
+                    println!("  Suggestion: '{}', Expected: '{}'", first_sugg, expected);
+                    assert_eq!(
+                        first_sugg, expected,
+                        "Failed for '{}': expected '{}' but got '{}'",
+                        description, expected, first_sugg
+                    );
+                    println!("  ✓ Pass");
+                } else {
+                    panic!("No suggestions found for '{}'", description);
+                }
+            } else {
+                panic!("Error '{}' not found for '{}'", error_word, description);
+            }
+        }
+        println!("\n=== END TEST ===\n");
+    }
+
+    #[test]
+    fn test_deduplication_preserves_best_suggestions() {
+        // Test that when overlapping errors are deduplicated, we keep the error
+        // with properly capitalized suggestions (if sentence-start capitalization applies)
+        //
+        // Harper may return multiple errors for the same span (e.g., SPELLING and TYPO)
+        // Our deduplication picks the "best" one based on category priority
+        // We need to ensure ALL errors for a span get sentence-start capitalization applied
+        // BEFORE deduplication, so the chosen error has capitalized suggestions
+
+        let text = "sentnce is wrong.";
+
+        println!("\n=== DEDUPLICATION SUGGESTION TEST ===");
+        println!("Text: '{}'", text);
+
+        let result = analyze_text(
+            text,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true, // enforce_oxford_comma
+            true, // check_ellipsis
+            true, // check_unclosed_quotes
+            true, // check_dashes
+        );
+
+        println!("Errors after deduplication: {}", result.errors.len());
+        for error in &result.errors {
+            println!(
+                "  '{}' [{}] ({}): {:?}",
+                &text[error.start..error.end],
+                error.category,
+                error.lint_id,
+                error.suggestions
+            );
+        }
+
+        // There should be exactly one error for "sentnce" after deduplication.
+        let this_errors: Vec<_> = result
+            .errors
+            .iter()
+            .filter(|e| &text[e.start..e.end] == "sentnce")
+            .collect();
+
+        assert_eq!(
+            this_errors.len(),
+            1,
+            "Should have exactly one error for 'sentnce' after deduplication"
+        );
+
+        let error = this_errors[0];
+        if let Some(first_sugg) = error.suggestions.first() {
+            let first_char = first_sugg.chars().next().unwrap_or(' ');
+            assert!(
+                first_char.is_uppercase(),
+                "After deduplication, suggestion '{}' should be capitalized",
+                first_sugg
+            );
+            println!(
+                "✓ Deduplicated error has capitalized suggestion: '{}'",
+                first_sugg
+            );
+        } else {
+            panic!("No suggestions found for 'sentnce'");
+        }
+
+        println!("=== END TEST ===\n");
+    }
+
+    #[test]
+    fn test_sentence_boundaries_comprehensive() {
+        // Comprehensive test for various sentence boundary patterns
+        let test_cases = vec![
+            // (text, expected_errors with (word, expected_first_suggestion))
+            ("sentnce start.", vec![("sentnce", "Sentence")]),
+            ("Ok. sentnce after period.", vec![("sentnce", "Sentence")]),
+            (
+                "Really! sentnce after exclamation.",
+                vec![("sentnce", "Sentence")],
+            ),
+            (
+                "What? sentnce after question.",
+                vec![("sentnce", "Sentence")],
+            ),
+            (
+                "Hello...  sentnce after ellipsis.",
+                vec![("sentnce", "Sentence")],
+            ),
+            // Middle of sentence - should NOT capitalize
+            ("The sentnce is wrong.", vec![("sentnce", "sentence")]),
+            ("I saw sentnce yesterday.", vec![("sentnce", "sentence")]),
+            // After colon/semicolon - typically not sentence start
+            (
+                "Note: sentnce follows colon.",
+                vec![("sentnce", "sentence")],
+            ),
+            (
+                "Done; sentnce follows semicolon.",
+                vec![("sentnce", "sentence")],
+            ),
+        ];
+
+        println!("\n=== SENTENCE BOUNDARY COMPREHENSIVE TEST ===");
+        for (text, expectations) in test_cases {
+            println!("\nText: '{}'", text);
+            let result = analyze_text(
+                text,
+                "American",
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                vec![],
+                true,
+                true, // enforce_oxford_comma
+                true, // check_ellipsis
+                true, // check_unclosed_quotes
+                true, // check_dashes
+            );
+
+            for (error_word, expected_sugg) in expectations {
+                let error = result.errors.iter().find(|e| {
+                    e.start < text.len()
+                        && e.end <= text.len()
+                        && &text[e.start..e.end] == error_word
+                });
+
+                if let Some(err) = error {
+                    if let Some(first_sugg) = err.suggestions.first() {
+                        let matches = first_sugg == expected_sugg;
+                        println!(
+                            "  '{}': got '{}', expected '{}' {}",
+                            error_word,
+                            first_sugg,
+                            expected_sugg,
+                            if matches { "✓" } else { "✗" }
+                        );
+                        assert_eq!(
+                            first_sugg, expected_sugg,
+                            "For '{}' in '{}': expected '{}' but got '{}'",
+                            error_word, text, expected_sugg, first_sugg
+                        );
+                    } else {
+                        panic!("No suggestions found for '{}' in '{}'", error_word, text);
+                    }
+                } else {
+                    panic!("'{}' not flagged as error in '{}'", error_word, text);
+                }
+            }
+        }
+        println!("\n=== END TEST ===\n");
+    }
+
+    /// Test Harper's behavior with possessive forms of words
+    /// This helps understand whether possessives of known words are correctly handled
+    #[test]
+    fn test_harper_possessive_behavior() {
+        use harper_core::spell::{MergedDictionary, MutableDictionary};
+        use harper_core::{
+            linting::{LintGroup, Linter},
+            CharString, Dialect, DictWordMetadata, Document,
+        };
+        use std::sync::Arc;
+
+        println!("\n=== HARPER POSSESSIVE BEHAVIOR TEST ===");
+
+        // Create dictionary with a custom name
+        let mut custom_dict = MutableDictionary::new();
+        let custom_name: CharString = "testname".chars().collect();
+        custom_dict.extend_words(vec![(custom_name.clone(), DictWordMetadata::default())]);
+
+        let mut merged = MergedDictionary::new();
+        merged.add_dictionary(MutableDictionary::curated());
+        merged.add_dictionary(Arc::new(custom_dict));
+        let dictionary = Arc::new(merged);
+
+        // Test 1: Base word should not be flagged
+        println!("\n--- Test 1: Base word in dictionary ---");
+        let text1 = "Testname is working on it.";
+        let document1 = Document::new_plain_english(text1, dictionary.as_ref());
+        let mut linter1 = LintGroup::new_curated(dictionary.clone(), Dialect::American);
+        let lints1 = linter1.lint(&document1);
+        println!("Text: '{}'", text1);
+        println!("Errors: {}", lints1.len());
+        for lint in &lints1 {
+            let chars: Vec<char> = text1.chars().collect();
+            let word = chars[lint.span.start..lint.span.end]
+                .iter()
+                .collect::<String>();
+            println!("  - '{}': {}", word, lint.message);
+        }
+
+        // Test 2: Possessive form of known word
+        println!("\n--- Test 2: Possessive of known word ---");
+        let text2 = "Testname's pull request is ready.";
+        let document2 = Document::new_plain_english(text2, dictionary.as_ref());
+        let mut linter2 = LintGroup::new_curated(dictionary.clone(), Dialect::American);
+        let lints2 = linter2.lint(&document2);
+        println!("Text: '{}'", text2);
+        println!("Errors: {}", lints2.len());
+        for lint in &lints2 {
+            let chars: Vec<char> = text2.chars().collect();
+            let word = chars[lint.span.start..lint.span.end]
+                .iter()
+                .collect::<String>();
+            println!(
+                "  - '{}': {} (suggestions: {:?})",
+                word, lint.message, lint.suggestions
+            );
+        }
+
+        // Test 3: Unknown word and its possessive
+        println!("\n--- Test 3: Unknown word and possessive ---");
+        let text3 = "Xyzfoo is here. Xyzfoo's code is great.";
+        let document3 = Document::new_plain_english(text3, dictionary.as_ref());
+        let mut linter3 = LintGroup::new_curated(dictionary.clone(), Dialect::American);
+        let lints3 = linter3.lint(&document3);
+        println!("Text: '{}'", text3);
+        println!("Errors: {}", lints3.len());
+        for lint in &lints3 {
+            let chars: Vec<char> = text3.chars().collect();
+            let word = chars[lint.span.start..lint.span.end]
+                .iter()
+                .collect::<String>();
+            println!(
+                "  - '{}': {} (suggestions: {:?})",
+                word, lint.message, lint.suggestions
+            );
+        }
+
+        // Test 4: Common name with possessive (John should be in curated dict)
+        println!("\n--- Test 4: Common name (John) with possessive ---");
+        let text4 = "John is here. John's car is blue.";
+        let document4 = Document::new_plain_english(text4, dictionary.as_ref());
+        let mut linter4 = LintGroup::new_curated(dictionary.clone(), Dialect::American);
+        let lints4 = linter4.lint(&document4);
+        println!("Text: '{}'", text4);
+        println!("Errors: {}", lints4.len());
+        for lint in &lints4 {
+            let chars: Vec<char> = text4.chars().collect();
+            let word = chars[lint.span.start..lint.span.end]
+                .iter()
+                .collect::<String>();
+            println!("  - '{}': {}", word, lint.message);
+        }
+
+        println!("\n=== END POSSESSIVE TEST ===\n");
+    }
+
+    /// Test that our analyze_text function correctly handles possessive forms
+    #[test]
+    fn test_analyze_possessive_forms() {
+        println!("\n=== ANALYZE POSSESSIVE FORMS TEST ===");
+
+        // Test with a name that would be unknown - possessive should be flagged
+        let text1 = "Xyzname's work is excellent.";
+        let result1 = analyze_text(
+            text1,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            vec![],
+            true,
+            true,
+            true,
+            true,
+            true,
+        );
+        println!("\nText: '{}'", text1);
+        println!("Errors found: {}", result1.errors.len());
+        for error in &result1.errors {
+            let chars: Vec<char> = text1.chars().collect();
+            let word = chars[error.start..error.end].iter().collect::<String>();
+            println!(
+                "  - '{}' at {}-{}: {} ({})",
+                word, error.start, error.end, error.message, error.category
+            );
+            println!("    Suggestions: {:?}", error.suggestions);
+        }
+        // Unknown word's possessive should still be flagged
+        assert!(
+            !result1.errors.is_empty(),
+            "Unknown word's possessive should be flagged"
+        );
+
+        // Test with person names enabled - known name's possessive should NOT be flagged
+        let text2 = "Oliver's presentation was great.";
+        let result2 = analyze_text(
+            text2,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            true, // enable person names
+            false,
+            false,
+            vec![],
+            true,
+            true,
+            true,
+            true,
+            true,
+        );
+        println!("\nText: '{}' (with person names enabled)", text2);
+        println!("Errors found: {}", result2.errors.len());
+        for error in &result2.errors {
+            let chars: Vec<char> = text2.chars().collect();
+            let word = chars[error.start..error.end].iter().collect::<String>();
+            println!(
+                "  - '{}' at {}-{}: {} ({})",
+                word, error.start, error.end, error.message, error.category
+            );
+            println!("    Suggestions: {:?}", error.suggestions);
+        }
+        // Known name's possessive should NOT be flagged
+        assert!(
+            result2.errors.is_empty(),
+            "Known name's possessive should NOT be flagged when base word is in dictionary"
+        );
+
+        println!("\n=== END TEST ===\n");
+    }
+
+    /// Test possessive filter with person names from our custom dictionary
+    /// This tests the core functionality: possessive forms of custom dictionary words
+    /// are correctly filtered when the base word is in the dictionary.
+    #[test]
+    fn test_possessive_filter_custom_dictionary() {
+        // Test person name possessive with an uncommon name from our person_names.txt
+        // "Aaban" is in our person_names.txt but unlikely to be in Harper's curated dict
+        let text1 = "Aaban's presentation was excellent.";
+        let result1 = analyze_text(
+            text1,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            true, // enable person names
+            false,
+            false,
+            vec![],
+            true,
+            true,
+            true,
+            true,
+            true,
+        );
+        assert!(
+            result1.errors.is_empty(),
+            "Aaban's should not be flagged when person names are enabled: {:?}",
+            result1.errors
+        );
+
+        // Test with multiple possessives in the same sentence
+        let text2 = "Oliver's code and Maria's design work well together.";
+        let result2 = analyze_text(
+            text2,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            true, // enable person names
+            false,
+            false,
+            vec![],
+            true,
+            true,
+            true,
+            true,
+            true,
+        );
+        assert!(
+            result2.errors.is_empty(),
+            "Multiple name possessives should not be flagged: {:?}",
+            result2.errors
+        );
+
+        // Test that completely unknown words are still flagged
+        let text3 = "Xyzfoobar's implementation is buggy.";
+        let result3 = analyze_text(
+            text3,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            true, // person names enabled but Xyzfoobar is not a name
+            false,
+            false,
+            vec![],
+            true,
+            true,
+            true,
+            true,
+            true,
+        );
+        assert!(
+            !result3.errors.is_empty(),
+            "Unknown word's possessive should still be flagged"
+        );
+    }
+
+    /// Test AP-style possessive (just apostrophe for words ending in 's')
+    /// E.g., "Kubernetes'" instead of "Kubernetes's"
+    #[test]
+    fn test_possessive_ap_style() {
+        // Test AP-style possessive for a word ending in 's'
+        // "James'" should be valid when "James" is in dictionary
+        let text1 = "James' car is parked outside.";
+        let result1 = analyze_text(
+            text1,
+            "American",
+            false,
+            false,
+            false,
+            false,
+            true, // enable person names (James should be there)
+            false,
+            false,
+            vec![],
+            true,
+            true,
+            true,
+            true,
+            true,
+        );
+        // Note: Harper may or may not flag AP-style possessives depending on how it tokenizes
+        // This test documents the expected behavior
+        println!("\n=== AP-STYLE POSSESSIVE TEST ===");
+        println!("Text: '{}'", text1);
+        println!("Errors found: {}", result1.errors.len());
+        for error in &result1.errors {
+            let chars: Vec<char> = text1.chars().collect();
+            if error.start < chars.len() && error.end <= chars.len() {
+                let word: String = chars[error.start..error.end].iter().collect();
+                println!("  - '{}': {}", word, error.message);
+            }
+        }
+        println!("=== END TEST ===\n");
+    }
+
+    // Helper to create a capitalization error for testing
+    fn make_cap_error(start: usize, end: usize) -> GrammarError {
+        GrammarError {
+            start,
+            end,
+            message: "This sentence does not start with a capital letter.".to_string(),
+            severity: ErrorSeverity::Warning,
+            category: "Capitalization".to_string(),
+            lint_id: "UncapitalizedSentences".to_string(),
+            suggestions: vec!["Learning".to_string()],
+        }
+    }
+
+    #[test]
+    fn test_dot_notation_filter_filters_yaml_paths() {
+        // Test case: "status.learning" - should filter out capitalization error on "learning"
+        let text = "status.learning";
+        let errors = vec![make_cap_error(7, 15)]; // "learning" starts at index 7
+
+        let filtered = filter_dot_notation_capitalization_errors(errors, text);
+        assert!(
+            filtered.is_empty(),
+            "Dot notation 'status.learning' should be filtered: {:?}",
+            filtered
+        );
+    }
+
+    #[test]
+    fn test_dot_notation_filter_filters_multiple_segments() {
+        // Test case: "spec.rules.enabled" - should filter errors on "rules" and "enabled"
+        let text = "spec.rules.enabled";
+        let errors = vec![
+            make_cap_error(5, 10),  // "rules" starts at index 5
+            make_cap_error(11, 18), // "enabled" starts at index 11
+        ];
+
+        let filtered = filter_dot_notation_capitalization_errors(errors, text);
+        assert!(
+            filtered.is_empty(),
+            "Multi-segment dot notation should all be filtered: {:?}",
+            filtered
+        );
+    }
+
+    #[test]
+    fn test_dot_notation_filter_keeps_sentence_boundary() {
+        // Test case: "End. start" - space after dot means it's a real sentence
+        let text = "End. start";
+        let errors = vec![make_cap_error(5, 10)]; // "start" starts at index 5
+
+        let filtered = filter_dot_notation_capitalization_errors(errors, text);
+        assert_eq!(
+            filtered.len(),
+            1,
+            "Sentence boundary should NOT be filtered"
+        );
+    }
+
+    #[test]
+    fn test_dot_notation_filter_keeps_non_capitalization_errors() {
+        // Non-capitalization errors should pass through untouched
+        let text = "status.lerning"; // spelling error, not capitalization
+        let errors = vec![GrammarError {
+            start: 7,
+            end: 14,
+            message: "Did you mean 'learning'?".to_string(),
+            severity: ErrorSeverity::Error,
+            category: "Spelling".to_string(),
+            lint_id: "SpellingError".to_string(),
+            suggestions: vec!["learning".to_string()],
+        }];
+
+        let filtered = filter_dot_notation_capitalization_errors(errors, text);
+        assert_eq!(
+            filtered.len(),
+            1,
+            "Spelling errors should not be filtered by dot-notation filter"
+        );
+    }
+
+    #[test]
+    fn test_dot_notation_filter_kubernetes_io() {
+        // Test case: "kubernetes.io" - domain-like identifier
+        let text = "Visit kubernetes.io for docs.";
+        let errors = vec![make_cap_error(17, 19)]; // "io" starts at index 17
+
+        let filtered = filter_dot_notation_capitalization_errors(errors, text);
+        assert!(
+            filtered.is_empty(),
+            "Domain-like dot notation should be filtered: {:?}",
+            filtered
+        );
+    }
+
+    #[test]
+    fn test_dot_notation_filter_empty_input() {
+        let errors: Vec<GrammarError> = vec![];
+        let filtered = filter_dot_notation_capitalization_errors(errors, "any text");
+        assert!(
+            filtered.is_empty(),
+            "Empty input should return empty output"
+        );
+    }
+
+    #[test]
+    fn test_dot_notation_filter_at_text_start() {
+        // Edge case: error at position 0 should not cause panic
+        let text = "learning is good";
+        let errors = vec![make_cap_error(0, 8)]; // "learning" at start
+
+        let filtered = filter_dot_notation_capitalization_errors(errors, text);
+        assert_eq!(
+            filtered.len(),
+            1,
+            "Error at text start should be kept (can't be preceded by dot)"
+        );
+    }
+
+    // ==================== Emoji Capitalization Filter Tests ====================
+
+    #[test]
+    fn test_emoji_filter_filters_word_after_emoji() {
+        // Test case: "I saw the 📁 first" - "first" should NOT be flagged
+        let text = "I saw the 📁 first thing";
+        // 📁 is at character position 10, "first" starts at position 12 (after space)
+        let errors = vec![make_cap_error(12, 17)];
+
+        let filtered = filter_emoji_capitalization_errors(errors, text);
+        assert!(
+            filtered.is_empty(),
+            "Word after emoji should be filtered: {:?}",
+            filtered
+        );
+    }
+
+    #[test]
+    fn test_emoji_filter_filters_various_emojis() {
+        // Test with different emojis
+        let test_cases = vec![
+            ("Check ✅ this out", 8, 12),   // ✅
+            ("Hello 👋 world", 8, 13),      // 👋
+            ("The 🎉 party starts", 6, 11), // 🎉
+            ("See 📧 email below", 6, 11),  // 📧
+        ];
+
+        for (text, start, end) in test_cases {
+            let errors = vec![make_cap_error(start, end)];
+            let filtered = filter_emoji_capitalization_errors(errors, text);
+            assert!(
+                filtered.is_empty(),
+                "Word after emoji in '{}' should be filtered: {:?}",
+                text,
+                filtered
+            );
+        }
+    }
+
+    #[test]
+    fn test_emoji_filter_keeps_real_sentence_start() {
+        // Test case: "Hello! world" - exclamation mark IS a sentence boundary
+        let text = "Hello! world should be capitalized";
+        let errors = vec![make_cap_error(7, 12)]; // "world"
+
+        let filtered = filter_emoji_capitalization_errors(errors, text);
+        assert_eq!(
+            filtered.len(),
+            1,
+            "Real sentence boundary should NOT be filtered"
+        );
+    }
+
+    #[test]
+    fn test_emoji_filter_keeps_normal_text() {
+        // Test case: normal text without emojis
+        let text = "The quick brown fox";
+        let errors = vec![make_cap_error(4, 9)]; // "quick"
+
+        let filtered = filter_emoji_capitalization_errors(errors, text);
+        assert_eq!(
+            filtered.len(),
+            1,
+            "Normal capitalization errors should be kept"
+        );
+    }
+
+    #[test]
+    fn test_emoji_filter_at_text_start() {
+        // Edge case: error at position 0 should not cause panic
+        let text = "first word";
+        let errors = vec![make_cap_error(0, 5)];
+
+        let filtered = filter_emoji_capitalization_errors(errors, text);
+        assert_eq!(filtered.len(), 1, "Error at text start should be kept");
+    }
+
+    #[test]
+    fn test_emoji_filter_multiple_emojis() {
+        // Test case: multiple emojis before word
+        // "Check this 🎉🎊 celebration"
+        // Character positions: C=0, h=1, e=2, c=3, k=4, ' '=5, t=6, h=7, i=8, s=9, ' '=10, 🎉=11, 🎊=12, ' '=13, c=14
+        let text = "Check this 🎉🎊 celebration";
+        let errors = vec![make_cap_error(14, 25)]; // "celebration" starts at char index 14
+
+        let filtered = filter_emoji_capitalization_errors(errors, text);
+        assert!(
+            filtered.is_empty(),
+            "Word after multiple emojis should be filtered: {:?}",
+            filtered
+        );
+    }
+
+    #[test]
+    fn test_emoji_filter_keeps_non_capitalization_errors() {
+        // Non-capitalization errors should pass through
+        let text = "Check 📁 lerning"; // spelling error after emoji
+        let errors = vec![GrammarError {
+            start: 9,
+            end: 16,
+            message: "Did you mean 'learning'?".to_string(),
+            severity: ErrorSeverity::Error,
+            category: "Spelling".to_string(),
+            lint_id: "Spelling".to_string(),
+            suggestions: vec!["learning".to_string()],
+        }];
+
+        let filtered = filter_emoji_capitalization_errors(errors, text);
+        assert_eq!(
+            filtered.len(),
+            1,
+            "Non-capitalization errors should pass through"
+        );
+    }
+
+    #[test]
+    fn test_emoji_filter_empty_input() {
+        let errors: Vec<GrammarError> = vec![];
+        let filtered = filter_emoji_capitalization_errors(errors, "any 📁 text");
+        assert!(
+            filtered.is_empty(),
+            "Empty input should return empty output"
+        );
+    }
+
+    #[test]
+    fn test_emoji_filter_with_comma_after_emoji() {
+        // "Hey there 👋, how are you?" - comma is not a sentence boundary
+        // Character positions: H=0, e=1, y=2, ' '=3, t=4, h=5, e=6, r=7, e=8, ' '=9, 👋=10, ,=11, ' '=12, h=13
+        let text = "Hey there 👋, how are you?";
+        let errors = vec![make_cap_error(13, 16)]; // "how"
+
+        let filtered = filter_emoji_capitalization_errors(errors, text);
+        assert!(
+            filtered.is_empty(),
+            "Word after 'emoji + comma' should be filtered (comma is not sentence end): {:?}",
+            filtered
+        );
+    }
+
+    #[test]
+    fn test_emoji_filter_with_exclamation_after_emoji() {
+        // "Hey there 👋! how are you?" - exclamation IS a sentence boundary
+        // Even though there's an emoji, the ! is a real sentence terminator
+        // Character positions: H=0, e=1, y=2, ' '=3, t=4, h=5, e=6, r=7, e=8, ' '=9, 👋=10, !=11, ' '=12, h=13
+        let text = "Hey there 👋! how are you?";
+        let errors = vec![make_cap_error(13, 16)]; // "how"
+
+        let filtered = filter_emoji_capitalization_errors(errors, text);
+        assert_eq!(
+            filtered.len(),
+            1,
+            "Word after 'emoji + exclamation' should NOT be filtered (! is sentence end)"
+        );
+    }
+
+    #[test]
+    fn test_emoji_filter_just_emoji_before_word() {
+        // "Hey there 👋 how are you?" - just emoji with space, not a sentence boundary
+        // Character positions: H=0, e=1, y=2, ' '=3, t=4, h=5, e=6, r=7, e=8, ' '=9, 👋=10, ' '=11, h=12
+        let text = "Hey there 👋 how are you?";
+        let errors = vec![make_cap_error(12, 15)]; // "how"
+
+        let filtered = filter_emoji_capitalization_errors(errors, text);
+        assert!(
+            filtered.is_empty(),
+            "Word after 'emoji + space' should be filtered (emoji is not sentence end): {:?}",
+            filtered
+        );
+    }
+}

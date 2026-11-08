@@ -1,0 +1,2767 @@
+//
+//  SlackContentParser.swift
+//  TextWarden
+//
+//  Slack-specific content parser using multi-strategy positioning
+//  Leverages TextMarkerStrategy for Chromium/Electron apps
+//
+
+import AppKit
+import Foundation
+
+/// Slack-specific content parser
+/// Uses graceful degradation: error indicator shown but underlines hidden
+/// due to Slack's AX APIs returning invalid bounds (Chromium bug)
+class SlackContentParser: ContentParser {
+    let bundleIdentifier = "com.tinyspeck.slackmacgap"
+    let parserName = "Slack"
+
+    /// Cached exclusion ranges from AX-based detection
+    private var cachedExclusions: [ExclusionRange] = []
+
+    /// Text hash for which exclusions were extracted
+    private var exclusionTextHash: Int = 0
+
+    /// Cached configuration from AppRegistry
+    private var config: AppConfiguration {
+        AppRegistry.shared.configuration(for: bundleIdentifier)
+    }
+
+    /// Track if we've dumped the element tree (do it once per session for debugging)
+    private var hasDumpedElementTree = false
+
+    /// Track if we've done Quill Delta extraction (do it once, not on every keystroke)
+    private var hasExtractedQuillDelta = false
+
+    /// Cached Quill Delta exclusions
+    private var quillDeltaExclusions: [ExclusionRange] = []
+
+    /// Cached Quill Delta JSON for format-preserving replacement
+    /// Updated by clipboard monitoring when user copies from Slack
+    private var cachedQuillDeltaJSON: String?
+
+    /// Plain text corresponding to cached Quill Delta
+    /// Used to verify the cached delta matches current content
+    private var cachedQuillDeltaPlainText: String?
+
+    /// Last seen clipboard change count (for monitoring clipboard changes)
+    private var lastClipboardChangeCount: Int = 0
+
+    /// Clipboard monitoring timer
+    private var clipboardMonitorTimer: Timer?
+
+    /// Quill Delta pasteboard type identifier (Chromium's custom data format)
+    private static let chromiumWebCustomDataType = NSPasteboard.PasteboardType("org.chromium.web-custom-data")
+
+    // MARK: - Accessibility-Based Exclusion Detection
+
+    /// Extract exclusion ranges using Accessibility APIs
+    /// Primary method: AXAttributedStringForTextMarkerRange for formatting attributes
+    /// Fallback: Element tree traversal for AXCodeStyleGroup, AXBlockQuoteLevel, AXLink
+    func extractExclusions(from element: AXUIElement, text: String) -> [ExclusionRange] {
+        let textHash = text.hashValue
+
+        // Return cached exclusions if text hasn't changed
+        if textHash == exclusionTextHash, !cachedExclusions.isEmpty {
+            Logger.debug("SlackContentParser: Using cached exclusions (\(cachedExclusions.count) ranges)", category: Logger.analysis)
+            return cachedExclusions
+        }
+
+        Logger.info("SlackContentParser: Extracting exclusions via Accessibility APIs", category: Logger.analysis)
+
+        var exclusions: [ExclusionRange] = []
+
+        // Method 1: Try AXAttributedStringForTextMarkerRange for formatting attributes
+        // Detects: mentions, channels, inline code, block code (via AXBackgroundColor)
+        let attributedExclusions = extractFromAttributedString(element: element, text: text)
+        exclusions.append(contentsOf: attributedExclusions)
+
+        // Method 2: Detect links via AXLink child elements
+        // Links don't have AXBackgroundColor, they appear as AXLink children in the tree
+        let linkExclusions = detectLinks(in: element, text: text)
+        exclusions.append(contentsOf: linkExclusions)
+
+        // Method 3: Check if clipboard already has Quill Delta (from user's previous copy)
+        // This is non-intrusive - just reads existing clipboard without modifying it
+        if !hasExtractedQuillDelta {
+            hasExtractedQuillDelta = true
+            // First try passive reading (if user already copied from Slack)
+            quillDeltaExclusions = parseQuillDeltaFromClipboard(text: text)
+            if quillDeltaExclusions.isEmpty {
+                Logger.debug("SlackContentParser: No existing Quill Delta on clipboard", category: Logger.analysis)
+            }
+        }
+        exclusions.append(contentsOf: quillDeltaExclusions)
+
+        // Method 4: Element tree traversal for additional detection (fallback)
+        if exclusions.isEmpty {
+            // Dump element tree once for debugging
+            if !hasDumpedElementTree {
+                hasDumpedElementTree = true
+                Logger.info("SlackContentParser: === Element Tree Dump ===", category: Logger.analysis)
+                dumpElementTree(element, text: text, depth: 0)
+                Logger.info("SlackContentParser: === End Element Tree ===", category: Logger.analysis)
+            }
+
+            // Check for AXBlockQuoteLevel attribute (blockquotes)
+            exclusions.append(contentsOf: detectBlockQuotes(in: element, text: text))
+
+            // Check for mentions (@user) and channels (#channel) in element tree
+            // These appear as AXStaticText children with @ or # prefixes
+            exclusions.append(contentsOf: detectMentionsAndChannels(in: element, text: text))
+
+            // Check for inline code (AXCodeStyleGroup subrole)
+            exclusions.append(contentsOf: detectCodeStyleGroups(in: element, text: text))
+        }
+
+        // Cache and return
+        cachedExclusions = exclusions
+        exclusionTextHash = textHash
+
+        if !exclusions.isEmpty {
+            Logger.info("SlackContentParser: Detected \(exclusions.count) total exclusion ranges", category: Logger.analysis)
+        }
+
+        return exclusions
+    }
+
+    // MARK: - Attributed String Extraction (Primary Method)
+
+    /// Extract exclusions from attributed string using AXBackgroundColor
+    ///
+    /// Slack applies `AXBackgroundColor` to: mentions, channels, inline code, block code.
+    /// Links are detected separately via AXLink child elements (see `detectLinks`).
+    private func extractFromAttributedString(element: AXUIElement, text: String) -> [ExclusionRange] {
+        // Try CFRange-based method first (most reliable per testing)
+        let cfRangeExclusions = extractUsingCFRange(element: element, text: text)
+        if !cfRangeExclusions.isEmpty {
+            return cfRangeExclusions
+        }
+
+        // Fallback to text marker range method
+        return extractUsingTextMarkerRange(element: element)
+    }
+
+    /// Extract exclusions using AXAttributedStringForRange (CFRange-based)
+    ///
+    /// Slack applies `AXBackgroundColor` to special content:
+    /// - Mentions (@user): Light blue background
+    /// - Channels (#channel): Light blue background
+    /// - Inline code (backticks): Gray background
+    /// - Block code (triple backticks): Gray background
+    ///
+    /// This method reads the attributed string in chunks and collects all ranges
+    /// with `AXBackgroundColor` set. Links are handled separately via `detectLinks`.
+    private func extractUsingCFRange(element: AXUIElement, text _: String) -> [ExclusionRange] {
+        var exclusions: [ExclusionRange] = []
+
+        // Get character count from AX API (may differ from text.count due to UTF-16)
+        var charCountRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXNumberOfCharactersAttribute as CFString, &charCountRef) == .success,
+              let charCount = charCountRef as? Int, charCount > 0
+        else {
+            Logger.debug("SlackContentParser: Could not get AXNumberOfCharacters", category: Logger.analysis)
+            return exclusions
+        }
+
+        // Process text in chunks using adaptive sizing to handle API quirks
+        var offset = 0
+
+        while offset < charCount {
+            let remaining = charCount - offset
+
+            guard let attrString = getAttributedStringAdaptive(element: element, offset: offset, maxLength: remaining) else {
+                // Could not read even with smallest chunk - skip this position
+                offset += 1
+                continue
+            }
+
+            // Extract exclusions from this chunk
+            extractExclusionAttributes(from: attrString, globalOffset: offset, into: &exclusions)
+            offset += attrString.length
+        }
+
+        // Merge adjacent exclusions that were split across chunk boundaries
+        let mergedExclusions = mergeAdjacentExclusions(exclusions)
+
+        if !mergedExclusions.isEmpty {
+            Logger.info("SlackContentParser: CFRange method found \(mergedExclusions.count) exclusions", category: Logger.analysis)
+        }
+
+        return mergedExclusions
+    }
+
+    /// Extract exclusion ranges from an attributed string based on AXBackgroundColor
+    ///
+    /// Slack applies `AXBackgroundColor` to mentions, channels, inline code, and block code.
+    /// Links are detected separately via AXLink child elements (see `extractLinkExclusions`).
+    private func extractExclusionAttributes(
+        from attrString: NSAttributedString,
+        globalOffset: Int,
+        into exclusions: inout [ExclusionRange]
+    ) {
+        let backgroundColorKey = NSAttributedString.Key(rawValue: "AXBackgroundColor")
+        let fullRange = NSRange(location: 0, length: attrString.length)
+
+        // Detect mentions, channels, code blocks via AXBackgroundColor
+        attrString.enumerateAttribute(backgroundColorKey, in: fullRange, options: []) { value, range, _ in
+            guard value != nil else { return }
+
+            let globalLocation = globalOffset + range.location
+            exclusions.append(ExclusionRange(location: globalLocation, length: range.length))
+        }
+    }
+
+    /// Merge adjacent or overlapping exclusion ranges
+    ///
+    /// Since we process text in chunks, a single exclusion (e.g., a long mention)
+    /// may be split across chunk boundaries. This function merges such fragments.
+    ///
+    /// Example:
+    /// - Input:  `[54-69, 94-100, 100-106]` (channel "#development" split at 100)
+    /// - Output: `[54-69, 94-106]` (properly merged)
+    private func mergeAdjacentExclusions(_ exclusions: [ExclusionRange]) -> [ExclusionRange] {
+        guard !exclusions.isEmpty else { return [] }
+
+        let sorted = exclusions.sorted { $0.location < $1.location }
+        var merged: [ExclusionRange] = []
+        var current = sorted[0]
+
+        for next in sorted.dropFirst() {
+            let currentEnd = current.location + current.length
+
+            if next.location <= currentEnd {
+                // Ranges are adjacent or overlapping - merge them
+                let newEnd = max(currentEnd, next.location + next.length)
+                current = ExclusionRange(location: current.location, length: newEnd - current.location)
+            } else {
+                // No overlap - save current and start new
+                merged.append(current)
+                current = next
+            }
+        }
+
+        merged.append(current)
+        return merged
+    }
+
+    /// Adaptive chunk sizes for AXAttributedStringForRange queries
+    ///
+    /// Slack's AX API (Chromium/Electron) has a quirk where `AXAttributedStringForRange`
+    /// fails with error -25212 when ranges extend within ~5 characters of text end.
+    /// Using adaptive sizing, we try progressively smaller chunks until one succeeds.
+    /// Start with larger chunks for better performance, fall back to smaller on failure.
+    private static let adaptiveChunkSizes = [200, 100, 50, 25, 10, 5, 1]
+
+    /// Get attributed string with adaptive chunk sizing
+    ///
+    /// Tries progressively smaller chunks until one succeeds, handling Slack's API quirks.
+    /// - Parameters:
+    ///   - element: The AX element to query
+    ///   - offset: Starting character offset
+    ///   - maxLength: Maximum number of characters to read
+    /// - Returns: The attributed string, or nil if all chunk sizes fail
+    private func getAttributedStringAdaptive(element: AXUIElement, offset: Int, maxLength: Int) -> NSAttributedString? {
+        for chunkSize in Self.adaptiveChunkSizes {
+            let length = min(chunkSize, maxLength)
+            guard length > 0 else { continue }
+
+            var cfRange = CFRange(location: offset, length: length)
+            guard let rangeValue = AXValueCreate(.cfRange, &cfRange) else { continue }
+
+            var attrStringRef: CFTypeRef?
+            let result = AXUIElementCopyParameterizedAttributeValue(
+                element,
+                kAXAttributedStringForRangeParameterizedAttribute as CFString,
+                rangeValue,
+                &attrStringRef
+            )
+
+            if result == .success, let attrString = attrStringRef as? NSAttributedString {
+                return attrString
+            }
+        }
+
+        return nil
+    }
+
+    /// Extract exclusions using AXAttributedStringForTextMarkerRange (fallback method)
+    private func extractUsingTextMarkerRange(element: AXUIElement) -> [ExclusionRange] {
+        var exclusions: [ExclusionRange] = []
+
+        guard let markerRange = getFullTextMarkerRange(element: element) else {
+            Logger.debug("SlackContentParser: Could not get text marker range", category: Logger.analysis)
+            return exclusions
+        }
+
+        var attrStringRef: CFTypeRef?
+        let result = AXUIElementCopyParameterizedAttributeValue(
+            element,
+            "AXAttributedStringForTextMarkerRange" as CFString,
+            markerRange,
+            &attrStringRef
+        )
+
+        guard result == .success, let attrString = attrStringRef as? NSAttributedString else {
+            Logger.debug("SlackContentParser: AXAttributedStringForTextMarkerRange failed (error: \(result.rawValue))", category: Logger.analysis)
+            return exclusions
+        }
+
+        Logger.info("SlackContentParser: TextMarkerRange method got attributed string (\(attrString.length) chars)", category: Logger.analysis)
+
+        // Log all unique fonts found for debugging
+        var uniqueFonts: Set<String> = []
+        attrString.enumerateAttribute(.font, in: NSRange(location: 0, length: attrString.length), options: []) { value, _, _ in
+            if let font = value as? NSFont {
+                uniqueFonts.insert(font.fontName)
+            }
+        }
+        if !uniqueFonts.isEmpty {
+            Logger.debug("SlackContentParser: Fonts in attributed string: \(uniqueFonts.sorted().joined(separator: ", "))", category: Logger.analysis)
+        }
+
+        var addedRanges: Set<NSRange> = []
+
+        attrString.enumerateAttributes(in: NSRange(location: 0, length: attrString.length), options: []) { attrs, range, _ in
+            guard !addedRanges.contains(range) else { return }
+
+            // Check for AXBackgroundColor (mentions, channels, code blocks)
+            for (key, _) in attrs {
+                if key.rawValue == "AXBackgroundColor" {
+                    exclusions.append(ExclusionRange(location: range.location, length: range.length))
+                    addedRanges.insert(range)
+                    break
+                }
+            }
+
+            // Also check for monospace font (code blocks use monospace fonts)
+            if !addedRanges.contains(range),
+               let font = attrs[.font] as? NSFont
+            {
+                let fontName = font.fontName.lowercased()
+                let traits = font.fontDescriptor.symbolicTraits
+
+                // Detect monospace fonts used for code
+                if fontName.contains("mono") || fontName.contains("courier") || fontName.contains("menlo") ||
+                    fontName.contains("consolas") || fontName.contains("source code") || fontName.contains("fira code") ||
+                    fontName.contains("sf mono") || fontName.contains("jetbrains") ||
+                    traits.contains(.monoSpace)
+                {
+                    exclusions.append(ExclusionRange(location: range.location, length: range.length))
+                    addedRanges.insert(range)
+                }
+            }
+        }
+
+        return exclusions
+    }
+
+    /// Get full text marker range for the element
+    private func getFullTextMarkerRange(element: AXUIElement) -> CFTypeRef? {
+        // Method 1: Try AXTextMarkerRangeForUIElement
+        var rangeRef: CFTypeRef?
+        if AXUIElementCopyParameterizedAttributeValue(
+            element,
+            "AXTextMarkerRangeForUIElement" as CFString,
+            element,
+            &rangeRef
+        ) == .success {
+            return rangeRef
+        }
+
+        // Method 2: Try to construct from start/end markers
+        var startMarkerRef: CFTypeRef?
+        var endMarkerRef: CFTypeRef?
+
+        if AXUIElementCopyAttributeValue(element, "AXStartTextMarker" as CFString, &startMarkerRef) == .success,
+           AXUIElementCopyAttributeValue(element, "AXEndTextMarker" as CFString, &endMarkerRef) == .success,
+           let startMarker = startMarkerRef,
+           let endMarker = endMarkerRef
+        {
+            // Create range from start to end markers
+            let markers = [startMarker, endMarker] as CFArray
+            if AXUIElementCopyParameterizedAttributeValue(
+                element,
+                "AXTextMarkerRangeForMarkers" as CFString,
+                markers,
+                &rangeRef
+            ) == .success {
+                return rangeRef
+            }
+        }
+
+        // Method 3: Try using number of characters
+        var charCountRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXNumberOfCharactersAttribute as CFString, &charCountRef) == .success,
+           let charCount = charCountRef as? Int
+        {
+            // Get marker for index 0
+            var startIndexMarker: CFTypeRef?
+            if AXUIElementCopyParameterizedAttributeValue(
+                element,
+                "AXTextMarkerForIndex" as CFString,
+                0 as CFNumber,
+                &startIndexMarker
+            ) == .success {
+                // Get marker for last index
+                var endIndexMarker: CFTypeRef?
+                if AXUIElementCopyParameterizedAttributeValue(
+                    element,
+                    "AXTextMarkerForIndex" as CFString,
+                    charCount as CFNumber,
+                    &endIndexMarker
+                ) == .success {
+                    // Create range from markers
+                    let markers = [startIndexMarker!, endIndexMarker!] as CFArray
+                    if AXUIElementCopyParameterizedAttributeValue(
+                        element,
+                        "AXTextMarkerRangeForUnorderedTextMarkers" as CFString,
+                        markers,
+                        &rangeRef
+                    ) == .success {
+                        return rangeRef
+                    }
+                }
+            }
+        }
+
+        return nil
+    }
+
+    // MARK: - Quill Delta Extraction (Fast, Imperceptible)
+
+    /// Check if an exclusion is a link (mention/channel)
+    private func isLinkExclusion(_ exclusion: ExclusionRange, text: String) -> Bool {
+        guard exclusion.location >= 0,
+              exclusion.location + exclusion.length <= text.count,
+              let start = text.index(text.startIndex, offsetBy: exclusion.location, limitedBy: text.endIndex),
+              let end = text.index(start, offsetBy: exclusion.length, limitedBy: text.endIndex)
+        else {
+            return false
+        }
+        let exclusionText = String(text[start ..< end]).trimmingCharacters(in: .whitespaces)
+        return exclusionText.hasPrefix("@") || exclusionText.hasPrefix("#") || exclusionText.hasPrefix("http")
+    }
+
+    /// Save current clipboard state for restoration
+    private func saveClipboardState() -> [(NSPasteboard.PasteboardType, Data)] {
+        let pasteboard = NSPasteboard.general
+        var saved: [(NSPasteboard.PasteboardType, Data)] = []
+
+        if let types = pasteboard.types {
+            for type in types {
+                if let data = pasteboard.data(forType: type) {
+                    saved.append((type, data))
+                }
+            }
+        }
+        return saved
+    }
+
+    /// Restore clipboard state
+    private func restoreClipboardState(_ state: [(NSPasteboard.PasteboardType, Data)]) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+
+        for (type, data) in state {
+            pasteboard.setData(data, forType: type)
+        }
+    }
+
+    /// Save current selection state
+    private func saveSelectionState(element: AXUIElement) -> CFRange? {
+        var rangeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &rangeRef) == .success,
+              let range = safeAXValueGetRange(rangeRef!)
+        else {
+            return nil
+        }
+        return range
+    }
+
+    /// Restore selection state
+    private func restoreSelectionState(element: AXUIElement, state: CFRange?) {
+        guard let range = state else { return }
+
+        var mutableRange = range
+        guard let rangeValue = AXValueCreate(.cfRange, &mutableRange) else { return }
+        AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, rangeValue)
+    }
+
+    /// Perform Select All action
+    private func performSelectAll(element: AXUIElement) -> Bool {
+        // Try AX action first
+        if AXUIElementPerformAction(element, "AXSelectAll" as CFString) == .success {
+            return true
+        }
+
+        // Fall back to Cmd+A key event
+        return simulateKeyCombo(keyCode: 0, command: true) // 'A' key
+    }
+
+    /// Perform Copy action
+    private func performCopy(element: AXUIElement) -> Bool {
+        // Try AX action first
+        if AXUIElementPerformAction(element, "AXCopy" as CFString) == .success {
+            return true
+        }
+
+        // Fall back to Cmd+C key event
+        return simulateKeyCombo(keyCode: 8, command: true) // 'C' key
+    }
+
+    /// Simulate a keyboard shortcut
+    private func simulateKeyCombo(keyCode: CGKeyCode, command: Bool) -> Bool {
+        guard let source = CGEventSource(stateID: .combinedSessionState) else { return false }
+
+        guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true),
+              let keyUp = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false)
+        else {
+            return false
+        }
+
+        if command {
+            keyDown.flags = .maskCommand
+            keyUp.flags = .maskCommand
+        }
+
+        keyDown.post(tap: .cghidEventTap)
+        keyUp.post(tap: .cghidEventTap)
+
+        return true
+    }
+
+    /// Parse Quill Delta JSON from clipboard and extract exclusion ranges
+    /// Handles Slack-specific embedded objects: user, channel, broadcast, emoji, date, link
+    private func parseQuillDeltaFromClipboard(text: String) -> [ExclusionRange] {
+        let emptyResult: [ExclusionRange] = []
+
+        let pasteboard = NSPasteboard.general
+
+        // Log all available clipboard types for debugging
+        if let types = pasteboard.types {
+            let typeList = types.map(\.rawValue).joined(separator: ", ")
+            Logger.debug("SlackContentParser: Clipboard types available: \(typeList)", category: Logger.analysis)
+
+            // Check for interesting types
+            for type in types {
+                if type.rawValue.contains("slack") || type.rawValue.contains("chromium") || type.rawValue.contains("tinyspeck") {
+                    Logger.info("SlackContentParser: Found interesting clipboard type: \(type.rawValue)", category: Logger.analysis)
+                }
+            }
+        }
+
+        // Look for Quill Delta in org.chromium.web-custom-data
+        guard let data = pasteboard.data(forType: Self.chromiumWebCustomDataType) else {
+            Logger.debug("SlackContentParser: No org.chromium.web-custom-data on clipboard", category: Logger.analysis)
+            return emptyResult
+        }
+
+        Logger.debug("SlackContentParser: Found org.chromium.web-custom-data (\(data.count) bytes)", category: Logger.analysis)
+
+        // Try to parse as Chromium Pickle format first
+        if let pickleContent = parseChromiumPickle(data) {
+            Logger.info("SlackContentParser: Parsed as Chromium Pickle format", category: Logger.analysis)
+            return parseQuillDeltaContent(pickleContent, text: text)
+        }
+
+        // Fallback: Try raw UTF-16LE decode (older format or different Chromium version)
+        if let content = String(data: data, encoding: .utf16LittleEndian) {
+            Logger.info("SlackContentParser: Decoded as raw UTF-16LE (\(content.count) chars)", category: Logger.analysis)
+            return parseQuillDeltaContent(content, text: text)
+        }
+
+        // Try UTF-8
+        if let utf8Content = String(data: data, encoding: .utf8) {
+            Logger.info("SlackContentParser: Decoded as UTF-8", category: Logger.analysis)
+            return parseQuillDeltaContent(utf8Content, text: text)
+        }
+
+        Logger.debug("SlackContentParser: Failed to decode clipboard data in any format", category: Logger.analysis)
+        return emptyResult
+    }
+
+    // MARK: - Chromium Pickle Parser
+
+    /// Parse Chromium Pickle format to extract Quill Delta JSON
+    /// Pickle format: [uint32 payload_size][uint32 num_entries][entries...]
+    /// Each entry: [uint32 type_len][UTF-16LE type][padding][uint32 value_len][UTF-16LE value][padding]
+    private func parseChromiumPickle(_ data: Data) -> String? {
+        guard data.count >= 8 else {
+            Logger.debug("SlackContentParser: Pickle data too short (\(data.count) bytes)", category: Logger.analysis)
+            return nil
+        }
+
+        var offset = 0
+
+        // Read payload size (header)
+        let payloadSize = data.withUnsafeBytes { ptr -> UInt32 in
+            ptr.load(fromByteOffset: offset, as: UInt32.self)
+        }
+        offset += 4
+
+        Logger.debug("SlackContentParser: Pickle payload size: \(payloadSize), total data: \(data.count)", category: Logger.analysis)
+
+        // Validate payload size
+        guard payloadSize > 0, payloadSize <= data.count - 4 else {
+            Logger.debug("SlackContentParser: Invalid Pickle payload size, likely not Pickle format", category: Logger.analysis)
+            return nil
+        }
+
+        // Read number of entries
+        let numEntries = data.withUnsafeBytes { ptr -> UInt32 in
+            ptr.load(fromByteOffset: offset, as: UInt32.self)
+        }
+        offset += 4
+
+        Logger.info("SlackContentParser: Pickle has \(numEntries) entries", category: Logger.analysis)
+
+        guard numEntries > 0, numEntries < 100 else {
+            Logger.debug("SlackContentParser: Invalid num_entries, likely not Pickle format", category: Logger.analysis)
+            return nil
+        }
+
+        // Helper to align to 4-byte boundary
+        func alignTo4(_ currentOffset: Int) -> Int {
+            let remainder = currentOffset % 4
+            return remainder == 0 ? currentOffset : currentOffset + (4 - remainder)
+        }
+
+        // Helper to read uint32
+        func readUInt32(at currentOffset: Int) -> UInt32? {
+            guard currentOffset + 4 <= data.count else { return nil }
+            return data.withUnsafeBytes { ptr -> UInt32 in
+                ptr.load(fromByteOffset: currentOffset, as: UInt32.self)
+            }
+        }
+
+        // Helper to read String16 (UTF-16LE)
+        // Note: Chromium stores CHARACTER count, not byte count, so we multiply by 2
+        func readString16(at currentOffset: Int, charCount: Int) -> String? {
+            let byteCount = charCount * 2 // UTF-16 = 2 bytes per character
+            guard currentOffset + byteCount <= data.count else { return nil }
+            let stringData = data.subdata(in: currentOffset ..< (currentOffset + byteCount))
+            return String(data: stringData, encoding: .utf16LittleEndian)
+        }
+
+        // Parse entries
+        for i in 0 ..< numEntries {
+            // Read type length (in characters, not bytes)
+            guard let typeCharCount = readUInt32(at: offset) else {
+                Logger.debug("SlackContentParser: Pickle entry \(i): failed to read type length", category: Logger.analysis)
+                break
+            }
+            offset += 4
+
+            // Read type string
+            guard let typeStr = readString16(at: offset, charCount: Int(typeCharCount)) else {
+                Logger.debug("SlackContentParser: Pickle entry \(i): failed to read type string", category: Logger.analysis)
+                break
+            }
+            let typeByteLen = Int(typeCharCount) * 2
+            offset += typeByteLen
+            offset = alignTo4(offset)
+
+            Logger.info("SlackContentParser: Pickle entry \(i) type: '\(typeStr)'", category: Logger.analysis)
+
+            // Read value length (in characters, not bytes)
+            guard let valueCharCount = readUInt32(at: offset) else {
+                Logger.debug("SlackContentParser: Pickle entry \(i): failed to read value length", category: Logger.analysis)
+                break
+            }
+            offset += 4
+
+            // Read value string
+            guard let valueStr = readString16(at: offset, charCount: Int(valueCharCount)) else {
+                Logger.debug("SlackContentParser: Pickle entry \(i): failed to read value string", category: Logger.analysis)
+                break
+            }
+            let valueByteLen = Int(valueCharCount) * 2
+            offset += valueByteLen
+            offset = alignTo4(offset)
+
+            Logger.debug("SlackContentParser: Pickle entry \(i) value: \(valueCharCount) chars", category: Logger.analysis)
+
+            // Check if this is Quill Delta
+            if typeStr.lowercased().contains("quill") || typeStr == "Quill.Delta" ||
+                valueStr.contains("\"ops\"")
+            {
+                Logger.info("SlackContentParser: Found Quill Delta in Pickle entry '\(typeStr)'", category: Logger.analysis)
+                return valueStr
+            }
+        }
+
+        Logger.debug("SlackContentParser: No Quill Delta found in Pickle entries", category: Logger.analysis)
+        return nil
+    }
+
+    // MARK: - Chromium Pickle Writer
+
+    /// Build Chromium Pickle format data for clipboard
+    /// Format: [uint32 payload_size][uint32 num_entries][entries...]
+    /// Each entry: [uint32 type_char_count][UTF-16LE type][padding][uint32 value_char_count][UTF-16LE value][padding]
+    func buildChromiumPickle(plainText: String, quillDelta: String) -> Data {
+        var payload = Data()
+
+        // Helper to align data to 4-byte boundary
+        func alignTo4(_ data: inout Data) {
+            let remainder = data.count % 4
+            if remainder != 0 {
+                data.append(Data(repeating: 0, count: 4 - remainder))
+            }
+        }
+
+        // Helper to write uint32
+        func writeUInt32(_ data: inout Data, value: UInt32) {
+            var v = value
+            data.append(Data(bytes: &v, count: 4))
+        }
+
+        // Helper to write String16 (character count + UTF-16LE data)
+        func writeString16(_ data: inout Data, string: String) {
+            guard let utf16Data = string.data(using: .utf16LittleEndian) else {
+                writeUInt32(&data, value: 0)
+                return
+            }
+            // Chromium stores character count, not byte count
+            writeUInt32(&data, value: UInt32(string.count))
+            data.append(utf16Data)
+            alignTo4(&data)
+        }
+
+        // Number of entries (2: plain text + quill delta)
+        writeUInt32(&payload, value: 2)
+
+        // Entry 0: public.utf8-plain-text
+        writeString16(&payload, string: "public.utf8-plain-text")
+        writeString16(&payload, string: plainText)
+
+        // Entry 1: slack/texty (Quill Delta)
+        writeString16(&payload, string: "slack/texty")
+        writeString16(&payload, string: quillDelta)
+
+        // Build final data with header
+        var result = Data()
+        writeUInt32(&result, value: UInt32(payload.count))
+        result.append(payload)
+
+        Logger.debug("SlackContentParser: Built Pickle data: \(result.count) bytes", category: Logger.analysis)
+        return result
+    }
+
+    /// Write format-preserving clipboard data for Slack
+    /// This allows replacing text while preserving bold, italic, code, etc.
+    func writeSlackClipboard(plainText: String, quillDelta: String) {
+        let pickleData = buildChromiumPickle(plainText: plainText, quillDelta: quillDelta)
+
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+
+        // Write plain text
+        pasteboard.setString(plainText, forType: .string)
+
+        // Write Pickle data with Quill Delta
+        pasteboard.setData(pickleData, forType: Self.chromiumWebCustomDataType)
+
+        // Log what we wrote
+        if let types = pasteboard.types {
+            let typeList = types.map(\.rawValue).joined(separator: ", ")
+            Logger.debug("SlackContentParser: WROTE clipboard types: \(typeList)", category: Logger.analysis)
+        }
+
+        Logger.info("SlackContentParser: Wrote clipboard with \(plainText.count) chars plain text and Quill Delta", category: Logger.analysis)
+    }
+
+    /// Verify our Pickle writer produces data that our reader can parse
+    func verifyPickleRoundtrip() -> Bool {
+        let testDelta = """
+        {"ops":[{"insert":"Hello "},{"attributes":{"bold":true},"insert":"BOLD"},{"insert":" world!\\n"}]}
+        """
+        let plainText = "Hello BOLD world!\n"
+
+        // Build Pickle
+        let pickleData = buildChromiumPickle(plainText: plainText, quillDelta: testDelta)
+
+        // Parse it back
+        if let parsedDelta = parseChromiumPickle(pickleData) {
+            let success = parsedDelta == testDelta
+            Logger.info("SlackContentParser: Pickle roundtrip test: \(success ? "PASSED" : "FAILED")", category: Logger.analysis)
+            if !success {
+                Logger.debug("SlackContentParser: Expected: \(testDelta)", category: Logger.analysis)
+                Logger.debug("SlackContentParser: Got: \(parsedDelta)", category: Logger.analysis)
+            }
+            return success
+        } else {
+            Logger.warning("SlackContentParser: Pickle roundtrip test FAILED - could not parse", category: Logger.analysis)
+            return false
+        }
+    }
+
+    /// Test function: Write a test Quill Delta to clipboard for manual testing
+    /// Call this and then paste into Slack to see if formatting is preserved
+    func testWriteQuillDelta() {
+        // First verify our format is correct
+        guard verifyPickleRoundtrip() else {
+            Logger.error("SlackContentParser: Cannot write test - Pickle format verification failed", category: Logger.analysis)
+            return
+        }
+
+        let testDelta = """
+        {"ops":[{"insert":"Hello "},{"attributes":{"bold":true},"insert":"BOLD"},{"insert":" world!\\n"}]}
+        """
+        let plainText = "Hello BOLD world!\n"
+
+        writeSlackClipboard(plainText: plainText, quillDelta: testDelta)
+        Logger.info("SlackContentParser: Test Quill Delta written to clipboard - paste into Slack to verify!", category: Logger.analysis)
+    }
+
+    // MARK: - Format-Preserving Text Replacement
+
+    /// Result of format-preserving replacement attempt
+    enum FormatPreservingResult {
+        case success // Successfully applied with formatting preserved
+        case fallbackToPlainText // Could not preserve formatting, caller should use plain text
+        case failed(String) // Failed completely, with reason
+    }
+
+    /// Attempt format-preserving text replacement in Slack.
+    /// Uses Quill Delta modification to preserve rich text formatting (bold, italic, code, etc.).
+    func applyFormatPreservingReplacement(
+        errorStart: Int,
+        errorEnd: Int,
+        originalText: String,
+        suggestion: String,
+        element: AXUIElement
+    ) async -> FormatPreservingResult {
+        Logger.info("SlackContentParser: Attempting partial-selection replacement at \(errorStart)-\(errorEnd)", category: Logger.analysis)
+
+        // Step 1: Save clipboard for restoration
+        let savedClipboard = saveClipboardState()
+
+        // Step 2: Convert Harper's Unicode scalar indices to proper string indices
+        guard let startStringIdx = TextIndexConverter.scalarIndexToStringIndex(errorStart, in: originalText),
+              let endStringIdx = TextIndexConverter.scalarIndexToStringIndex(errorEnd, in: originalText),
+              startStringIdx < endStringIdx
+        else {
+            Logger.warning("SlackContentParser: Invalid error range \(errorStart)-\(errorEnd) (scalar indices)", category: Logger.analysis)
+            restoreClipboardState(savedClipboard)
+            return .fallbackToPlainText
+        }
+
+        let expectedErrorText = String(originalText[startStringIdx ..< endStringIdx])
+        Logger.debug("SlackContentParser: Expected error text: '\(expectedErrorText)'", category: Logger.analysis)
+
+        // Calculate grapheme position for disambiguation when text appears multiple times
+        let expectedGraphemePosition = originalText.distance(from: originalText.startIndex, to: startStringIdx)
+        Logger.debug("SlackContentParser: Scalar range \(errorStart)-\(errorEnd) -> grapheme position \(expectedGraphemePosition)", category: Logger.analysis)
+
+        // Step 3: Find child elements and select with verification
+        // CRITICAL: Slack ignores AXSelectedTextRange on root element, but child elements work!
+        // Uses robust selection that tries ALL occurrences until one verifies correctly.
+        Logger.debug("SlackContentParser: Step 3 - Finding and selecting '\(expectedErrorText)' with verification", category: Logger.analysis)
+
+        // Collect all candidate child elements containing the target text
+        var candidates: [(element: AXUIElement, text: String, offset: Int)] = []
+        collectTextElements(in: element, depth: 0, maxDepth: 10, candidates: &candidates, targetText: expectedErrorText)
+
+        // Sort by text length ascending to prefer most specific (smallest) element
+        let sortedCandidates = candidates.sorted { $0.text.count < $1.text.count }
+
+        var selectedChildElement: AXUIElement?
+
+        // Try each candidate child element until we get a verified selection
+        for (candidateIndex, candidate) in sortedCandidates.enumerated() {
+            Logger.debug("SlackContentParser: Trying candidate \(candidateIndex + 1)/\(sortedCandidates.count) (text length: \(candidate.text.count))", category: Logger.analysis)
+
+            // Calculate preferred offset within this child element
+            var preferredOffset: Int?
+            if let childRangeInFull = originalText.range(of: candidate.text) {
+                let childStartInFull = originalText.distance(from: originalText.startIndex, to: childRangeInFull.lowerBound)
+                preferredOffset = expectedGraphemePosition - childStartInFull
+                Logger.debug("SlackContentParser: Preferred offset in child: \(preferredOffset ?? -1) (child starts at \(childStartInFull) in full text)", category: Logger.analysis)
+            }
+
+            // Try robust selection with verification on this child
+            if await selectTextWithVerification(
+                targetText: expectedErrorText,
+                in: candidate.element,
+                childText: candidate.text,
+                preferredOffset: preferredOffset
+            ) != nil {
+                selectedChildElement = candidate.element
+                Logger.info("SlackContentParser: Selection verified in candidate \(candidateIndex + 1)", category: Logger.analysis)
+                break
+            }
+        }
+
+        // If no candidate worked, abort
+        guard let childElement = selectedChildElement else {
+            Logger.warning("SlackContentParser: Could not verify selection in any child element", category: Logger.analysis)
+            restoreClipboardState(savedClipboard)
+            return .fallbackToPlainText
+        }
+
+        Logger.debug("SlackContentParser: Step 3-4 complete - selection verified for '\(expectedErrorText)'", category: Logger.analysis)
+
+        // Step 5: Activate Slack and copy to get formatting (selection is valid)
+        // CRITICAL: Activate Slack before Cmd+C, otherwise copy goes to wrong app
+        Logger.debug("SlackContentParser: Step 5 - Activating Slack and copying selected word", category: Logger.analysis)
+        if let slackApp = NSRunningApplication.runningApplications(withBundleIdentifier: "com.tinyspeck.slackmacgap").first {
+            slackApp.activate()
+            try? await Task.sleep(nanoseconds: 50_000_000) // 50ms for activation
+        }
+        _ = simulateKeyCombo(keyCode: 8, command: true) // Cmd+C
+        try? await Task.sleep(nanoseconds: 100_000_000) // 100ms for clipboard to populate
+
+        // Extract formatting from the copied Quill Delta
+        var formatting: [String: Any]?
+        if let quillDelta = getQuillDeltaFromClipboard() {
+            Logger.debug("SlackContentParser: Got Quill Delta from clipboard", category: Logger.analysis)
+            formatting = extractFormattingForText(expectedErrorText, from: quillDelta)
+            if formatting == nil {
+                formatting = extractFormattingAtPosition(0, from: quillDelta)
+            }
+            if let fmt = formatting {
+                Logger.info("SlackContentParser: Extracted formatting: \(fmt)", category: Logger.analysis)
+            }
+        }
+
+        // Step 6: Re-validate selection after copy (copy might have deselected)
+        // If selection was lost, use robust selection to re-select
+        Logger.debug("SlackContentParser: Step 6 - Re-validating selection after copy", category: Logger.analysis)
+        var selectionStillValid = false
+        var selectedTextRef: CFTypeRef?
+        let revalidateResult = AXUIElementCopyAttributeValue(childElement, kAXSelectedTextAttribute as CFString, &selectedTextRef)
+        if revalidateResult == .success, let reselectedText = selectedTextRef as? String {
+            if reselectedText == expectedErrorText {
+                selectionStillValid = true
+                Logger.debug("SlackContentParser: Re-validation passed - selection still valid", category: Logger.analysis)
+            } else {
+                Logger.debug("SlackContentParser: Selection changed after copy - got '\(reselectedText)' expected '\(expectedErrorText)'", category: Logger.analysis)
+            }
+        } else {
+            Logger.debug("SlackContentParser: Could not read selection after copy (result: \(revalidateResult.rawValue))", category: Logger.analysis)
+        }
+
+        // If selection was lost, use robust selection to re-select
+        if !selectionStillValid {
+            Logger.debug("SlackContentParser: Step 6b - Re-selecting text using robust verification", category: Logger.analysis)
+
+            // Get fresh child text for re-selection
+            var childTextRef: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(childElement, kAXValueAttribute as CFString, &childTextRef) == .success,
+                  let childText = childTextRef as? String
+            else {
+                Logger.warning("SlackContentParser: Could not get child text for re-selection", category: Logger.analysis)
+                restoreClipboardState(savedClipboard)
+                return .fallbackToPlainText
+            }
+
+            // Use robust selection with verification
+            guard let reselectionResult = await selectTextWithVerification(
+                targetText: expectedErrorText,
+                in: childElement,
+                childText: childText,
+                preferredOffset: nil // Let it try all occurrences
+            ) else {
+                Logger.warning("SlackContentParser: Re-selection with verification failed - aborting", category: Logger.analysis)
+                restoreClipboardState(savedClipboard)
+                return .fallbackToPlainText
+            }
+
+            Logger.debug("SlackContentParser: Re-selection verified: '\(reselectionResult.actualSelectedText)'", category: Logger.analysis)
+        }
+
+        // Step 7: Write clipboard with suggestion
+        Logger.debug("SlackContentParser: Step 7 - Writing clipboard (formatting: \(formatting != nil))", category: Logger.analysis)
+        if let fmt = formatting {
+            let quillDelta = createQuillDelta(text: suggestion, attributes: fmt)
+            writeSlackClipboard(plainText: suggestion, quillDelta: quillDelta)
+            Logger.info("SlackContentParser: Set clipboard with formatting", category: Logger.analysis)
+        } else {
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            pasteboard.setString(suggestion, forType: .string)
+        }
+
+        // Step 8: Activate Slack and paste
+        // CRITICAL: We must activate Slack before pasting, otherwise Cmd+V goes to whatever
+        // app has focus (which might be TextWarden's popover after user clicked suggestion)
+        Logger.debug("SlackContentParser: Step 8 - Activating Slack and pasting replacement", category: Logger.analysis)
+        if let slackApp = NSRunningApplication.runningApplications(withBundleIdentifier: "com.tinyspeck.slackmacgap").first {
+            slackApp.activate()
+            try? await Task.sleep(nanoseconds: 50_000_000) // 50ms for activation
+        }
+        simulatePaste()
+
+        try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
+        restoreClipboardState(savedClipboard)
+
+        Logger.info("SlackContentParser: Replacement completed successfully", category: Logger.analysis)
+        return .success
+    }
+
+    /// Get Quill Delta JSON from current clipboard
+    private func getQuillDeltaFromClipboard() -> String? {
+        let pasteboard = NSPasteboard.general
+        guard let data = pasteboard.data(forType: Self.chromiumWebCustomDataType) else {
+            return nil
+        }
+
+        // Try Pickle format first
+        if let pickleContent = parseChromiumPickle(data) {
+            return extractQuillDeltaJSON(from: pickleContent)
+        }
+
+        // Fallback to raw UTF-16LE
+        if let content = String(data: data, encoding: .utf16LittleEndian) {
+            return extractQuillDeltaJSON(from: content)
+        }
+
+        return nil
+    }
+
+    // MARK: - Quill Delta Formatting Preservation
+
+    /// Extract formatting attributes by finding text content in Quill Delta JSON.
+    /// This is more reliable than position-based lookup for fragmented Delta structures
+    /// (e.g., text between @mentions, links, etc. which create separate small ops).
+    private func extractFormattingForText(_ searchText: String, from quillDeltaJSON: String) -> [String: Any]? {
+        guard let data = quillDeltaJSON.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let ops = json["ops"] as? [[String: Any]]
+        else {
+            return nil
+        }
+
+        // Search for the error text in ops
+        for op in ops {
+            guard let insert = op["insert"] as? String else { continue }
+
+            // Check if this op contains the search text
+            if insert.contains(searchText) {
+                if let attributes = op["attributes"] as? [String: Any], !attributes.isEmpty {
+                    // Filter to only inline formatting
+                    let inlineAttributes = attributes.filter { key, _ in
+                        !Self.blockLevelAttributeKeys.contains(key)
+                    }
+                    if !inlineAttributes.isEmpty {
+                        Logger.debug("SlackContentParser: Text (\(searchText.count) chars) found in op with text (\(insert.count) chars)", category: Logger.analysis)
+                        return inlineAttributes
+                    }
+                }
+            }
+        }
+
+        // Not found or no formatting
+        return nil
+    }
+
+    /// Extract formatting attributes at a character position from Quill Delta JSON.
+    /// Returns a dictionary of attributes (e.g., ["bold": true, "italic": true]) or nil if no formatting.
+    private func extractFormattingAtPosition(_ position: Int, from quillDeltaJSON: String) -> [String: Any]? {
+        guard let data = quillDeltaJSON.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let ops = json["ops"] as? [[String: Any]]
+        else {
+            Logger.debug("SlackContentParser: extractFormattingAtPosition - failed to parse JSON", category: Logger.analysis)
+            return nil
+        }
+
+        Logger.debug("SlackContentParser: Looking for formatting at position \(position), Quill Delta has \(ops.count) ops", category: Logger.analysis)
+
+        var currentPos = 0
+        for (index, op) in ops.enumerated() {
+            guard let insert = op["insert"] else { continue }
+
+            // Calculate the length of this insert
+            // Embedded objects (images, etc.) count as 1
+            let insertLength = if let text = insert as? String {
+                text.unicodeScalars.count
+            } else {
+                1
+            }
+
+            let hasAttrs = op["attributes"] != nil
+            Logger.trace("SlackContentParser: Op \(index): pos \(currentPos)-\(currentPos + insertLength), hasAttrs=\(hasAttrs), length=\(insertLength)", category: Logger.analysis)
+
+            // Check if position falls within this op
+            if position >= currentPos, position < currentPos + insertLength {
+                // Found the op containing our position
+                Logger.debug("SlackContentParser: Position \(position) found in op \(index) (range \(currentPos)-\(currentPos + insertLength))", category: Logger.analysis)
+                if let attributes = op["attributes"] as? [String: Any], !attributes.isEmpty {
+                    // Filter to only inline formatting (not block-level like list, blockquote)
+                    let inlineAttributes = attributes.filter { key, _ in
+                        !Self.blockLevelAttributeKeys.contains(key)
+                    }
+                    return inlineAttributes.isEmpty ? nil : inlineAttributes
+                }
+                Logger.debug("SlackContentParser: Op has no inline attributes", category: Logger.analysis)
+                return nil
+            }
+
+            currentPos += insertLength
+        }
+
+        Logger.debug("SlackContentParser: Position \(position) not found in any op (total length: \(currentPos))", category: Logger.analysis)
+        return nil
+    }
+
+    /// Create a Quill Delta JSON string for text with optional formatting attributes.
+    /// - Parameters:
+    ///   - text: The text to insert
+    ///   - attributes: Optional formatting attributes (e.g., ["bold": true])
+    /// - Returns: Quill Delta JSON string
+    private func createQuillDelta(text: String, attributes: [String: Any]?) -> String {
+        var op: [String: Any] = ["insert": text]
+        if let attrs = attributes, !attrs.isEmpty {
+            op["attributes"] = attrs
+        }
+
+        let delta: [String: Any] = ["ops": [op]]
+
+        guard let data = try? JSONSerialization.data(withJSONObject: delta),
+              let jsonString = String(data: data, encoding: .utf8)
+        else {
+            // Fallback to simple format
+            return "{\"ops\":[{\"insert\":\"\(escapeForJSON(text))\"}]}"
+        }
+
+        return jsonString
+    }
+
+    /// Apply text correction to Quill Delta JSON while preserving formatting.
+    /// Uses direct string replacement to preserve exact JSON structure (key ordering, whitespace).
+    /// JSONSerialization changes key order which breaks Slack's parser.
+    private func applyTextCorrection(
+        to quillDelta: String,
+        errorStart: Int,
+        errorEnd: Int,
+        suggestion: String,
+        axValueText: String
+    ) -> String? {
+        // Step 1: Extract the actual error text from AXValue
+        guard errorStart >= 0, errorEnd <= axValueText.count, errorStart < errorEnd,
+              let axStartIdx = axValueText.index(axValueText.startIndex, offsetBy: errorStart, limitedBy: axValueText.endIndex),
+              let axEndIdx = axValueText.index(axValueText.startIndex, offsetBy: errorEnd, limitedBy: axValueText.endIndex)
+        else {
+            Logger.debug("SlackContentParser: Invalid error range \(errorStart)-\(errorEnd) for AXValue (length: \(axValueText.count))", category: Logger.analysis)
+            return nil
+        }
+        let errorText = String(axValueText[axStartIdx ..< axEndIdx])
+
+        // Step 2: Escape the error text and suggestion for JSON string matching
+        let jsonEscapedError = escapeForJSON(errorText)
+        let jsonEscapedSuggestion = escapeForJSON(suggestion)
+
+        // Step 3: Find the error text within an "insert":"..." value in the raw JSON
+        guard let errorRange = findInsertValue(jsonEscapedError, in: quillDelta) else {
+            Logger.debug("SlackContentParser: Error text '\(errorText)' not found in Quill Delta JSON", category: Logger.analysis)
+            return nil
+        }
+
+        // Step 4: Replace directly in the original JSON string (preserves structure exactly)
+        var modifiedDelta = quillDelta
+        modifiedDelta.replaceSubrange(errorRange, with: jsonEscapedSuggestion)
+
+        Logger.info("SlackContentParser: Applied correction via direct string replacement", category: Logger.analysis)
+        return modifiedDelta
+    }
+
+    /// Block-level attribute keys that should be stripped from Quill Delta.
+    /// These cause Slack to re-apply block formatting when pasting after Cmd+A.
+    private static let blockLevelAttributeKeys: Set<String> = [
+        "list", // Bullet/numbered list formatting
+        "blockquote", // Block quotes
+        "code-block", // Code blocks (not inline code)
+    ]
+
+    /// Strip block-level attributes from Quill Delta to prevent formatting from being re-applied.
+    /// Uses proper JSON parsing instead of fragile regex.
+    ///
+    /// When pasting Quill Delta with block attributes after Cmd+A, Slack applies those block
+    /// formats to everything. By removing these attributes, we preserve inline formatting
+    /// (bold, italic, code, strike, link) while the block structure remains intact.
+    private func stripBlockLevelAttributes(from delta: String) -> String {
+        guard let data = delta.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let ops = json["ops"] as? [[String: Any]]
+        else {
+            // If parsing fails, return original (don't break anything)
+            Logger.debug("SlackContentParser: Could not parse delta for attribute stripping", category: Logger.analysis)
+            return delta
+        }
+
+        var strippedAny = false
+        var modifiedOps: [[String: Any]] = []
+
+        for var op in ops {
+            if var attrs = op["attributes"] as? [String: Any] {
+                // Remove block-level attributes
+                for key in Self.blockLevelAttributeKeys {
+                    if attrs.removeValue(forKey: key) != nil {
+                        strippedAny = true
+                    }
+                }
+
+                // Keep attributes only if non-empty (preserves inline formatting)
+                if attrs.isEmpty {
+                    op.removeValue(forKey: "attributes")
+                } else {
+                    op["attributes"] = attrs
+                }
+            }
+            modifiedOps.append(op)
+        }
+
+        if !strippedAny {
+            Logger.debug("SlackContentParser: No block-level attributes to strip", category: Logger.analysis)
+            return delta // No changes needed
+        }
+
+        // Serialize back to JSON
+        let result: [String: Any] = ["ops": modifiedOps]
+        guard let resultData = try? JSONSerialization.data(withJSONObject: result),
+              let resultString = String(data: resultData, encoding: .utf8)
+        else {
+            Logger.warning("SlackContentParser: Failed to serialize modified delta", category: Logger.analysis)
+            return delta
+        }
+
+        Logger.info("SlackContentParser: Stripped block-level attributes from Quill Delta (\(delta.count) → \(resultString.count) chars)", category: Logger.analysis)
+        return resultString
+    }
+
+    /// Escape a string for JSON (handles quotes, backslashes, control characters)
+    private func escapeForJSON(_ string: String) -> String {
+        var result = ""
+        for char in string {
+            switch char {
+            case "\"": result += "\\\""
+            case "\\": result += "\\\\"
+            case "\n": result += "\\n"
+            case "\r": result += "\\r"
+            case "\t": result += "\\t"
+            default: result.append(char)
+            }
+        }
+        return result
+    }
+
+    /// Find the range of a value within an "insert":"value" pattern in JSON.
+    /// Returns the range of the search text within the value (not including quotes).
+    private func findInsertValue(_ searchText: String, in json: String) -> Range<String.Index>? {
+        var searchStart = json.startIndex
+
+        while let insertKeyRange = json.range(of: "\"insert\":", range: searchStart ..< json.endIndex) {
+            // Find what comes after "insert":
+            guard insertKeyRange.upperBound < json.endIndex else { break }
+
+            // Skip whitespace
+            var valueStart = insertKeyRange.upperBound
+            while valueStart < json.endIndex, json[valueStart].isWhitespace {
+                valueStart = json.index(after: valueStart)
+            }
+
+            guard valueStart < json.endIndex else { break }
+
+            // Check if this is a string value (starts with ")
+            if json[valueStart] == "\"" {
+                // Find the closing quote (handle escaped quotes)
+                let contentStart = json.index(after: valueStart)
+                var pos = contentStart
+
+                while pos < json.endIndex {
+                    if json[pos] == "\\" {
+                        // Skip escaped character
+                        pos = json.index(after: pos)
+                        if pos < json.endIndex {
+                            pos = json.index(after: pos)
+                        }
+                    } else if json[pos] == "\"" {
+                        // Found closing quote - check if search text is in this value
+                        let valueContent = String(json[contentStart ..< pos])
+
+                        if let matchRange = valueContent.range(of: searchText) {
+                            // Convert to range in original JSON string
+                            let matchStartOffset = valueContent.distance(from: valueContent.startIndex, to: matchRange.lowerBound)
+                            let matchEndOffset = valueContent.distance(from: valueContent.startIndex, to: matchRange.upperBound)
+
+                            guard let globalStart = json.index(contentStart, offsetBy: matchStartOffset, limitedBy: json.endIndex),
+                                  let globalEnd = json.index(contentStart, offsetBy: matchEndOffset, limitedBy: json.endIndex)
+                            else {
+                                break
+                            }
+
+                            return globalStart ..< globalEnd
+                        }
+                        break
+                    } else {
+                        pos = json.index(after: pos)
+                    }
+                }
+            }
+
+            // Move to search after this insert
+            searchStart = insertKeyRange.upperBound
+        }
+
+        return nil
+    }
+
+    /// Apply correction to plain text
+    private func applyPlainTextCorrection(
+        originalText: String,
+        errorStart: Int,
+        errorEnd: Int,
+        suggestion: String
+    ) -> String {
+        guard errorStart >= 0, errorEnd <= originalText.count, errorStart < errorEnd else {
+            return originalText
+        }
+
+        guard let startIndex = originalText.index(originalText.startIndex, offsetBy: errorStart, limitedBy: originalText.endIndex),
+              let endIndex = originalText.index(originalText.startIndex, offsetBy: errorEnd, limitedBy: originalText.endIndex),
+              startIndex < endIndex
+        else {
+            return originalText
+        }
+
+        var result = originalText
+        result.replaceSubrange(startIndex ..< endIndex, with: suggestion)
+        return result
+    }
+
+    /// Simulate Cmd+V paste
+    private func simulatePaste() {
+        _ = simulateKeyCombo(keyCode: 9, command: true) // 'V' key
+    }
+
+    // MARK: - Child Element Selection (for format-preserving replacement)
+
+    /// Find the child element containing the target text and return the offset within that element
+    /// Slack ignores AXSelectedTextRange on root element, but child elements work!
+    /// - Parameters:
+    ///   - targetText: The text to find
+    ///   - element: The root element to search within
+    ///   - expectedPositionInFullText: Optional grapheme position in full text to disambiguate multiple occurrences
+    ///   - fullText: The full text of the element (needed for position disambiguation)
+    private func findChildElementContainingText(
+        _ targetText: String,
+        in element: AXUIElement,
+        expectedPositionInFullText: Int? = nil,
+        fullText: String? = nil
+    ) -> (AXUIElement, Int)? {
+        var candidates: [(element: AXUIElement, text: String, offset: Int)] = []
+        collectTextElements(in: element, depth: 0, maxDepth: 10, candidates: &candidates, targetText: targetText)
+
+        // Sort by text length ascending to prefer most specific (smallest) element
+        let sortedCandidates = candidates.sorted { $0.text.count < $1.text.count }
+
+        for candidate in sortedCandidates {
+            // Find all occurrences of target text in this candidate
+            var occurrences: [(offset: Int, range: Range<String.Index>)] = []
+            var searchStart = candidate.text.startIndex
+
+            while let range = candidate.text.range(of: targetText, range: searchStart ..< candidate.text.endIndex) {
+                let offset = candidate.text.distance(from: candidate.text.startIndex, to: range.lowerBound)
+                occurrences.append((offset, range))
+                searchStart = range.upperBound
+            }
+
+            guard !occurrences.isEmpty else { continue }
+
+            // If we have position info and multiple occurrences, find the correct one
+            if let expectedPos = expectedPositionInFullText,
+               let fullText,
+               occurrences.count > 1
+            {
+                // Find where this child's text appears in the full text
+                if let childRangeInFull = fullText.range(of: candidate.text) {
+                    let childStartInFull = fullText.distance(from: fullText.startIndex, to: childRangeInFull.lowerBound)
+                    let expectedPosInChild = expectedPos - childStartInFull
+
+                    // Find the occurrence closest to the expected position
+                    let bestMatch = occurrences.min { abs($0.offset - expectedPosInChild) < abs($1.offset - expectedPosInChild) }
+                    if let match = bestMatch {
+                        Logger.debug("SlackContentParser: Found target text at offset \(match.offset) (expected ~\(expectedPosInChild), \(occurrences.count) occurrences)", category: Logger.analysis)
+                        return (candidate.element, match.offset)
+                    }
+                }
+            }
+
+            // Default: return first occurrence
+            let offset = occurrences[0].offset
+            Logger.debug("SlackContentParser: Found target text in child element (size \(candidate.text.count)) at offset \(offset)", category: Logger.analysis)
+            return (candidate.element, offset)
+        }
+
+        return nil
+    }
+
+    /// Collect child text elements for element tree traversal
+    private func collectTextElements(
+        in element: AXUIElement,
+        depth: Int,
+        maxDepth: Int,
+        candidates: inout [(element: AXUIElement, text: String, offset: Int)],
+        targetText: String
+    ) {
+        guard depth < maxDepth else { return }
+
+        var textValue: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &textValue) == .success,
+           let text = textValue as? String,
+           text.contains(targetText)
+        {
+            var sizeValue: CFTypeRef?
+            var height: CGFloat = 0
+            if AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeValue) == .success,
+               let sv = sizeValue,
+               CFGetTypeID(sv) == AXValueGetTypeID()
+            {
+                var size = CGSize.zero
+                AXValueGetValue(sv as! AXValue, .cgSize, &size)
+                height = size.height
+            }
+
+            // Prefer smaller elements (paragraph-level, not document-level)
+            if height > 0, height < 100 {
+                candidates.append((element: element, text: text, offset: 0))
+                Logger.trace("SlackContentParser: Candidate element: height=\(Int(height)), length=\(text.count)", category: Logger.analysis)
+            }
+        }
+
+        var childrenValue: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenValue) == .success,
+           let children = childrenValue as? [AXUIElement]
+        {
+            for child in children.prefix(100) {
+                collectTextElements(in: child, depth: depth + 1, maxDepth: maxDepth, candidates: &candidates, targetText: targetText)
+            }
+        }
+    }
+
+    // MARK: - Robust Selection with Verification
+
+    /// Result of a verified selection attempt
+    struct VerifiedSelectionResult {
+        let success: Bool
+        let childElement: AXUIElement
+        let rangeValue: AXValue
+        let actualSelectedText: String
+    }
+
+    /// Attempt to select text in a child element with verification and retry.
+    /// Tries ALL occurrences of the target text until one verifies correctly.
+    /// - Parameters:
+    ///   - targetText: The exact text to select
+    ///   - childElement: The AX element to select within
+    ///   - childText: The full text content of the child element
+    ///   - preferredOffset: Optional preferred offset (from position calculation) to try first
+    /// - Returns: VerifiedSelectionResult if successful, nil if all attempts failed
+    private func selectTextWithVerification(
+        targetText: String,
+        in childElement: AXUIElement,
+        childText: String,
+        preferredOffset: Int? = nil
+    ) async -> VerifiedSelectionResult? {
+        // Find ALL occurrences of target text in child element
+        var occurrences: [(graphemeOffset: Int, utf16Range: NSRange)] = []
+        var searchStart = childText.startIndex
+
+        while let range = childText.range(of: targetText, range: searchStart ..< childText.endIndex) {
+            let graphemeOffset = childText.distance(from: childText.startIndex, to: range.lowerBound)
+            let utf16Range = TextIndexConverter.graphemeToUTF16Range(
+                NSRange(location: graphemeOffset, length: targetText.count),
+                in: childText
+            )
+            occurrences.append((graphemeOffset, utf16Range))
+            searchStart = range.upperBound
+        }
+
+        guard !occurrences.isEmpty else {
+            Logger.warning("SlackContentParser: Target text '\(targetText)' not found in child element", category: Logger.analysis)
+            return nil
+        }
+
+        Logger.debug("SlackContentParser: Found \(occurrences.count) occurrence(s) of '\(targetText)' in child", category: Logger.analysis)
+
+        // Sort occurrences: if we have a preferred offset, try closest to it first
+        var sortedOccurrences = occurrences
+        if let preferred = preferredOffset {
+            sortedOccurrences.sort { abs($0.graphemeOffset - preferred) < abs($1.graphemeOffset - preferred) }
+            Logger.debug("SlackContentParser: Trying closest to preferred offset \(preferred) first", category: Logger.analysis)
+        }
+
+        // Try each occurrence until one verifies
+        for (index, occurrence) in sortedOccurrences.enumerated() {
+            Logger.debug("SlackContentParser: Attempt \(index + 1)/\(sortedOccurrences.count) - trying UTF-16 range \(occurrence.utf16Range.location)-\(occurrence.utf16Range.location + occurrence.utf16Range.length)", category: Logger.analysis)
+
+            var cfRange = CFRange(location: occurrence.utf16Range.location, length: occurrence.utf16Range.length)
+            guard let rangeValue = AXValueCreate(.cfRange, &cfRange) else {
+                Logger.debug("SlackContentParser: Failed to create CFRange for attempt \(index + 1)", category: Logger.analysis)
+                continue
+            }
+
+            // Set selection
+            let setResult = AXUIElementSetAttributeValue(childElement, kAXSelectedTextRangeAttribute as CFString, rangeValue)
+            if setResult != .success {
+                Logger.debug("SlackContentParser: Selection failed for attempt \(index + 1) (error: \(setResult.rawValue))", category: Logger.analysis)
+                continue
+            }
+
+            // Wait for selection to settle
+            try? await Task.sleep(nanoseconds: 30_000_000) // 30ms
+
+            // Verify by reading back
+            var selectedTextRef: CFTypeRef?
+            let readResult = AXUIElementCopyAttributeValue(childElement, kAXSelectedTextAttribute as CFString, &selectedTextRef)
+
+            if readResult == .success, let selectedText = selectedTextRef as? String {
+                if selectedText == targetText {
+                    Logger.debug("SlackContentParser: Selection VERIFIED on attempt \(index + 1) - '\(selectedText)'", category: Logger.analysis)
+                    return VerifiedSelectionResult(
+                        success: true,
+                        childElement: childElement,
+                        rangeValue: rangeValue,
+                        actualSelectedText: selectedText
+                    )
+                } else {
+                    Logger.debug("SlackContentParser: Attempt \(index + 1) selected wrong text: '\(selectedText)' (expected '\(targetText)')", category: Logger.analysis)
+                    // Continue to try next occurrence
+                }
+            } else {
+                Logger.debug("SlackContentParser: Could not read selection on attempt \(index + 1) (error: \(readResult.rawValue))", category: Logger.analysis)
+                // Continue to try next occurrence
+            }
+        }
+
+        Logger.warning("SlackContentParser: All \(occurrences.count) selection attempts failed for '\(targetText)'", category: Logger.analysis)
+        return nil
+    }
+
+    /// Parse the Quill Delta content string and extract exclusions
+    private func parseQuillDeltaContent(_ content: String, text: String) -> [ExclusionRange] {
+        var exclusions: [ExclusionRange] = []
+
+        // Extract JSON from the content
+        guard let jsonString = extractQuillDeltaJSON(from: content) else {
+            Logger.debug("SlackContentParser: No Quill Delta JSON found in content", category: Logger.analysis)
+
+            // Log what we found instead
+            if content.contains("ops") {
+                Logger.debug("SlackContentParser: Content contains 'ops' but couldn't extract JSON", category: Logger.analysis)
+            }
+            return exclusions
+        }
+
+        Logger.debug("SlackContentParser: Extracted Quill Delta JSON (\(jsonString.count) chars)", category: Logger.analysis)
+
+        guard let jsonData = jsonString.data(using: .utf8) else {
+            Logger.debug("SlackContentParser: Failed to convert JSON string to data", category: Logger.analysis)
+            return exclusions
+        }
+
+        // Parse JSON
+        do {
+            guard let json = try JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+                  let ops = json["ops"] as? [[String: Any]]
+            else {
+                Logger.debug("SlackContentParser: JSON doesn't have expected 'ops' structure", category: Logger.analysis)
+                return exclusions
+            }
+
+            Logger.info("SlackContentParser: Parsing Quill Delta with \(ops.count) operations", category: Logger.analysis)
+
+            var position = 0
+            for (index, op) in ops.enumerated() {
+                // Handle embedded objects (user, channel, emoji, date, etc.)
+                // In Slack's Quill Delta, embedded objects have insert as a dictionary, not a string
+                if let insertObject = op["insert"] as? [String: Any] {
+                    let objectType = parseEmbeddedObject(insertObject, at: position, operationIndex: index)
+                    if let type = objectType {
+                        // Embedded objects typically represent 1 character position (rendered as a span)
+                        // But we need to find the actual text representation
+                        let embeddedLength = getEmbeddedObjectLength(type: type, object: insertObject, in: text, at: position)
+                        Logger.info("SlackContentParser: Quill Delta: Found embedded '\(type)' at \(position), length: \(embeddedLength)", category: Logger.analysis)
+                        if embeddedLength > 0 {
+                            exclusions.append(ExclusionRange(location: position, length: embeddedLength))
+                        }
+                        position += embeddedLength
+                    } else {
+                        // Unknown embedded object, skip 1 position
+                        position += 1
+                    }
+                    continue
+                }
+
+                // Handle regular text insert
+                guard let insert = op["insert"] as? String else {
+                    Logger.debug("SlackContentParser: Op \(index) has no string insert: \(op)", category: Logger.analysis)
+                    continue
+                }
+
+                let insertLength = insert.count
+
+                // Check for attributes
+                if let attrs = op["attributes"] as? [String: Any] {
+                    // Log all attributes for debugging
+                    let attrKeys = attrs.keys.joined(separator: ", ")
+                    Logger.debug("SlackContentParser: Op \(index) attributes: \(attrKeys)", category: Logger.analysis)
+
+                    // Check for slackmention attribute (Slack's format for @mentions and #channels)
+                    // Format: {"slackmention": {"id": "U123...", "label": "@username", "mention": false, "unverified": false}}
+                    if let slackmention = attrs["slackmention"] as? [String: Any] {
+                        let mentionId = slackmention["id"] as? String ?? ""
+                        let label = slackmention["label"] as? String ?? ""
+                        var mentionType = "mention"
+
+                        // Determine type based on ID prefix: U=user, C=channel, S=usergroup
+                        if mentionId.hasPrefix("C") {
+                            mentionType = "channel"
+                        } else if mentionId.hasPrefix("S") {
+                            mentionType = "usergroup"
+                        } else if label == "@here" || label == "@channel" || label == "@everyone" {
+                            mentionType = "broadcast"
+                        }
+
+                        Logger.info("SlackContentParser: Quill Delta: Found \(mentionType) at \(position)-\(position + insertLength), length: \(insertLength), id: '\(mentionId)'", category: Logger.analysis)
+                        exclusions.append(ExclusionRange(location: position, length: insertLength))
+                    }
+
+                    // Check for link attribute (URLs)
+                    if attrs["link"] is String {
+                        Logger.info("SlackContentParser: Quill Delta: Found link at \(position)-\(position + insertLength), length: \(insertLength)", category: Logger.analysis)
+                        exclusions.append(ExclusionRange(location: position, length: insertLength))
+                    }
+
+                    // Check for code attribute (inline code) - excluded from grammar checking
+                    if let code = attrs["code"] as? Bool, code {
+                        exclusions.append(ExclusionRange(location: position, length: insertLength))
+                    }
+
+                    // Check for code-block attribute - excluded from grammar checking
+                    if attrs["code-block"] != nil {
+                        exclusions.append(ExclusionRange(location: position, length: insertLength))
+                    }
+
+                    // Check for blockquote attribute - excluded from grammar checking
+                    if attrs["blockquote"] != nil {
+                        exclusions.append(ExclusionRange(location: position, length: insertLength))
+                    }
+
+                    // Text styling (bold, italic, underline, strikethrough, lists) is NOT excluded
+                    // Grammar errors should still be flagged in styled text
+                }
+
+                position += insertLength
+            }
+
+            Logger.info("SlackContentParser: Quill Delta parsing complete. Found \(exclusions.count) exclusions", category: Logger.analysis)
+
+        } catch {
+            Logger.debug("SlackContentParser: Failed to parse Quill Delta JSON: \(error)", category: Logger.analysis)
+        }
+
+        return exclusions
+    }
+
+    /// Parse a Slack embedded object (user mention, channel, emoji, date, etc.)
+    /// Returns the type of object if recognized
+    private func parseEmbeddedObject(_ object: [String: Any], at _: Int, operationIndex: Int) -> String? {
+        // Log the embedded object for debugging
+        Logger.debug("SlackContentParser: Op \(operationIndex) embedded object: \(object)", category: Logger.analysis)
+
+        // Check for user mention: {"insert": {"user": "U12345"}}
+        if let userId = object["user"] as? String {
+            Logger.info("SlackContentParser: Found user mention embed: \(userId)", category: Logger.analysis)
+            return "user"
+        }
+
+        // Check for channel reference: {"insert": {"channel": "C12345"}}
+        if let channelId = object["channel"] as? String {
+            Logger.info("SlackContentParser: Found channel embed: \(channelId)", category: Logger.analysis)
+            return "channel"
+        }
+
+        // Check for broadcast: {"insert": {"broadcast": "here"}} or "channel" or "everyone"
+        if let broadcast = object["broadcast"] as? String {
+            Logger.info("SlackContentParser: Found broadcast embed: @\(broadcast)", category: Logger.analysis)
+            return "broadcast"
+        }
+
+        // Check for emoji: {"insert": {"emoji": "smile"}}
+        if let emoji = object["emoji"] as? String {
+            Logger.debug("SlackContentParser: Found emoji embed: :\(emoji):", category: Logger.analysis)
+            return "emoji"
+        }
+
+        // Check for Slack emoji: {"insert": {"slackemoji": {"text": ":smile:"}}}
+        if let slackemoji = object["slackemoji"] as? [String: Any] {
+            let text = slackemoji["text"] as? String ?? ""
+            Logger.debug("SlackContentParser: Found slackemoji embed: \(text)", category: Logger.analysis)
+            return "emoji"
+        }
+
+        // Check for date: {"insert": {"date": 1234567890}}
+        if object["date"] != nil {
+            Logger.debug("SlackContentParser: Found date embed", category: Logger.analysis)
+            return "date"
+        }
+
+        // Check for link (URL card): {"insert": {"link": "https://..."}}
+        if let link = object["link"] as? String {
+            Logger.info("SlackContentParser: Found link embed: \(link)", category: Logger.analysis)
+            return "link"
+        }
+
+        // Check for usergroup: {"insert": {"usergroup": "S12345"}}
+        if let usergroup = object["usergroup"] as? String {
+            Logger.info("SlackContentParser: Found usergroup embed: \(usergroup)", category: Logger.analysis)
+            return "usergroup"
+        }
+
+        // Unknown embedded object type
+        let keys = object.keys.joined(separator: ", ")
+        Logger.debug("SlackContentParser: Unknown embedded object type. Keys: \(keys)", category: Logger.analysis)
+        return nil
+    }
+
+    /// Get the length of an embedded object's text representation
+    /// This tries to find the matching text in the source text
+    private func getEmbeddedObjectLength(type: String, object: [String: Any], in text: String, at position: Int) -> Int {
+        // Default to 1 if we can't determine the length
+        // Slack typically renders embedded objects as short strings
+        switch type {
+        case "user":
+            // User mentions are rendered as @username - find by looking for @
+            if let matchRange = findMentionAt(position: position, in: text, prefix: "@") {
+                return matchRange.length
+            }
+            return 1
+
+        case "channel":
+            // Channels are rendered as #channel-name - find by looking for #
+            if let matchRange = findMentionAt(position: position, in: text, prefix: "#") {
+                return matchRange.length
+            }
+            return 1
+
+        case "broadcast":
+            // Broadcasts are @here, @channel, @everyone
+            if let broadcast = object["broadcast"] as? String {
+                return broadcast.count + 1 // +1 for @
+            }
+            return 1
+
+        case "emoji":
+            // Emojis are typically 1-2 characters (unicode emoji or custom emoji rendered as :name:)
+            return 1
+
+        case "date":
+            // Dates can vary in length depending on format
+            return 10 // Reasonable default
+
+        case "link", "usergroup":
+            // Links and usergroups vary in length
+            return 1
+
+        default:
+            return 1
+        }
+    }
+
+    /// Find a mention (@user or #channel) starting near the given position
+    private func findMentionAt(position: Int, in text: String, prefix: String) -> ExclusionRange? {
+        // Look in a window around the position for the prefix
+        let searchStart = max(0, position - 5)
+        let searchEnd = min(text.count, position + 50)
+
+        guard searchStart < searchEnd,
+              let startIndex = text.index(text.startIndex, offsetBy: searchStart, limitedBy: text.endIndex),
+              let endIndex = text.index(text.startIndex, offsetBy: searchEnd, limitedBy: text.endIndex)
+        else {
+            return nil
+        }
+
+        let searchWindow = String(text[startIndex ..< endIndex])
+
+        // Find the prefix in the window
+        guard let prefixRange = searchWindow.range(of: prefix) else {
+            return nil
+        }
+
+        // Find the end of the mention (space, newline, or punctuation)
+        let afterPrefix = searchWindow[prefixRange.upperBound...]
+        var mentionEnd = afterPrefix.startIndex
+
+        for char in afterPrefix {
+            if char.isWhitespace || char.isPunctuation && char != "_" && char != "-" {
+                break
+            }
+            mentionEnd = afterPrefix.index(after: mentionEnd)
+        }
+
+        let mention = String(searchWindow[prefixRange.lowerBound ..< mentionEnd])
+        let mentionStartInText = searchStart + searchWindow.distance(from: searchWindow.startIndex, to: prefixRange.lowerBound)
+
+        return ExclusionRange(location: mentionStartInText, length: mention.count)
+    }
+
+    /// Extract Quill Delta JSON from Chromium web-custom-data content
+    private func extractQuillDeltaJSON(from content: String) -> String? {
+        // Look for JSON object containing ops array
+        guard let opsRange = content.range(of: "{\"ops\"") else {
+            // Also try with spaces
+            guard let opsRange2 = content.range(of: "{ \"ops\"") else {
+                return nil
+            }
+            return extractJSONObject(from: content, startingAt: opsRange2.lowerBound)
+        }
+        return extractJSONObject(from: content, startingAt: opsRange.lowerBound)
+    }
+
+    /// Extract a complete JSON object from a string
+    private func extractJSONObject(from text: String, startingAt start: String.Index) -> String? {
+        var depth = 0
+        var endIndex = start
+
+        for (i, char) in text[start...].enumerated() {
+            if char == "{" { depth += 1 } else if char == "}" {
+                depth -= 1
+                if depth == 0 {
+                    endIndex = text.index(start, offsetBy: i + 1)
+                    break
+                }
+            }
+        }
+
+        guard depth == 0 else { return nil }
+        return String(text[start ..< endIndex])
+    }
+
+    /// Dump element tree for debugging - shows what AX attributes Slack exposes
+    private func dumpElementTree(_ element: AXUIElement, text: String, depth: Int) {
+        guard depth < 5 else { return } // Limit depth
+
+        let indent = String(repeating: "  ", count: depth)
+
+        // Get role
+        var roleRef: CFTypeRef?
+        let role = AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleRef) == .success
+            ? (roleRef as? String ?? "?") : "?"
+
+        // Get subrole
+        var subroleRef: CFTypeRef?
+        let subrole = AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subroleRef) == .success
+            ? (subroleRef as? String ?? "") : ""
+
+        // Get value (text content)
+        var valueRef: CFTypeRef?
+        let value = AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &valueRef) == .success
+            ? String((valueRef as? String ?? "").prefix(40)).replacingOccurrences(of: "\n", with: "\\n") : ""
+
+        // Get URL (for links, mentions, channels)
+        var urlRef: CFTypeRef?
+        var url = ""
+        if AXUIElementCopyAttributeValue(element, kAXURLAttribute as CFString, &urlRef) == .success {
+            if let u = urlRef as? URL { url = u.absoluteString } else if let u = urlRef as? String { url = u }
+        }
+
+        // Get description
+        var descRef: CFTypeRef?
+        let desc = AXUIElementCopyAttributeValue(element, kAXDescriptionAttribute as CFString, &descRef) == .success
+            ? (descRef as? String ?? "") : ""
+
+        // Get AXBlockQuoteLevel
+        var levelRef: CFTypeRef?
+        let quoteLevel = AXUIElementCopyAttributeValue(element, "AXBlockQuoteLevel" as CFString, &levelRef) == .success
+            ? (levelRef as? Int ?? 0) : 0
+
+        // Build log line
+        var info = "\(indent)[\(role)"
+        if !subrole.isEmpty { info += "/\(subrole)" }
+        info += "]"
+        if !value.isEmpty { info += " val='\(value)'" }
+        if !url.isEmpty { info += " url='\(url)'" }
+        if !desc.isEmpty { info += " desc='\(desc)'" }
+        if quoteLevel > 0 { info += " quoteLevel=\(quoteLevel)" }
+
+        Logger.debug("SlackContentParser: \(info)", category: Logger.analysis)
+
+        // Recurse into children
+        var childrenRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+           let children = childrenRef as? [AXUIElement]
+        {
+            for child in children.prefix(15) { // Limit children per level
+                dumpElementTree(child, text: text, depth: depth + 1)
+            }
+        }
+    }
+
+    /// Detect links (URLs) via AXLink role elements
+    ///
+    /// In Slack, links appear as AXLink elements with AXStaticText children containing the URL text.
+    /// This method traverses the element tree (limited depth for performance), finds AXLink elements,
+    /// and extracts their text.
+    private func detectLinks(in element: AXUIElement, text: String) -> [ExclusionRange] {
+        detectLinksRecursive(in: element, text: text, depth: 0)
+    }
+
+    /// Maximum depth for link detection tree traversal
+    /// Links in Slack are typically at depth 1-3 (AXTextArea → AXGroup? → AXLink → AXStaticText)
+    private static let maxLinkDetectionDepth = 5
+
+    private func detectLinksRecursive(in element: AXUIElement, text: String, depth: Int) -> [ExclusionRange] {
+        // Limit recursion depth for performance
+        guard depth < Self.maxLinkDetectionDepth else { return [] }
+
+        var linkRanges: [ExclusionRange] = []
+
+        // Get role once (avoid duplicate AX calls)
+        var roleRef: CFTypeRef?
+        let role: String? = AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleRef) == .success
+            ? roleRef as? String : nil
+
+        // Check if this element is a link
+        if role == "AXLink" {
+            // Get link text - try direct value first, then check children
+            var valueRef: CFTypeRef?
+            var linkText = ""
+
+            if AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &valueRef) == .success,
+               let v = valueRef as? String, !v.isEmpty
+            {
+                linkText = v
+            } else {
+                // AXLink often has empty value; look at child AXStaticText for the URL
+                linkText = getLinkTextFromChildren(element)
+            }
+
+            // Only detect actual URLs, not mentions/channels (those have AXBackgroundColor)
+            if !linkText.isEmpty, linkText.hasPrefix("http://") || linkText.hasPrefix("https://") {
+                // Find position of link text in parent text
+                if let range = text.range(of: linkText) {
+                    let location = text.distance(from: text.startIndex, to: range.lowerBound)
+                    let length = linkText.count
+                    linkRanges.append(ExclusionRange(location: location, length: length))
+                }
+            }
+            // Don't recurse into AXLink children - we already extracted the text
+            return linkRanges
+        }
+
+        // Recurse into children
+        var childrenRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+           let children = childrenRef as? [AXUIElement]
+        {
+            for child in children {
+                linkRanges.append(contentsOf: detectLinksRecursive(in: child, text: text, depth: depth + 1))
+            }
+        }
+
+        return linkRanges
+    }
+
+    /// Get link text from AXStaticText children of an AXLink element
+    private func getLinkTextFromChildren(_ element: AXUIElement) -> String {
+        var childrenRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+              let children = childrenRef as? [AXUIElement]
+        else {
+            return ""
+        }
+
+        for child in children {
+            var roleRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(child, kAXRoleAttribute as CFString, &roleRef) == .success,
+               let role = roleRef as? String,
+               role == "AXStaticText"
+            {
+                var valueRef: CFTypeRef?
+                if AXUIElementCopyAttributeValue(child, kAXValueAttribute as CFString, &valueRef) == .success,
+                   let value = valueRef as? String, !value.isEmpty
+                {
+                    return value
+                }
+            }
+
+            // Recurse into nested children
+            let nestedText = getLinkTextFromChildren(child)
+            if !nestedText.isEmpty {
+                return nestedText
+            }
+        }
+
+        return ""
+    }
+
+    /// Detect mentions (@user) and channels (#channel) in element tree
+    /// These appear as AXStaticText children with @ or # prefixes
+    private func detectMentionsAndChannels(in element: AXUIElement, text: String) -> [ExclusionRange] {
+        var exclusions: [ExclusionRange] = []
+
+        // Get child elements
+        var childrenRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+              let children = childrenRef as? [AXUIElement]
+        else {
+            return exclusions
+        }
+
+        for child in children {
+            // Check if this is an AXStaticText element
+            var roleRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(child, kAXRoleAttribute as CFString, &roleRef) == .success,
+               let role = roleRef as? String,
+               role == "AXStaticText"
+            {
+                // Get the value
+                var valueRef: CFTypeRef?
+                if AXUIElementCopyAttributeValue(child, kAXValueAttribute as CFString, &valueRef) == .success,
+                   let value = valueRef as? String,
+                   !value.isEmpty
+                {
+                    // Check for mention or channel prefix
+                    let isMention = value.hasPrefix("@") && value.count > 1 && !value.contains("@.") // Exclude email-like patterns
+                    let isChannel = value.hasPrefix("#") && value.count > 1
+
+                    if isMention || isChannel {
+                        // Find this text in the parent text
+                        if let range = text.range(of: value) {
+                            let location = text.distance(from: text.startIndex, to: range.lowerBound)
+                            let length = value.count
+                            exclusions.append(ExclusionRange(location: location, length: length))
+                        }
+                    }
+                }
+            }
+
+            // Recurse into children
+            exclusions.append(contentsOf: detectMentionsAndChannels(in: child, text: text))
+        }
+
+        return exclusions
+    }
+
+    /// Detect inline code using AXCodeStyleGroup subrole
+    private func detectCodeStyleGroups(in element: AXUIElement, text: String) -> [ExclusionRange] {
+        var codeRanges: [ExclusionRange] = []
+
+        // Get child elements and check their subroles
+        var childrenRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+              let children = childrenRef as? [AXUIElement]
+        else {
+            return codeRanges
+        }
+
+        for child in children {
+            // Check subrole for code style
+            var subroleRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(child, kAXSubroleAttribute as CFString, &subroleRef) == .success,
+               let subrole = subroleRef as? String,
+               subrole == "AXCodeStyleGroup"
+            {
+                // Get the text content - may be in child AXStaticText elements
+                let codeText = getTextFromElement(child)
+
+                if !codeText.isEmpty {
+                    // Find position of code text in parent text
+                    if let range = text.range(of: codeText) {
+                        let location = text.distance(from: text.startIndex, to: range.lowerBound)
+                        let length = codeText.count
+                        Logger.debug("SlackContentParser: Found inline code at \(location)-\(location + length) (\(codeText.count) chars)", category: Logger.analysis)
+                        codeRanges.append(ExclusionRange(location: location, length: length))
+                    } else {
+                        Logger.debug("SlackContentParser: Found inline code but text not found in parent (\(codeText.count) chars)", category: Logger.analysis)
+                    }
+                } else {
+                    Logger.debug("SlackContentParser: Found AXCodeStyleGroup but no text content", category: Logger.analysis)
+                }
+            }
+
+            // Recursively check child's children
+            codeRanges.append(contentsOf: detectCodeStyleGroups(in: child, text: text))
+        }
+
+        return codeRanges
+    }
+
+    /// Get text from an element, checking both AXValue and child AXStaticText elements
+    private func getTextFromElement(_ element: AXUIElement) -> String {
+        // First try AXValue on the element itself
+        var valueRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &valueRef) == .success,
+           let value = valueRef as? String,
+           !value.isEmpty
+        {
+            return value
+        }
+
+        // Then try to concatenate text from child AXStaticText elements
+        var childrenRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+              let children = childrenRef as? [AXUIElement]
+        else {
+            return ""
+        }
+
+        var combinedText = ""
+        for child in children {
+            var roleRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(child, kAXRoleAttribute as CFString, &roleRef) == .success,
+               let role = roleRef as? String,
+               role == "AXStaticText"
+            {
+                var childValueRef: CFTypeRef?
+                if AXUIElementCopyAttributeValue(child, kAXValueAttribute as CFString, &childValueRef) == .success,
+                   let childValue = childValueRef as? String
+                {
+                    combinedText += childValue
+                }
+            }
+        }
+
+        return combinedText
+    }
+
+    /// Detect block quotes using AXBlockQuoteLevel attribute
+    private func detectBlockQuotes(in element: AXUIElement, text: String) -> [ExclusionRange] {
+        var quoteRanges: [ExclusionRange] = []
+
+        // Check for block quote level attribute
+        var levelRef: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, "AXBlockQuoteLevel" as CFString, &levelRef) == .success,
+           let level = levelRef as? Int,
+           level > 0
+        {
+            // This element is a block quote - get its text content
+            var valueRef: CFTypeRef?
+            let quoteText: String = if AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &valueRef) == .success,
+                                       let value = valueRef as? String
+            {
+                value
+            } else {
+                "(no text)"
+            }
+
+            if let range = getTextRange(for: element, in: element) {
+                Logger.info("SlackContentParser: Found block quote at level \(level), range \(range.location)-\(range.location + range.length), length: \(quoteText.count) chars", category: Logger.analysis)
+                quoteRanges.append(range)
+            } else {
+                // Still log even if we couldn't get the range
+                Logger.debug("SlackContentParser: Found block quote at level \(level) but couldn't determine range, length: \(quoteText.count) chars", category: Logger.analysis)
+            }
+        }
+
+        // Check children for block quotes
+        var childrenRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenRef) == .success,
+              let children = childrenRef as? [AXUIElement]
+        else {
+            return quoteRanges
+        }
+
+        for child in children {
+            quoteRanges.append(contentsOf: detectBlockQuotes(in: child, text: text))
+        }
+
+        return quoteRanges
+    }
+
+    /// Get text range for a child element within the parent
+    private func getTextRange(for child: AXUIElement, in parent: AXUIElement) -> ExclusionRange? {
+        // Try to get the text content and position
+        var valueRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(child, kAXValueAttribute as CFString, &valueRef) == .success,
+              let childText = valueRef as? String
+        else {
+            return nil
+        }
+
+        // Get parent text for position lookup
+        var parentValueRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(parent, kAXValueAttribute as CFString, &parentValueRef) == .success,
+              let parentText = parentValueRef as? String
+        else {
+            return nil
+        }
+
+        // Find position of child text in parent
+        if let range = parentText.range(of: childText) {
+            let location = parentText.distance(from: parentText.startIndex, to: range.lowerBound)
+            let length = childText.count
+            return ExclusionRange(location: location, length: length)
+        }
+
+        return nil
+    }
+
+    /// Clear cached exclusions (call when text changes significantly)
+    func clearExclusionCache() {
+        cachedExclusions = []
+        exclusionTextHash = 0
+        // Don't reset Quill Delta - it's expensive and should persist
+        // hasExtractedQuillDelta = false
+        // quillDeltaExclusions = []
+    }
+
+    /// Reset all state (call when monitoring a new element)
+    func resetState() {
+        cachedExclusions = []
+        exclusionTextHash = 0
+        hasExtractedQuillDelta = false
+        quillDeltaExclusions = []
+        hasDumpedElementTree = false
+        // Clear cached Quill Delta for format-preserving replacement
+        cachedQuillDeltaJSON = nil
+        cachedQuillDeltaPlainText = nil
+        stopClipboardMonitoring()
+    }
+
+    // MARK: - Clipboard Monitoring
+
+    /// Start monitoring the clipboard for Quill Delta data
+    /// This allows us to capture exclusions when the user copies text from Slack
+    func startClipboardMonitoring(for text: String) {
+        guard clipboardMonitorTimer == nil else { return }
+
+        lastClipboardChangeCount = NSPasteboard.general.changeCount
+        Logger.info("SlackContentParser: Starting clipboard monitoring (initial change count: \(lastClipboardChangeCount))", category: Logger.analysis)
+
+        clipboardMonitorTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+            self?.checkClipboardForQuillDelta(text: text)
+        }
+    }
+
+    /// Stop clipboard monitoring
+    func stopClipboardMonitoring() {
+        clipboardMonitorTimer?.invalidate()
+        clipboardMonitorTimer = nil
+    }
+
+    /// Check if clipboard has changed and contains Quill Delta data
+    private func checkClipboardForQuillDelta(text: String) {
+        let pasteboard = NSPasteboard.general
+        let currentChangeCount = pasteboard.changeCount
+
+        guard currentChangeCount != lastClipboardChangeCount else { return }
+
+        lastClipboardChangeCount = currentChangeCount
+        Logger.info("SlackContentParser: Clipboard changed (count: \(currentChangeCount))", category: Logger.analysis)
+
+        // Check if org.chromium.web-custom-data is present
+        if let types = pasteboard.types {
+            let hasQuillDelta = types.contains(Self.chromiumWebCustomDataType)
+            Logger.info("SlackContentParser: Has org.chromium.web-custom-data: \(hasQuillDelta)", category: Logger.analysis)
+
+            if hasQuillDelta {
+                // Parse the Quill Delta and update exclusions
+                let newExclusions = parseQuillDeltaFromClipboard(text: text)
+                if !newExclusions.isEmpty {
+                    quillDeltaExclusions = newExclusions
+                    Logger.info("SlackContentParser: Updated exclusions from clipboard: \(newExclusions.count) ranges", category: Logger.analysis)
+
+                    // Clear cached exclusions to force re-evaluation
+                    cachedExclusions = []
+                    exclusionTextHash = 0
+                }
+
+                // Cache the Quill Delta JSON for format-preserving replacement
+                if let quillJSON = getQuillDeltaFromClipboard(),
+                   let plainText = pasteboard.string(forType: .string)
+                {
+                    cachedQuillDeltaJSON = quillJSON
+                    cachedQuillDeltaPlainText = plainText
+                    Logger.info("SlackContentParser: Cached Quill Delta JSON (\(quillJSON.count) chars) for format-preserving replacement", category: Logger.analysis)
+                }
+            }
+
+            // Log all types for debugging
+            for type in types {
+                if type.rawValue.contains("slack") || type.rawValue.contains("chromium") || type.rawValue.contains("tinyspeck") {
+                    if let data = pasteboard.data(forType: type) {
+                        Logger.info("SlackContentParser: Clipboard type '\(type.rawValue)': \(data.count) bytes", category: Logger.analysis)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Log current clipboard state for debugging (without exposing content)
+    func logClipboardContents() {
+        let pasteboard = NSPasteboard.general
+
+        guard let types = pasteboard.types else {
+            Logger.debug("SlackContentParser: Clipboard empty", category: Logger.analysis)
+            return
+        }
+
+        // Check specifically for Quill Delta
+        let hasQuillDelta = types.contains(Self.chromiumWebCustomDataType)
+        let slackTypes = types.filter { $0.rawValue.contains("slack") || $0.rawValue.contains("chromium") }
+
+        Logger.info("SlackContentParser: Clipboard has \(types.count) types, \(slackTypes.count) Slack-related, Quill Delta: \(hasQuillDelta)", category: Logger.analysis)
+    }
+
+    /// Visual underlines enabled/disabled from AppConfiguration
+    var disablesVisualUnderlines: Bool {
+        !config.features.visualUnderlinesEnabled
+    }
+
+    /// Slack selection API uses the same indices as AXValue - no offset adjustment needed.
+    /// Previously, we tried various offset schemes, but they caused more issues than they solved.
+    /// The X-axis drift for positions after emojis is a Chromium accessibility bug that
+    /// can't be reliably corrected with a simple offset.
+    func selectionOffset(at _: Int, in _: String) -> Int {
+        0
+    }
+
+    /// Slack needs UTF-16 conversion for correct emoji handling in Chromium selection APIs.
+    /// Emojis like 😭 are 1 grapheme but 2 UTF-16 code units, causing position drift without conversion.
+    var requiresUTF16Conversion: Bool {
+        true
+    }
+
+    /// Slack renders emojis as [AXImage] children that cause text marker position drift.
+    /// When emojis are present, positioning strategies should disable visual underlines.
+    var hasEmbeddedImagePositioningIssues: Bool {
+        true
+    }
+
+    /// Diagnostic result from probing Slack's AX capabilities
+    private static var diagnosticResult: NotionDiagnosticResult?
+    private static var hasRunDiagnostic = false
+
+    /// UI contexts within Slack with different rendering characteristics
+    private enum SlackContext: String {
+        case messageInput = "message-input"
+        case searchBar = "search-bar"
+        case threadReply = "thread-reply"
+        case editMessage = "edit-message"
+        case unknown
+    }
+
+    func detectUIContext(element: AXUIElement) -> String? {
+        var descValue: CFTypeRef?
+        var identifierValue: CFTypeRef?
+
+        AXUIElementCopyAttributeValue(element, kAXDescriptionAttribute as CFString, &descValue)
+        AXUIElementCopyAttributeValue(element, kAXIdentifierAttribute as CFString, &identifierValue)
+
+        let description = descValue as? String
+        let identifier = identifierValue as? String
+
+        if let desc = description?.lowercased() {
+            if desc.contains("search") {
+                return SlackContext.searchBar.rawValue
+            } else if desc.contains("thread") || desc.contains("reply") {
+                return SlackContext.threadReply.rawValue
+            } else if desc.contains("edit") {
+                return SlackContext.editMessage.rawValue
+            } else if desc.contains("message") || desc.contains("compose") {
+                return SlackContext.messageInput.rawValue
+            }
+        }
+
+        if let id = identifier?.lowercased() {
+            if id.contains("search") {
+                return SlackContext.searchBar.rawValue
+            } else if id.contains("thread") {
+                return SlackContext.threadReply.rawValue
+            } else if id.contains("composer") || id.contains("message") {
+                return SlackContext.messageInput.rawValue
+            }
+        }
+
+        return SlackContext.messageInput.rawValue
+    }
+
+    func estimatedFontSize(context _: String?) -> CGFloat {
+        // Use font size from AppConfiguration
+        config.fontConfig.defaultSize
+    }
+
+    func spacingMultiplier(context: String?) -> CGFloat {
+        // Base multiplier from AppConfiguration, with context-specific adjustments
+        let baseMultiplier = config.fontConfig.spacingMultiplier
+        guard let ctx = context else {
+            return baseMultiplier
+        }
+
+        let slackContext = SlackContext(rawValue: ctx) ?? .unknown
+
+        switch slackContext {
+        case .messageInput, .threadReply, .editMessage, .unknown:
+            return baseMultiplier
+        case .searchBar:
+            return baseMultiplier + 0.01 // Slightly wider for search bar
+        }
+    }
+
+    func horizontalPadding(context: String?) -> CGFloat {
+        // Base padding from AppConfiguration, with context-specific adjustments
+        let basePadding = config.horizontalPadding
+        guard let ctx = context else {
+            return basePadding
+        }
+
+        let slackContext = SlackContext(rawValue: ctx) ?? .unknown
+
+        switch slackContext {
+        case .searchBar:
+            return basePadding + 4.0 // Extra padding for search bar
+        default:
+            return basePadding
+        }
+    }
+
+    /// Use the multi-strategy PositionResolver for positioning
+    /// This leverages TextMarkerStrategy which works well for Chromium/Electron apps
+    func resolvePosition(
+        for errorRange: NSRange,
+        in element: AXUIElement,
+        text: String
+    ) -> GeometryResult {
+        // Run diagnostic ONCE to discover what AX APIs work for Slack
+        if !Self.hasRunDiagnostic {
+            Self.hasRunDiagnostic = true
+            Self.diagnosticResult = AccessibilityBridge.runNotionDiagnostic(element)
+
+            if let result = Self.diagnosticResult {
+                Logger.info("SLACK DIAGNOSTIC SUMMARY:", category: Logger.analysis)
+                Logger.info("  Best method: \(result.bestMethodDescription)", category: Logger.analysis)
+                Logger.info("  Has working method: \(result.hasWorkingMethod)", category: Logger.analysis)
+                Logger.info("  Supported param attrs: \(result.supportedParamAttributes.joined(separator: ", "))")
+            }
+        }
+
+        // Delegate to the PositionResolver which tries strategies in order:
+        // 1. TextMarkerStrategy (opaque markers - works for Chromium)
+        // 2. RangeBoundsStrategy (CFRange bounds)
+        // 3. ElementTreeStrategy (child element traversal)
+        // 4. LineIndexStrategy, OriginStrategy, AnchorSearchStrategy
+        // 5. FontMetricsStrategy (app-specific font estimation)
+        // 6. SelectionBoundsStrategy, NavigationStrategy (last resort)
+        return PositionResolver.shared.resolvePosition(
+            for: errorRange,
+            in: element,
+            text: text,
+            parser: self,
+            bundleID: bundleIdentifier
+        )
+    }
+
+    /// Bounds adjustment - delegates to PositionResolver for consistent multi-strategy approach
+    /// This is called by ErrorOverlayWindow.estimateErrorBounds() for legacy compatibility
+    func adjustBounds(
+        element: AXUIElement,
+        errorRange: NSRange,
+        textBeforeError: String,
+        errorText: String,
+        fullText: String
+    ) -> AdjustedBounds? {
+        let context = detectUIContext(element: element)
+        let fontSize = estimatedFontSize(context: context)
+
+        // Try cursor-anchored positioning first (like Notion)
+        if let cursorResult = getCursorAnchoredPosition(
+            element: element,
+            errorRange: errorRange,
+            textBeforeError: textBeforeError,
+            errorText: errorText,
+            fullText: fullText,
+            context: context,
+            fontSize: fontSize
+        ) {
+            return cursorResult
+        }
+
+        // Try direct AX bounds for the error range
+        if let axBounds = getSlackValidatedBounds(element: element, range: errorRange) {
+            return AdjustedBounds(
+                position: NSPoint(x: axBounds.origin.x, y: axBounds.origin.y),
+                errorWidth: axBounds.width,
+                confidence: 0.9,
+                uiContext: context,
+                debugInfo: "Slack AX bounds (direct)"
+            )
+        }
+
+        // Fall back to text measurement with graceful degradation
+        return getTextMeasurementFallback(
+            element: element,
+            errorRange: errorRange,
+            textBeforeError: textBeforeError,
+            errorText: errorText,
+            context: context,
+            fontSize: fontSize
+        )
+    }
+
+    // MARK: - Cursor-Anchored Positioning
+
+    /// Get cursor position and use it as anchor for more reliable positioning
+    private func getCursorAnchoredPosition(
+        element: AXUIElement,
+        errorRange: NSRange,
+        textBeforeError _: String,
+        errorText: String,
+        fullText: String,
+        context: String?,
+        fontSize: CGFloat
+    ) -> AdjustedBounds? {
+        // Get cursor position
+        var selectedRangeValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+                  element,
+                  kAXSelectedTextRangeAttribute as CFString,
+                  &selectedRangeValue
+              ) == .success,
+              let rangeRef = selectedRangeValue,
+              let selectedRange = safeAXValueGetRange(rangeRef)
+        else {
+            return nil
+        }
+
+        let cursorPosition = selectedRange.location
+
+        // Try to get bounds at cursor position
+        var cursorBounds: CGRect?
+
+        // Method 1: AXInsertionPointFrame
+        var insertionPointValue: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, "AXInsertionPointFrame" as CFString, &insertionPointValue) == .success,
+           let axValue = insertionPointValue,
+           let frame = safeAXValueGetRect(axValue)
+        {
+            if frame.width >= 0, frame.height > GeometryConstants.minimumBoundsSize, frame.height < GeometryConstants.conservativeMaxLineHeight {
+                cursorBounds = frame
+                Logger.debug("Slack: Got cursor bounds from AXInsertionPointFrame: \(frame)", category: Logger.ui)
+            }
+        }
+
+        // Method 2: Bounds for character at cursor
+        if cursorBounds == nil {
+            if let bounds = getSlackValidatedBounds(element: element, range: NSRange(location: cursorPosition, length: 1)) {
+                cursorBounds = bounds
+                Logger.debug("Slack: Got cursor bounds from single char: \(bounds)", category: Logger.ui)
+            }
+        }
+
+        // Method 3: Bounds for character before cursor
+        if cursorBounds == nil, cursorPosition > 0 {
+            if let bounds = getSlackValidatedBounds(element: element, range: NSRange(location: cursorPosition - 1, length: 1)) {
+                let cursor = CGRect(
+                    x: bounds.origin.x + bounds.width,
+                    y: bounds.origin.y,
+                    width: 1,
+                    height: bounds.height
+                )
+                cursorBounds = cursor
+                Logger.debug("Slack: Got cursor bounds from prev char: \(cursor)", category: Logger.ui)
+            }
+        }
+
+        guard let cursor = cursorBounds else {
+            return nil
+        }
+
+        // Calculate error position relative to cursor
+        let font = NSFont.systemFont(ofSize: fontSize)
+        let attributes: [NSAttributedString.Key: Any] = [.font: font]
+        let multiplier = spacingMultiplier(context: context)
+
+        let errorWidth = max((errorText as NSString).size(withAttributes: attributes).width * multiplier, 20.0)
+
+        // Calculate X offset from cursor to error
+        let charsBetween = errorRange.location - cursorPosition
+        var xPosition: CGFloat
+
+        if charsBetween >= 0 {
+            // Error is after cursor
+            let textBetween = String(fullText.dropFirst(cursorPosition).prefix(charsBetween))
+            let offsetWidth = (textBetween as NSString).size(withAttributes: attributes).width * multiplier
+            xPosition = cursor.origin.x + offsetWidth
+        } else {
+            // Error is before cursor
+            let textBetween = String(fullText.dropFirst(errorRange.location).prefix(-charsBetween))
+            let offsetWidth = (textBetween as NSString).size(withAttributes: attributes).width * multiplier
+            xPosition = cursor.origin.x - offsetWidth
+        }
+
+        Logger.debug("Slack: Cursor-anchored position - cursor=\(cursorPosition), error=\(errorRange.location), x=\(xPosition)", category: Logger.ui)
+
+        return AdjustedBounds(
+            position: NSPoint(x: xPosition, y: cursor.origin.y),
+            errorWidth: errorWidth,
+            confidence: 0.80,
+            uiContext: context,
+            debugInfo: "Slack cursor-anchored (cursorPos: \(cursorPosition), charsBetween: \(charsBetween))"
+        )
+    }
+
+    // MARK: - AX Bounds Helpers
+
+    /// Get validated bounds with Slack-specific origin check
+    /// Slack's Electron app sometimes returns negative coordinates
+    private func getSlackValidatedBounds(element: AXUIElement, range: NSRange) -> CGRect? {
+        guard let bounds = AccessibilityBridge.getBoundsForRange(range, in: element) else {
+            return nil
+        }
+
+        // Slack-specific: reject negative or zero origin (Electron bug)
+        guard bounds.origin.x > 0, bounds.origin.y > 0 else {
+            return nil
+        }
+
+        return bounds
+    }
+
+    // MARK: - Text Measurement Fallback
+
+    private func getTextMeasurementFallback(
+        element: AXUIElement,
+        errorRange _: NSRange,
+        textBeforeError: String,
+        errorText: String,
+        context: String?,
+        fontSize: CGFloat
+    ) -> AdjustedBounds? {
+        guard let elementFrame = getSlackElementFrame(element: element) else {
+            Logger.warning("Slack: Failed to get element frame for text measurement fallback", category: Logger.analysis)
+            return nil
+        }
+
+        // Use Lato font if available (Slack's actual font), otherwise fall back to system font
+        // Apply a multiplier to correct for font rendering differences between macOS and Chromium
+        let font: NSFont
+        let multiplier: CGFloat
+
+        if let latoFont = NSFont(name: "Lato-Regular", size: fontSize) ??
+            NSFont(name: "Lato", size: fontSize)
+        {
+            font = latoFont
+            // Lato renders almost identically, minimal correction needed
+            multiplier = 0.99
+            Logger.debug("Slack: Using Lato font for text measurement", category: Logger.ui)
+        } else {
+            // Fall back to system font with Chromium rendering correction
+            font = NSFont.systemFont(ofSize: fontSize)
+            // Chromium's text rendering is narrower than macOS for system font
+            multiplier = spacingMultiplier(context: context)
+            Logger.debug("Slack: Lato not found, using system font with multiplier \(multiplier)", category: Logger.ui)
+        }
+
+        let attributes: [NSAttributedString.Key: Any] = [.font: font]
+        let padding = horizontalPadding(context: context)
+
+        // Calculate line height for Slack's message input
+        let lineHeight: CGFloat = fontSize * 1.4 // ~21px for 15pt font
+
+        // Estimate text width per line to determine wrapping
+        // Slack's message input has internal padding on both sides
+        let availableWidth = elementFrame.width - (padding * 2) - 20 // Extra margin for safety
+
+        // Calculate which line the error starts on by simulating text wrapping
+        let textBeforeWidth = (textBeforeError as NSString).size(withAttributes: attributes).width * multiplier
+        let errorLine = Int(textBeforeWidth / availableWidth)
+
+        // Calculate X position on that line (accounting for wrapping)
+        let xOffsetOnLine = textBeforeWidth.truncatingRemainder(dividingBy: availableWidth)
+        let xPosition = elementFrame.origin.x + padding + xOffsetOnLine
+
+        // Calculate error width (may wrap to next line, but we'll underline just the visible part)
+        let baseErrorWidth = (errorText as NSString).size(withAttributes: attributes).width
+        let adjustedErrorWidth = max(baseErrorWidth * multiplier, 20.0)
+
+        // Y position: In Quartz coordinates, Y increases downward from top of screen
+        // Element's origin.y is the TOP of the element in Quartz
+        // First line of text starts after some top padding (~8px), then each subsequent line is lineHeight lower
+        let topPadding: CGFloat = 8.0
+        let yPosition = elementFrame.origin.y + topPadding + (CGFloat(errorLine) * lineHeight) + (lineHeight * 0.85)
+
+        // GRACEFUL DEGRADATION: Text measurement is less reliable
+        let confidence = 0.60
+
+        Logger.debug("Slack: Text measurement - line=\(errorLine), xOffset=\(xOffsetOnLine), x=\(xPosition), y=\(yPosition), availableWidth=\(availableWidth)", category: Logger.ui)
+
+        return AdjustedBounds(
+            position: NSPoint(x: xPosition, y: yPosition),
+            errorWidth: adjustedErrorWidth,
+            confidence: confidence,
+            uiContext: context,
+            debugInfo: "Slack text measurement (line: \(errorLine), multiplier: \(multiplier))"
+        )
+    }
+
+    // MARK: - Element Frame
+
+    /// Get element frame with Slack-specific workaround for negative X values
+    private func getSlackElementFrame(element: AXUIElement) -> CGRect? {
+        guard var frame = AccessibilityBridge.getElementFrame(element) else {
+            return nil
+        }
+
+        // Slack's Electron-based AX implementation sometimes returns negative X values
+        if frame.origin.x < 0 {
+            if let windowFrame = getSlackWindowFrame(element: element, elementPosition: frame.origin) {
+                let leftPadding: CGFloat = 20.0
+                frame.origin.x = windowFrame.origin.x + leftPadding
+                // Keep original Y and size
+            }
+        }
+
+        return frame
+    }
+
+    private func getSlackWindowFrame(element: AXUIElement, elementPosition: CGPoint) -> CGRect? {
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(element, &pid) == .success else {
+            return nil
+        }
+
+        guard let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
+            return nil
+        }
+
+        let elementY = elementPosition.y
+        var candidateWindows: [(CGRect, String)] = []
+
+        for windowInfo in windowList {
+            guard let windowPID = windowInfo[kCGWindowOwnerPID as String] as? Int32,
+                  windowPID == pid,
+                  let boundsDict = windowInfo[kCGWindowBounds as String] as? [String: CGFloat],
+                  let x = boundsDict["X"],
+                  let y = boundsDict["Y"],
+                  let width = boundsDict["Width"],
+                  let height = boundsDict["Height"]
+            else {
+                continue
+            }
+
+            let windowFrame = CGRect(x: x, y: y, width: width, height: height)
+            let windowName = (windowInfo[kCGWindowName as String] as? String) ?? "Unknown"
+
+            candidateWindows.append((windowFrame, windowName))
+
+            let windowTop = y
+            let windowBottom = y + height
+
+            if elementY >= windowTop, elementY <= windowBottom {
+                return windowFrame
+            }
+        }
+
+        // Return largest window if no exact match
+        if let largest = candidateWindows.max(by: { $0.0.width * $0.0.height < $1.0.width * $1.0.height }) {
+            return largest.0
+        }
+
+        return nil
+    }
+}

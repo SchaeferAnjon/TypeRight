@@ -1,0 +1,309 @@
+# Makefile for TextWarden Grammar Checker
+# macOS-native grammar checker with Rust + Swift
+
+.PHONY: help build build-rust build-swift \
+        run run-only install uninstall \
+        test test-rust test-swift test-e2e-tools test-browser clean clean-all clean-derived \
+        ci-check fmt fmt-rust fmt-swift lint lint-rust lint-swift \
+        logs kill status reset reset-onboarding xcode version \
+        release release-alpha release-beta release-rc release-upload \
+        help-book cpu-benchmark cpu-check
+
+# Default target
+.DEFAULT_GOAL := help
+
+# Colors for output
+RED := \033[0;31m
+GREEN := \033[0;32m
+YELLOW := \033[1;33m
+BLUE := \033[0;34m
+NC := \033[0m # No Color
+
+# Project paths
+PROJECT := TextWarden.xcodeproj
+SCHEME := TextWarden
+CONFIGURATION := Release
+APP_NAME := TextWarden.app
+RUST_DIR := GrammarEngine
+
+##@ Help
+
+help: ## Show this help message
+	@echo "$(GREEN)TextWarden - Build Commands$(NC)"
+	@echo ""
+	@awk 'BEGIN {FS = ":.*##"; printf "$(BLUE)Usage:$(NC) make $(YELLOW)<target>$(NC)\n\n"} /^[a-zA-Z_-]+:.*?##/ { printf "  $(YELLOW)%-15s$(NC) %s\n", $$1, $$2 } /^##@/ { printf "\n$(BLUE)%s$(NC)\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
+
+##@ Building
+
+build: build-rust build-swift ## Build the project
+
+build-rust: ## Build Rust library
+	@echo "$(BLUE)🦀 Building Rust grammar engine...$(NC)"
+	@./Scripts/build-rust.sh
+	@echo "$(GREEN)✅ Rust build complete$(NC)"
+
+build-swift: ## Build Swift app
+	@echo "$(BLUE)🍎 Building Swift app...$(NC)"
+	@xcodebuild -quiet -project $(PROJECT) -scheme $(SCHEME) -configuration $(CONFIGURATION) build
+	@echo "$(GREEN)✅ Swift build complete$(NC)"
+
+##@ Running
+
+run: build install run-only ## Build, install, and run
+
+run-only: ## Run from /Applications (no build)
+	@if pgrep -x "TextWarden" > /dev/null; then \
+		killall TextWarden && sleep 1; \
+	fi
+	@open /Applications/TextWarden.app
+	@echo "$(GREEN)✅ TextWarden launched$(NC)"
+
+kill: ## Stop TextWarden
+	@if pgrep -x "TextWarden" > /dev/null; then \
+		killall TextWarden; \
+		echo "$(GREEN)✅ Stopped$(NC)"; \
+	else \
+		echo "$(BLUE)Not running$(NC)"; \
+	fi
+
+status: ## Show app status
+	@if pgrep -x "TextWarden" > /dev/null; then \
+		echo "$(GREEN)✅ Running$(NC) (PID: $$(pgrep -x TextWarden))"; \
+	else \
+		echo "$(RED)Not running$(NC)"; \
+	fi
+
+logs: ## Watch app logs
+	@echo "$(BLUE)Watching logs (Ctrl+C to stop)...$(NC)"
+	@log stream --predicate 'subsystem == "io.textwarden.TextWarden"' --style compact --color always 2>/dev/null || \
+	 log stream --predicate 'subsystem == "io.textwarden.TextWarden"' --style compact
+
+##@ Testing
+
+test: test-rust test-swift test-e2e-tools test-browser ## Run all tests
+
+test-browser: ## Run browser extension checks (requires Node.js)
+	@node --check BrowserExtension/content.js
+	@node --check BrowserExtension/background.js
+	@node --test BrowserExtension/tests/*.test.cjs
+	@python3 -m unittest discover -s BrowserExtension/tests -p 'test_*.py'
+
+test-rust: ## Run Rust tests
+	@echo "$(BLUE)🦀 Running Rust tests...$(NC)"
+	@cd $(RUST_DIR) && cargo test --locked
+	@echo "$(GREEN)✅ Rust tests passed$(NC)"
+
+test-swift: ## Run Swift tests (unit tests only, excludes performance benchmarks)
+	@echo "$(BLUE)🍎 Running Swift tests...$(NC)"
+	@set -o pipefail; xcodebuild test -scheme TextWarden -destination 'platform=macOS' \
+		-parallel-testing-enabled NO \
+		-skip-testing:TextWardenTests/GrammarAnalysisPerformanceTests \
+		-skip-testing:TextWardenTests/LargeDocumentPerformanceTests \
+		2>&1 | grep -E '(failed|error:|TEST SUCCEEDED|TEST FAILED)'
+	@echo "$(GREEN)✅ Swift tests passed$(NC)"
+
+test-e2e-tools: ## Run E2E developer-tool tests
+	@python3 Scripts/e2e-state.py self-test
+	@swift Scripts/macos-e2e-driver.swift self-test
+	@swift Scripts/profile-cpu.swift self-test
+	@python3 -B Scripts/test_cpu_check.py
+
+CPU_SUITE ?= smoke
+
+cpu-benchmark: ## Record local Release CPU benchmarks (CPU_OUTPUT=new-directory)
+	@test -n "$(CPU_OUTPUT)" || (echo "Set CPU_OUTPUT to a new evidence directory"; exit 2)
+	@python3 -B Scripts/cpu-check.py benchmark "$(CPU_OUTPUT)"
+
+cpu-check: ## Compare local CPU evidence (CPU_BASELINE=dir CPU_CANDIDATE=dir CPU_SUITE=benchmark|smoke|full)
+	@test -n "$(CPU_BASELINE)" -a -n "$(CPU_CANDIDATE)" || (echo "Set CPU_BASELINE and CPU_CANDIDATE"; exit 2)
+	@python3 -B Scripts/cpu-check.py compare "$(CPU_BASELINE)" "$(CPU_CANDIDATE)" --suite "$(CPU_SUITE)"
+
+##@ Installation
+
+install: ## Install to /Applications (requires build first)
+	@echo "$(BLUE)📦 Installing...$(NC)"
+	@set -e; APP=$$(xcodebuild -project "$(PROJECT)" -scheme "$(SCHEME)" -configuration "$(CONFIGURATION)" -showBuildSettings -json | \
+		python3 -c 'import json, os, sys; settings = next(item["buildSettings"] for item in json.load(sys.stdin) if item["target"] == "$(SCHEME)"); print(os.path.join(settings["TARGET_BUILD_DIR"], settings["FULL_PRODUCT_NAME"]))'); \
+	if [ ! -d "$$APP" ]; then \
+		echo "$(RED)❌ Build first: make build$(NC)"; \
+		exit 1; \
+	fi; \
+	for BUILT_APP in "$$(dirname "$$(dirname "$$APP")")"/*/"$(APP_NAME)"; do \
+		if [ -d "$$BUILT_APP/Contents/PlugIns/TextWardenBrowserExtension.appex" ]; then \
+			/System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister -u "$$BUILT_APP" >/dev/null 2>&1 || true; \
+		fi; \
+	done; \
+	rm -rf "/Applications/$(APP_NAME)" 2>/dev/null || true; \
+	cp -R "$$APP" /Applications/; \
+	echo "$(GREEN)✅ Installed$(NC)"
+
+uninstall: ## Remove from /Applications
+	@rm -rf "/Applications/$(APP_NAME)" 2>/dev/null || true
+	@echo "$(GREEN)✅ Uninstalled$(NC)"
+
+##@ Cleaning
+
+clean: ## Clean Swift build
+	@xcodebuild -project $(PROJECT) -scheme $(SCHEME) clean 2>&1 | grep -E "^Clean" || true
+	@echo "$(GREEN)✅ Cleaned$(NC)"
+
+clean-all: ## Clean everything (Rust + Swift + DerivedData)
+	@cd $(RUST_DIR) && cargo clean
+	@xcodebuild -project $(PROJECT) -scheme $(SCHEME) clean 2>&1 | grep -E "^Clean" || true
+	@rm -rf ~/Library/Developer/Xcode/DerivedData/TextWarden-*
+	@echo "$(GREEN)✅ All cleaned$(NC)"
+
+##@ CI/CD
+
+ci-check: ## Run CI checks locally (use before pushing)
+	@echo "$(BLUE)━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━$(NC)"
+	@echo "$(BLUE)Running CI checks...$(NC)"
+	@echo "$(BLUE)━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━$(NC)"
+	@echo ""
+	@echo "$(YELLOW)[1/7] Checking Rust formatting...$(NC)"
+	@cd $(RUST_DIR) && cargo fmt --check
+	@echo "$(GREEN)✅ OK$(NC)"
+	@echo ""
+	@echo "$(YELLOW)[2/7] Running Clippy...$(NC)"
+	@cd $(RUST_DIR) && cargo clippy --locked --all-targets -- -D warnings
+	@echo "$(GREEN)✅ OK$(NC)"
+	@echo ""
+	@echo "$(YELLOW)[3/7] Checking Swift formatting...$(NC)"
+	@swiftformat Sources Tests --lint 2>&1 || (echo "$(RED)❌ Swift formatting issues found. Run 'make fmt-swift' to fix.$(NC)" && exit 1)
+	@echo "$(GREEN)✅ OK$(NC)"
+	@echo ""
+	@echo "$(YELLOW)[4/7] Running SwiftLint...$(NC)"
+	@swiftlint lint --quiet Sources Tests
+	@python3 -B Scripts/test_cpu_check.py
+	@echo "$(GREEN)✅ OK$(NC)"
+	@echo ""
+	@echo "$(YELLOW)[5/7] Running Rust tests...$(NC)"
+	@cd $(RUST_DIR) && cargo test --locked
+	@echo "$(GREEN)✅ OK$(NC)"
+	@echo ""
+	@echo "$(YELLOW)[6/7] Running Swift tests...$(NC)"
+	@set -o pipefail; xcodebuild test -scheme TextWarden -destination 'platform=macOS' \
+		-parallel-testing-enabled NO \
+		-skip-testing:TextWardenTests/GrammarAnalysisPerformanceTests \
+		-skip-testing:TextWardenTests/LargeDocumentPerformanceTests \
+		2>&1 | grep -E '(failed|error:|TEST SUCCEEDED|TEST FAILED)'
+	@echo "$(GREEN)✅ OK$(NC)"
+	@echo ""
+	@echo "$(YELLOW)[7/7] Building...$(NC)"
+	@make -s build
+	@echo ""
+	@echo "$(GREEN)━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━$(NC)"
+	@echo "$(GREEN)✅ All checks passed! Safe to push.$(NC)"
+	@echo "$(GREEN)━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━$(NC)"
+
+fmt: ## Format all code (Rust + Swift)
+	@make -s fmt-rust
+	@make -s fmt-swift
+
+fmt-rust: ## Format Rust code
+	@cd $(RUST_DIR) && cargo fmt
+	@echo "$(GREEN)✅ Rust formatted$(NC)"
+
+fmt-swift: ## Format Swift code
+	@swiftformat Sources Tests
+	@echo "$(GREEN)✅ Swift formatted$(NC)"
+
+lint: ## Lint all code (Rust + Swift)
+	@make -s lint-rust
+	@make -s lint-swift
+
+lint-rust: ## Run Clippy linter on Rust code
+	@cd $(RUST_DIR) && cargo clippy --locked --all-targets -- -D warnings
+	@echo "$(GREEN)✅ Rust lint passed$(NC)"
+
+lint-swift: ## Run SwiftLint on Swift code
+	@swiftlint lint Sources Tests
+	@echo "$(GREEN)✅ Swift lint passed$(NC)"
+
+##@ Utilities
+
+xcode: ## Open in Xcode
+	@open $(PROJECT)
+
+reset: ## Reset app state (clear preferences)
+	@./Scripts/test-reset.sh
+	@echo "$(GREEN)✅ Reset complete$(NC)"
+
+reset-onboarding: ## Reset onboarding flag (for testing first-run experience)
+	@defaults delete io.textwarden.TextWarden hasCompletedOnboarding 2>/dev/null || true
+	@echo "$(GREEN)✅ Onboarding reset - restart TextWarden to see onboarding$(NC)"
+
+version: ## Show version info
+	@echo "$(BLUE)Versions:$(NC)"
+	@grep "CFBundleShortVersionString" Info.plist -A1 2>/dev/null | grep string | sed 's/<[^>]*>//g' | xargs echo "  App:" || echo "  App: unknown"
+	@rustc --version 2>/dev/null | sed 's/rustc /  Rust: /' || echo "  Rust: not found"
+	@xcodebuild -version 2>/dev/null | head -1 | sed 's/Xcode /  Xcode: /' || echo "  Xcode: not found"
+
+clean-derived: ## Clean Xcode DerivedData
+	@rm -rf ~/Library/Developer/Xcode/DerivedData/TextWarden-*
+	@echo "$(GREEN)✅ DerivedData cleaned$(NC)"
+
+##@ Releasing
+
+# VERSION can be passed: make release VERSION=0.2.0
+VERSION ?=
+
+release: ## Build and prepare a production release (requires confirmation)
+	@./Scripts/release.sh release $(VERSION)
+
+release-alpha: ## Build alpha release (e.g., 0.2.0-alpha.1)
+	@if [ -z "$(VERSION)" ]; then \
+		CURRENT=$$(./Scripts/release.sh version | cut -d' ' -f1 | sed 's/-.*//'); \
+		echo "$(YELLOW)Tip: make release-alpha VERSION=$${CURRENT}-alpha.1$(NC)"; \
+		exit 1; \
+	fi
+	@./Scripts/release.sh release $(VERSION)
+
+release-beta: ## Build beta release (e.g., 0.2.0-beta.1)
+	@if [ -z "$(VERSION)" ]; then \
+		CURRENT=$$(./Scripts/release.sh version | cut -d' ' -f1 | sed 's/-.*//'); \
+		echo "$(YELLOW)Tip: make release-beta VERSION=$${CURRENT}-beta.1$(NC)"; \
+		exit 1; \
+	fi
+	@./Scripts/release.sh release $(VERSION)
+
+release-rc: ## Build release candidate (e.g., 0.2.0-rc.1)
+	@if [ -z "$(VERSION)" ]; then \
+		CURRENT=$$(./Scripts/release.sh version | cut -d' ' -f1 | sed 's/-.*//'); \
+		echo "$(YELLOW)Tip: make release-rc VERSION=$${CURRENT}-rc.1$(NC)"; \
+		exit 1; \
+	fi
+	@./Scripts/release.sh release $(VERSION)
+
+release-upload: ## Upload prepared release to GitHub
+	@./Scripts/release.sh upload $(VERSION)
+
+release-notes: ## Generate release notes from git commits
+	@./Scripts/release.sh notes
+
+##@ Documentation
+
+HELP_DIR := Resources/TextWarden.help/Contents/Resources/en.lproj
+HELP_TEMPLATE := Scripts/help-template.html
+
+help-book: ## Build Help Book from markdown documentation
+	@echo "$(BLUE)📚 Building Help Book...$(NC)"
+	@command -v pandoc >/dev/null 2>&1 || { echo "$(RED)❌ pandoc not found. Install: brew install pandoc$(NC)"; exit 1; }
+	@echo "  Converting CONFIGURATION.md..."
+	@pandoc CONFIGURATION.md \
+		--from=gfm \
+		--to=html5 \
+		--template=$(HELP_TEMPLATE) \
+		--metadata title="Configuration Guide" \
+		--output=$(HELP_DIR)/configuration.html
+	@echo "  Converting TROUBLESHOOTING.md..."
+	@pandoc TROUBLESHOOTING.md \
+		--from=gfm \
+		--to=html5 \
+		--template=$(HELP_TEMPLATE) \
+		--metadata title="Troubleshooting" \
+		--output=$(HELP_DIR)/troubleshooting.html
+	@echo "  Building help index..."
+	@hiutil -Caf $(HELP_DIR)/../TextWarden.helpindex $(HELP_DIR) 2>/dev/null || \
+		echo "$(YELLOW)⚠ hiutil not available, skipping index$(NC)"
+	@echo "$(GREEN)✅ Help Book built$(NC)"

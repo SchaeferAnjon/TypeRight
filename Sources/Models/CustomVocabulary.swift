@@ -1,0 +1,171 @@
+//
+//  CustomVocabulary.swift
+//  TextWarden
+//
+//  Custom vocabulary management with JSON persistence
+//
+
+import Combine
+import Foundation
+
+/// Manages custom vocabulary words with JSON file persistence
+@MainActor
+class CustomVocabulary: ObservableObject {
+    static let shared = CustomVocabulary()
+
+    private let fileURL: URL
+    private let maxWords = 1000
+
+    @Published private(set) var words: Set<String> = []
+
+    private init() {
+        // Setup file URL in Application Support
+        let baseURL: URL
+        if let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
+            baseURL = appSupport
+        } else {
+            Logger.critical("Application Support directory not available, using temp directory", category: Logger.general)
+            baseURL = FileManager.default.temporaryDirectory
+        }
+
+        let textWardenDir = baseURL.appendingPathComponent("TextWarden")
+
+        try? FileManager.default.createDirectory(
+            at: textWardenDir,
+            withIntermediateDirectories: true
+        )
+
+        fileURL = textWardenDir.appendingPathComponent("custom-vocabulary.json")
+
+        // Load existing vocabulary
+        load()
+    }
+
+    // MARK: - Public Methods
+
+    /// Add a word to the custom vocabulary
+    /// Case-sensitive: "Today" and "today" are treated as different words
+    func addWord(_ word: String) throws {
+        guard words.count < maxWords else {
+            throw VocabularyError.limitExceeded
+        }
+
+        let normalized = word.trimmingCharacters(in: .whitespaces)
+        guard !normalized.isEmpty else {
+            throw VocabularyError.invalidWord
+        }
+
+        words.insert(normalized)
+        try save()
+    }
+
+    /// Remove a word from the custom vocabulary (case-sensitive)
+    func removeWord(_ word: String) throws {
+        let normalized = word.trimmingCharacters(in: .whitespaces)
+        words.remove(normalized)
+        try save()
+    }
+
+    /// Check if a word is in the custom vocabulary (case-sensitive exact match)
+    func contains(_ word: String) -> Bool {
+        let normalized = word.trimmingCharacters(in: .whitespaces)
+        return words.contains(normalized)
+    }
+
+    /// Clear all custom vocabulary
+    func clearAll() throws {
+        words.removeAll()
+        try save()
+    }
+
+    /// Check if any text contains words from custom vocabulary
+    /// Used to filter out grammar errors that involve custom words
+    /// Case-sensitive: only exact matches (including capitalization) are filtered
+    func containsAnyWord(in text: String) -> Bool {
+        let textWords = text.components(separatedBy: .whitespacesAndNewlines)
+            .map { $0.trimmingCharacters(in: .punctuationCharacters) }
+            .filter { !$0.isEmpty }
+
+        return textWords.contains { textWord in
+            words.contains(textWord)
+        }
+    }
+
+    /// Get all words in the custom vocabulary
+    /// Used to provide context to Foundation Models for style analysis
+    func allWords() -> [String] {
+        Array(words)
+    }
+
+    // MARK: - Persistence
+
+    /// Save vocabulary to JSON file
+    private func save() throws {
+        let file = CustomVocabularyFile(
+            version: 1,
+            words: Array(words),
+            lastModified: Date()
+        )
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+
+        let data = try encoder.encode(file)
+        try data.write(to: fileURL, options: .atomic)
+
+        Logger.debug("CustomVocabulary: Saved \(words.count) words", category: Logger.general)
+    }
+
+    /// Load vocabulary from JSON file
+    private func load() {
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            Logger.debug("CustomVocabulary: No existing file, starting fresh", category: Logger.general)
+            return
+        }
+
+        do {
+            let data = try Data(contentsOf: fileURL)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+
+            let file = try decoder.decode(CustomVocabularyFile.self, from: data)
+
+            // Validate version
+            guard file.version == 1 else {
+                Logger.warning("CustomVocabulary: Unsupported version \(file.version)", category: Logger.general)
+                return
+            }
+
+            words = Set(file.words.prefix(maxWords))
+            Logger.debug("CustomVocabulary: Loaded \(words.count) words", category: Logger.general)
+
+        } catch {
+            Logger.error("CustomVocabulary: Failed to load", error: error, category: Logger.general)
+        }
+    }
+}
+
+// MARK: - Data Types
+
+/// JSON file structure for custom vocabulary
+struct CustomVocabularyFile: Codable {
+    let version: Int
+    let words: [String]
+    let lastModified: Date
+}
+
+/// Errors for vocabulary operations
+enum VocabularyError: Error, LocalizedError {
+    case limitExceeded
+    case invalidWord
+
+    var errorDescription: String? {
+        switch self {
+        case .limitExceeded:
+            "Custom vocabulary limit of 1000 words exceeded"
+        case .invalidWord:
+            "Invalid word (empty or whitespace only)"
+        }
+    }
+}

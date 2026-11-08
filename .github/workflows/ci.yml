@@ -1,0 +1,158 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust-tests:
+    name: Rust Tests & Linting
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: GrammarEngine
+
+      - name: Check formatting
+        working-directory: GrammarEngine
+        run: cargo fmt --check
+
+      - name: Run Clippy
+        working-directory: GrammarEngine
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Run tests
+        working-directory: GrammarEngine
+        run: cargo test --locked
+
+  swift-build-test:
+    name: Swift Build & Test
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: GrammarEngine
+
+      - name: Install Help Book tools
+        run: brew install pandoc
+
+      - name: Install SwiftFormat
+        run: |
+          brew update
+          brew install swiftformat
+
+      - name: Install SwiftLint
+        run: brew install swiftlint
+
+      - name: Check Swift formatting
+        run: swiftformat Sources Tests --lint
+
+      - name: Run SwiftLint
+        run: swiftlint lint --quiet Sources Tests
+
+      - name: Test CPU gate logic (no timing measurements)
+        run: python3 -B Scripts/test_cpu_check.py
+
+      - name: Test browser extension
+        run: make test-browser
+
+      - name: Build Rust library (arm64 only, without LLM)
+        working-directory: GrammarEngine
+        run: |
+          cargo build --locked --release --target aarch64-apple-darwin
+          mkdir -p target
+          cp target/aarch64-apple-darwin/release/libgrammar_engine.a target/libgrammar_engine_universal.a
+
+      - name: Build Swift app
+        run: |
+          xcodebuild build \
+            -project TextWarden.xcodeproj \
+            -scheme TextWarden \
+            -configuration Release \
+            -destination 'platform=macOS,arch=arm64' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO
+
+      - name: Run Swift unit tests
+        run: |
+          xcodebuild test \
+            -project TextWarden.xcodeproj \
+            -scheme TextWarden \
+            -destination 'platform=macOS,arch=arm64' \
+            -parallel-testing-enabled NO \
+            -skip-testing:TextWardenTests/GrammarAnalysisPerformanceTests \
+            -skip-testing:TextWardenTests/LargeDocumentPerformanceTests \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO
+
+  swift-minimum-os:
+    name: macOS 14 Build & Test
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Help Book tools
+        run: brew install pandoc
+
+      - name: Select Xcode 16.2
+        run: sudo xcode-select --switch /Applications/Xcode_16.2.app
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: GrammarEngine
+
+      - name: Build Rust library (x86_64, without LLM)
+        working-directory: GrammarEngine
+        run: |
+          cargo build --locked --release --target x86_64-apple-darwin
+          mkdir -p target
+          cp target/x86_64-apple-darwin/release/libgrammar_engine.a target/libgrammar_engine_universal.a
+
+      - name: Build app at its minimum supported macOS version
+        run: |
+          xcodebuild build \
+            -project TextWarden.xcodeproj \
+            -scheme TextWarden \
+            -configuration Release \
+            -destination 'platform=macOS,arch=x86_64' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO
+
+      - name: Run automatically discovered unit tests
+        run: |
+          xcodebuild test \
+            -project TextWarden.xcodeproj \
+            -scheme TextWarden \
+            -destination 'platform=macOS,arch=x86_64' \
+            -parallel-testing-enabled NO \
+            -skip-testing:TextWardenTests/GrammarAnalysisPerformanceTests \
+            -skip-testing:TextWardenTests/LargeDocumentPerformanceTests \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO

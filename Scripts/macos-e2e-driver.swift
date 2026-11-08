@@ -1,0 +1,1625 @@
+#!/usr/bin/env swift
+
+import AppKit
+import ApplicationServices
+import Foundation
+
+enum DriverError: Error, CustomStringConvertible {
+    case usage(String)
+    case failure(String)
+
+    var description: String {
+        switch self {
+        case let .usage(message), let .failure(message): message
+        }
+    }
+}
+
+func number(_ value: String, name: String) throws -> CGFloat {
+    guard let parsed = Double(value), parsed.isFinite else {
+        throw DriverError.usage("invalid \(name): \(value)")
+    }
+    return CGFloat(parsed)
+}
+
+func runningApplication(_ bundleIdentifier: String) throws -> NSRunningApplication {
+    let applications = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
+    guard let application = applications.first else {
+        throw DriverError.failure("application is not running: \(bundleIdentifier)")
+    }
+    if let frontmost = NSWorkspace.shared.frontmostApplication,
+       frontmost.bundleIdentifier == bundleIdentifier
+    {
+        return frontmost
+    }
+    return application
+}
+
+func activate(_ bundleIdentifier: String) throws -> NSRunningApplication {
+    let application = try runningApplication(bundleIdentifier)
+    guard application.activate(options: [.activateAllWindows]) else {
+        throw DriverError.failure("activation request failed: \(bundleIdentifier)")
+    }
+
+    let deadline = Date().addingTimeInterval(3)
+    while Date() < deadline {
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier == application.processIdentifier {
+            return application
+        }
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+    }
+    throw DriverError.failure("application did not become frontmost: \(bundleIdentifier)")
+}
+
+func copyAttribute(_ element: AXUIElement, _ attribute: CFString) -> CFTypeRef? {
+    var value: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success else {
+        return nil
+    }
+    return value
+}
+
+func stringAttribute(_ element: AXUIElement, _ attribute: CFString) -> String? {
+    copyAttribute(element, attribute) as? String
+}
+
+func boolAttribute(_ element: AXUIElement, _ attribute: CFString) -> Bool {
+    (copyAttribute(element, attribute) as? Bool) == true
+}
+
+func axElement(_ value: CFTypeRef?) -> AXUIElement? {
+    guard let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+    return unsafeBitCast(value, to: AXUIElement.self)
+}
+
+func axValue(_ value: CFTypeRef?) -> AXValue? {
+    guard let value, CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+    return unsafeBitCast(value, to: AXValue.self)
+}
+
+func focusedWindow(_ application: NSRunningApplication) throws -> AXUIElement {
+    let appElement = AXUIElementCreateApplication(application.processIdentifier)
+    if let window = axElement(copyAttribute(appElement, kAXFocusedWindowAttribute as CFString)) {
+        return window
+    }
+    if let window = axElement(copyAttribute(appElement, kAXMainWindowAttribute as CFString)) {
+        return window
+    }
+    throw DriverError.failure("application has no focused window: \(application.bundleIdentifier ?? "unknown")")
+}
+
+func minimizedWindow(_ application: NSRunningApplication) throws -> AXUIElement {
+    let appElement = AXUIElementCreateApplication(application.processIdentifier)
+    let windows = copyAttribute(appElement, kAXWindowsAttribute as CFString) as? [AXUIElement]
+    let minimizedWindows = windows?.filter { boolAttribute($0, kAXMinimizedAttribute as CFString) } ?? []
+    guard minimizedWindows.count == 1, let window = minimizedWindows.first else {
+        throw DriverError.failure("expected exactly one minimized window")
+    }
+    return window
+}
+
+func pointAttribute(_ element: AXUIElement, _ attribute: CFString) throws -> CGPoint {
+    guard let value = axValue(copyAttribute(element, attribute)),
+          AXValueGetType(value) == .cgPoint
+    else {
+        throw DriverError.failure("window does not expose \(attribute)")
+    }
+    var point = CGPoint.zero
+    guard AXValueGetValue(value, .cgPoint, &point) else {
+        throw DriverError.failure("could not read \(attribute)")
+    }
+    return point
+}
+
+func sizeAttribute(_ element: AXUIElement, _ attribute: CFString) throws -> CGSize {
+    guard let value = axValue(copyAttribute(element, attribute)),
+          AXValueGetType(value) == .cgSize
+    else {
+        throw DriverError.failure("window does not expose \(attribute)")
+    }
+    var size = CGSize.zero
+    guard AXValueGetValue(value, .cgSize, &size) else {
+        throw DriverError.failure("could not read \(attribute)")
+    }
+    return size
+}
+
+func setPoint(_ element: AXUIElement, _ attribute: CFString, _ point: CGPoint) throws {
+    var point = point
+    guard let value = AXValueCreate(.cgPoint, &point),
+          AXUIElementSetAttributeValue(element, attribute, value) == .success
+    else {
+        throw DriverError.failure("could not set \(attribute)")
+    }
+}
+
+func setSize(_ element: AXUIElement, _ attribute: CFString, _ size: CGSize) throws {
+    var size = size
+    guard let value = AXValueCreate(.cgSize, &size),
+          AXUIElementSetAttributeValue(element, attribute, value) == .success
+    else {
+        throw DriverError.failure("could not set \(attribute)")
+    }
+}
+
+func frameMatches(
+    position: CGPoint,
+    size: CGSize,
+    expectedPosition: CGPoint,
+    expectedSize: CGSize,
+    tolerance: CGFloat = 2
+) -> Bool {
+    abs(position.x - expectedPosition.x) <= tolerance
+        && abs(position.y - expectedPosition.y) <= tolerance
+        && abs(size.width - expectedSize.width) <= tolerance
+        && abs(size.height - expectedSize.height) <= tolerance
+}
+
+func postMouse(_ type: CGEventType, at point: CGPoint) throws {
+    guard let event = CGEvent(
+        mouseEventSource: CGEventSource(stateID: .hidSystemState),
+        mouseType: type,
+        mouseCursorPosition: point,
+        mouseButton: .left
+    ) else {
+        throw DriverError.failure("could not create mouse event")
+    }
+    event.flags = []
+    event.post(tap: .cghidEventTap)
+}
+
+func postKey(_ keyCode: CGKeyCode, flags: CGEventFlags = []) throws {
+    let source = CGEventSource(stateID: .hidSystemState)
+    guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true),
+          let keyUp = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false)
+    else {
+        throw DriverError.failure("could not create keyboard event")
+    }
+    keyDown.flags = flags
+    // End synthetic modifiers with the shortcut; otherwise later clicks become Control-clicks.
+    keyUp.flags = []
+    keyDown.post(tap: .cghidEventTap)
+    usleep(50000)
+    keyUp.post(tap: .cghidEventTap)
+}
+
+func isSafeTextInput(_ text: String) -> Bool {
+    text.count <= 500 && !text.contains("\n") && !text.contains("\r")
+}
+
+func postText(_ text: String) throws {
+    guard isSafeTextInput(text) else {
+        throw DriverError.failure("refusing unsafe text input")
+    }
+
+    for character in text {
+        let source = CGEventSource(stateID: .hidSystemState)
+        guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
+              let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false)
+        else {
+            throw DriverError.failure("could not create text event")
+        }
+        keyDown.flags = []
+        keyUp.flags = []
+        let utf16 = Array(String(character).utf16)
+        utf16.withUnsafeBufferPointer { buffer in
+            keyDown.keyboardSetUnicodeString(
+                stringLength: buffer.count,
+                unicodeString: buffer.baseAddress
+            )
+        }
+        keyDown.post(tap: .cghidEventTap)
+        usleep(20000)
+        keyUp.post(tap: .cghidEventTap)
+    }
+}
+
+struct ClipboardSnapshot {
+    let items: [[NSPasteboard.PasteboardType: Data]]
+}
+
+func pasteText(_ text: String, application: NSRunningApplication) throws {
+    // Paste large fixtures atomically; WebKit can change spaces at chunk boundaries.
+    guard text.utf16.count <= 100_000, !text.contains("\n"), !text.contains("\r") else {
+        throw DriverError.failure("refusing unsafe text input")
+    }
+    var mailPasteItem: AXUIElement?
+    if application.bundleIdentifier == "com.apple.mail" {
+        let appElement = AXUIElementCreateApplication(application.processIdentifier)
+        guard let menuBar = axElement(copyAttribute(appElement, kAXMenuBarAttribute as CFString)) else {
+            throw DriverError.failure("Mail does not expose its menu bar")
+        }
+        var occurrence = 0
+        var remaining = 2000
+        mailPasteItem = findPressableElement(menuBar, label: "Paste", allowShortcutSuffix: true, occurrence: &occurrence, remaining: &remaining)
+        guard mailPasteItem != nil else { throw DriverError.failure("Mail does not expose Paste") }
+    }
+    let pasteboard = NSPasteboard.general
+    let snapshot = ClipboardSnapshot(items: (pasteboard.pasteboardItems ?? []).map { item in
+        Dictionary(uniqueKeysWithValues: item.types.compactMap { type in
+            item.data(forType: type).map { (type, $0) }
+        })
+    })
+    pasteboard.clearContents()
+    let didSetText = pasteboard.setString(text, forType: .string)
+    let replacementChangeCount = pasteboard.changeCount
+    defer {
+        if pasteboard.changeCount == replacementChangeCount {
+            pasteboard.clearContents()
+            let restoredItems = snapshot.items.compactMap { representations -> NSPasteboardItem? in
+                guard !representations.isEmpty else { return nil }
+                let item = NSPasteboardItem()
+                for (type, data) in representations {
+                    item.setData(data, forType: type)
+                }
+                return item
+            }
+            if !restoredItems.isEmpty {
+                pasteboard.writeObjects(restoredItems)
+            }
+        }
+    }
+    guard didSetText else { throw DriverError.failure("could not set temporary clipboard text") }
+    if let mailPasteItem {
+        // A queued key can be delayed by a large document and read the restored clipboard.
+        guard AXUIElementPerformAction(mailPasteItem, kAXPressAction as CFString) == .success else {
+            throw DriverError.failure("Mail Paste action failed")
+        }
+    } else {
+        try postKey(9, flags: .maskCommand)
+    }
+    usleep(300_000)
+}
+
+func editorAt(_ point: CGPoint) -> AXUIElement? {
+    let system = AXUIElementCreateSystemWide()
+    var element: AXUIElement?
+    guard AXUIElementCopyElementAtPosition(system, Float(point.x), Float(point.y), &element) == .success else {
+        return nil
+    }
+
+    var candidate = element
+    for _ in 0 ..< 10 {
+        guard let current = candidate else { return nil }
+        if isEditable(current) {
+            return current
+        }
+        candidate = axElement(copyAttribute(current, kAXParentAttribute as CFString))
+    }
+    return nil
+}
+
+func isEditable(_ element: AXUIElement) -> Bool {
+    let role = stringAttribute(element, kAXRoleAttribute as CFString)
+    // Mail on macOS 27 exposes an editable web area without AXEditable.
+    var valueSettable = DarwinBoolean(false)
+    let canSetValue = AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &valueSettable) == .success
+    return boolAttribute(element, "AXEditable" as CFString)
+        || role == kAXTextAreaRole as String
+        || role == kAXTextFieldRole as String
+        || (role == "AXWebArea" && canSetValue && valueSettable.boolValue)
+}
+
+func elementFrame(_ element: AXUIElement) -> CGRect? {
+    guard let positionValue = axValue(copyAttribute(element, kAXPositionAttribute as CFString)),
+          AXValueGetType(positionValue) == .cgPoint,
+          let sizeValue = axValue(copyAttribute(element, kAXSizeAttribute as CFString)),
+          AXValueGetType(sizeValue) == .cgSize
+    else {
+        return nil
+    }
+    var position = CGPoint.zero
+    var size = CGSize.zero
+    guard AXValueGetValue(positionValue, .cgPoint, &position),
+          AXValueGetValue(sizeValue, .cgSize, &size),
+          size.width > 0,
+          size.height > 0
+    else {
+        return nil
+    }
+    return CGRect(origin: position, size: size)
+}
+
+func collectEditors(_ root: AXUIElement, remaining: inout Int, into editors: inout [AXUIElement]) {
+    guard remaining > 0 else { return }
+    remaining -= 1
+
+    if isEditable(root), elementFrame(root) != nil {
+        editors.append(root)
+    }
+
+    let children = copyAttribute(root, kAXChildrenAttribute as CFString) as? [AXUIElement] ?? []
+    for child in children {
+        collectEditors(child, remaining: &remaining, into: &editors)
+    }
+}
+
+func editors(in application: NSRunningApplication) -> [AXUIElement] {
+    let appElement = AXUIElementCreateApplication(application.processIdentifier)
+    var remaining = 10000
+    var editors: [AXUIElement] = []
+    collectEditors(appElement, remaining: &remaining, into: &editors)
+    return editors
+}
+
+func textLength(_ element: AXUIElement) -> Int? {
+    if let value = directTextValue(element) {
+        return value.utf16.count
+    }
+    return copyAttribute(element, kAXNumberOfCharactersAttribute as CFString) as? Int
+}
+
+func directTextValue(_ element: AXUIElement) -> String? {
+    let attribute = copyAttribute(element, kAXValueAttribute as CFString)
+    let value = (attribute as? String) ?? (attribute as? NSAttributedString)?.string
+    // A WebKit composer's empty AXValue is not proof that its document is empty.
+    // Preserve real AXValue text from older WebKit versions for exact-text guards.
+    guard stringAttribute(element, kAXRoleAttribute as CFString) == "AXWebArea",
+          value?.isEmpty != false
+    else { return value }
+
+    // Mail on macOS 27 can omit both character counts and AXStringForRange.
+    // Its document marker range still provides the complete composer text.
+    var range: CFTypeRef?
+    var text: CFTypeRef?
+    guard AXUIElementCopyParameterizedAttributeValue(
+        element, "AXTextMarkerRangeForUIElement" as CFString, element, &range
+    ) == .success, let range,
+                       AXUIElementCopyParameterizedAttributeValue(
+                           element, "AXStringForTextMarkerRange" as CFString, range, &text
+                       ) == .success
+    else {
+        return nil
+    }
+    return (text as? String) ?? (text as? NSAttributedString)?.string
+}
+
+func textValue(_ element: AXUIElement) -> String? {
+    if let value = directTextValue(element) {
+        return value
+    }
+    guard let length = copyAttribute(
+        element,
+        kAXNumberOfCharactersAttribute as CFString
+    ) as? Int,
+        (0 ... 100_000).contains(length)
+    else {
+        return nil
+    }
+    guard length > 0 else { return "" }
+
+    var range = CFRange(location: 0, length: length)
+    guard let rangeValue = AXValueCreate(.cfRange, &range) else { return nil }
+    var value: CFTypeRef?
+    guard AXUIElementCopyParameterizedAttributeValue(
+        element,
+        kAXStringForRangeParameterizedAttribute as CFString,
+        rangeValue,
+        &value
+    ) == .success else {
+        return nil
+    }
+    return value as? String
+}
+
+func focusedEditor(_ application: NSRunningApplication) throws -> AXUIElement {
+    let appElement = AXUIElementCreateApplication(application.processIdentifier)
+    guard let element = axElement(copyAttribute(appElement, kAXFocusedUIElementAttribute as CFString)),
+          isEditable(element)
+    else {
+        throw DriverError.failure("application has no focused editable element")
+    }
+    return element
+}
+
+func elementAt(_ point: CGPoint, in application: NSRunningApplication? = nil) -> AXUIElement? {
+    let system: AXUIElement
+    if let application {
+        // System-wide hit-testing can return a window underneath Safari on macOS 27.
+        // Independently verify window ownership before restricting the AX lookup.
+        guard windowProcessIDAt(point) == application.processIdentifier else { return nil }
+        system = AXUIElementCreateApplication(application.processIdentifier)
+    } else {
+        system = AXUIElementCreateSystemWide()
+    }
+    var element: AXUIElement?
+    guard AXUIElementCopyElementAtPosition(system, Float(point.x), Float(point.y), &element) == .success else { return nil }
+    return element
+}
+
+func processIDAt(_ point: CGPoint) -> pid_t? {
+    guard let element = elementAt(point) else { return nil }
+
+    var processID: pid_t = 0
+    return AXUIElementGetPid(element, &processID) == .success ? processID : nil
+}
+
+func windowProcessIDAt(_ point: CGPoint) -> pid_t? {
+    let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+    let windows = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] ?? []
+    for window in windows {
+        guard let processID = window[kCGWindowOwnerPID as String] as? pid_t,
+              let layer = window[kCGWindowLayer as String] as? Int,
+              layer == 0,
+              let bounds = window[kCGWindowBounds as String] as? [String: CGFloat],
+              let x = bounds["X"],
+              let y = bounds["Y"],
+              let width = bounds["Width"],
+              let height = bounds["Height"],
+              CGRect(x: x, y: y, width: width, height: height).contains(point)
+        else {
+            continue
+        }
+        return processID
+    }
+    return nil
+}
+
+func isPointOwnedBy(_ application: NSRunningApplication, at point: CGPoint) -> Bool {
+    processIDAt(point) == application.processIdentifier
+        || windowProcessIDAt(point) == application.processIdentifier
+}
+
+func supportsAction(_ element: AXUIElement, _ action: CFString) -> Bool {
+    var names: CFArray?
+    guard AXUIElementCopyActionNames(element, &names) == .success,
+          let names = names as? [String]
+    else {
+        return false
+    }
+    return names.contains(action as String)
+}
+
+func isRiskyControl(_ element: AXUIElement) -> Bool {
+    let riskyLabels = ["send", "submit", "post", "publish", "share"]
+    var candidate: AXUIElement? = element
+    for _ in 0 ..< 5 {
+        guard let current = candidate else { return false }
+        if supportsAction(current, kAXPressAction as CFString) {
+            let labels = [
+                stringAttribute(current, kAXTitleAttribute as CFString),
+                stringAttribute(current, kAXDescriptionAttribute as CFString),
+                stringAttribute(current, kAXHelpAttribute as CFString),
+            ].compactMap { $0?.lowercased() }
+            return labels.contains { label in riskyLabels.contains(where: label.contains) }
+        }
+        candidate = axElement(copyAttribute(current, kAXParentAttribute as CFString))
+    }
+    return false
+}
+
+func findPressableElement(
+    _ root: AXUIElement,
+    label: String,
+    allowShortcutSuffix: Bool = false,
+    requiresPressAction: Bool = true,
+    occurrence: inout Int,
+    remaining: inout Int
+) -> AXUIElement? {
+    guard remaining > 0 else { return nil }
+    remaining -= 1
+
+    let labels = [
+        stringAttribute(root, kAXTitleAttribute as CFString),
+        stringAttribute(root, kAXDescriptionAttribute as CFString),
+        stringAttribute(root, kAXValueAttribute as CFString),
+    ]
+    let normalizedLabel = label.lowercased()
+    let hasMatchingLabel = labels.compactMap { $0?.lowercased() }.contains { candidate in
+        candidate == normalizedLabel
+            || (allowShortcutSuffix && candidate.hasPrefix(normalizedLabel))
+    }
+    if !requiresPressAction || supportsAction(root, kAXPressAction as CFString),
+       hasMatchingLabel
+    {
+        if occurrence == 0 {
+            return root
+        }
+        occurrence -= 1
+    }
+
+    let children = copyAttribute(root, kAXChildrenAttribute as CFString) as? [AXUIElement] ?? []
+    for child in children {
+        if let match = findPressableElement(
+            child,
+            label: label,
+            allowShortcutSuffix: allowShortcutSuffix,
+            requiresPressAction: requiresPressAction,
+            occurrence: &occurrence,
+            remaining: &remaining
+        ) {
+            return match
+        }
+    }
+    return nil
+}
+
+func isSelfChatLabel(_ label: String) -> Bool {
+    let normalized = label.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    return normalized == "saved messages"
+        || normalized == "message yourself"
+        || normalized == "note to self"
+        || normalized.contains("(you)")
+}
+
+func findSelfChatElement(
+    _ root: AXUIElement,
+    requiresPressAction: Bool,
+    remaining: inout Int
+) -> AXUIElement? {
+    guard remaining > 0 else { return nil }
+    remaining -= 1
+
+    let labels = [
+        stringAttribute(root, kAXTitleAttribute as CFString),
+        stringAttribute(root, kAXDescriptionAttribute as CFString),
+        stringAttribute(root, kAXValueAttribute as CFString),
+    ]
+    if !requiresPressAction || supportsAction(root, kAXPressAction as CFString),
+       labels.compactMap(\.self).contains(where: isSelfChatLabel)
+    {
+        return root
+    }
+
+    let children = copyAttribute(root, kAXChildrenAttribute as CFString) as? [AXUIElement] ?? []
+    for child in children {
+        if let match = findSelfChatElement(
+            child,
+            requiresPressAction: requiresPressAction,
+            remaining: &remaining
+        ) {
+            return match
+        }
+    }
+    return nil
+}
+
+func printWindowState(bundleIdentifier: String, application: NSRunningApplication, window: AXUIElement) throws {
+    let position = try pointAttribute(window, kAXPositionAttribute as CFString)
+    let size = try sizeAttribute(window, kAXSizeAttribute as CFString)
+    let state: [String: Any] = [
+        "bundleIdentifier": bundleIdentifier,
+        "pid": application.processIdentifier,
+        "x": position.x,
+        "y": position.y,
+        "width": size.width,
+        "height": size.height,
+        "minimized": boolAttribute(window, kAXMinimizedAttribute as CFString),
+    ]
+    let data = try JSONSerialization.data(withJSONObject: state, options: [.sortedKeys])
+    print(String(decoding: data, as: UTF8.self))
+}
+
+func printApplicationWindows(_ bundleIdentifier: String) throws {
+    let processIDs = Set(
+        NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
+            .map(\.processIdentifier)
+    )
+    guard !processIDs.isEmpty else {
+        throw DriverError.failure("application is not running: \(bundleIdentifier)")
+    }
+    let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+    let windowInfo = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] ?? []
+    let windows = windowInfo.compactMap { info -> [String: Any]? in
+        guard let processID = info[kCGWindowOwnerPID as String] as? pid_t,
+              processIDs.contains(processID),
+              let layer = info[kCGWindowLayer as String] as? Int,
+              layer == 0,
+              let bounds = info[kCGWindowBounds as String] as? [String: CGFloat],
+              let x = bounds["X"],
+              let y = bounds["Y"],
+              let width = bounds["Width"],
+              let height = bounds["Height"]
+        else {
+            return nil
+        }
+        return [
+            "height": height,
+            "pid": processID,
+            "width": width,
+            "x": x,
+            "y": y,
+        ]
+    }
+    let data = try JSONSerialization.data(withJSONObject: windows, options: [.sortedKeys])
+    print(String(decoding: data, as: UTF8.self))
+}
+
+func printPointState(_ point: CGPoint) throws {
+    guard let element = elementAt(point) else {
+        throw DriverError.failure("no accessibility element at point")
+    }
+
+    var processID: pid_t = 0
+    _ = AXUIElementGetPid(element, &processID)
+    var roles: [String] = []
+    var candidate: AXUIElement? = element
+    for _ in 0 ..< 20 {
+        guard let current = candidate else { break }
+        roles.append(stringAttribute(current, kAXRoleAttribute as CFString) ?? "unknown")
+        candidate = axElement(copyAttribute(current, kAXParentAttribute as CFString))
+    }
+
+    let state: [String: Any] = [
+        "pid": processID,
+        "x": point.x,
+        "y": point.y,
+        "roles": roles,
+    ]
+    let data = try JSONSerialization.data(withJSONObject: state, options: [.sortedKeys])
+    print(String(decoding: data, as: UTF8.self))
+}
+
+func printFocusedElementState(_ application: NSRunningApplication) throws {
+    let appElement = AXUIElementCreateApplication(application.processIdentifier)
+    var focusedValue: CFTypeRef?
+    let focusedResult = AXUIElementCopyAttributeValue(
+        appElement,
+        kAXFocusedUIElementAttribute as CFString,
+        &focusedValue
+    )
+    let frontmostBundleIdentifier = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "unknown"
+
+    guard focusedResult == .success, let focused = axElement(focusedValue) else {
+        let state: [String: Any] = [
+            "focused": false,
+            "focusedElementError": focusedResult.rawValue,
+            "frontmostBundleIdentifier": frontmostBundleIdentifier,
+        ]
+        let data = try JSONSerialization.data(withJSONObject: state, options: [.sortedKeys])
+        print(String(decoding: data, as: UTF8.self))
+        return
+    }
+
+    var selectedTextValue: CFTypeRef?
+    let selectedTextResult = AXUIElementCopyAttributeValue(
+        focused,
+        kAXSelectedTextAttribute as CFString,
+        &selectedTextValue
+    )
+    var selectedRangeValue: CFTypeRef?
+    let selectedRangeResult = AXUIElementCopyAttributeValue(
+        focused,
+        kAXSelectedTextRangeAttribute as CFString,
+        &selectedRangeValue
+    )
+    var selectedRange = CFRange(location: -1, length: -1)
+    if selectedRangeResult == .success, let rangeValue = axValue(selectedRangeValue) {
+        _ = AXValueGetValue(rangeValue, .cfRange, &selectedRange)
+    }
+
+    var selectedRangeSettable = DarwinBoolean(false)
+    _ = AXUIElementIsAttributeSettable(
+        focused,
+        kAXSelectedTextRangeAttribute as CFString,
+        &selectedRangeSettable
+    )
+    var selectedMarkerRangeSettable = DarwinBoolean(false)
+    _ = AXUIElementIsAttributeSettable(
+        focused,
+        "AXSelectedTextMarkerRange" as CFString,
+        &selectedMarkerRangeSettable
+    )
+    var parameterizedNames: CFArray?
+    _ = AXUIElementCopyParameterizedAttributeNames(focused, &parameterizedNames)
+    var focusedAttributeSettable = DarwinBoolean(false)
+    _ = AXUIElementIsAttributeSettable(
+        focused,
+        kAXFocusedAttribute as CFString,
+        &focusedAttributeSettable
+    )
+
+    let state: [String: Any] = [
+        "focused": true,
+        "focusedAttributeSettable": focusedAttributeSettable.boolValue,
+        "frontmostBundleIdentifier": frontmostBundleIdentifier,
+        "identity": String(CFHash(focused), radix: 16),
+        "parameterizedAttributes": (parameterizedNames as? [String])?.sorted() ?? [],
+        "role": stringAttribute(focused, kAXRoleAttribute as CFString) ?? "unknown",
+        "selectedMarkerRangeSettable": selectedMarkerRangeSettable.boolValue,
+        "selectedRangeError": selectedRangeResult.rawValue,
+        "selectedRangeLength": selectedRange.length,
+        "selectedRangeLocation": selectedRange.location,
+        "selectedRangeSettable": selectedRangeSettable.boolValue,
+        "selectedTextError": selectedTextResult.rawValue,
+        "selectedTextUTF16Length": (selectedTextValue as? String)?.utf16.count ?? -1,
+        "utf16Length": textLength(focused) ?? -1,
+    ]
+    let data = try JSONSerialization.data(withJSONObject: state, options: [.sortedKeys])
+    print(String(decoding: data, as: UTF8.self))
+}
+
+func rangeBounds(_ element: AXUIElement, location: Int, length: Int) -> (AXError, CGRect?) {
+    var range = CFRange(location: location, length: length)
+    guard let rangeValue = AXValueCreate(.cfRange, &range) else { return (.failure, nil) }
+    var value: CFTypeRef?
+    let result = AXUIElementCopyParameterizedAttributeValue(
+        element,
+        kAXBoundsForRangeParameterizedAttribute as CFString,
+        rangeValue,
+        &value
+    )
+    guard result == .success,
+          let boundsValue = axValue(value),
+          AXValueGetType(boundsValue) == .cgRect
+    else {
+        return (result, nil)
+    }
+    var bounds = CGRect.zero
+    return AXValueGetValue(boundsValue, .cgRect, &bounds) ? (result, bounds) : (.failure, nil)
+}
+
+func attributedSize(_ element: AXUIElement, location: Int, length: Int) -> CGSize? {
+    var range = CFRange(location: location, length: length)
+    guard let rangeValue = AXValueCreate(.cfRange, &range) else { return nil }
+    var value: CFTypeRef?
+    guard AXUIElementCopyParameterizedAttributeValue(
+        element,
+        kAXAttributedStringForRangeParameterizedAttribute as CFString,
+        rangeValue,
+        &value
+    ) == .success,
+        let attributed = value as? NSAttributedString
+    else {
+        return nil
+    }
+    return attributed.size()
+}
+
+func collectGeometryState(
+    _ element: AXUIElement,
+    location: Int,
+    length: Int,
+    depth: Int,
+    remaining: inout Int,
+    into states: inout [[String: Any]]
+) {
+    guard remaining > 0, depth <= 12 else { return }
+    remaining -= 1
+
+    let children = copyAttribute(element, kAXChildrenAttribute as CFString) as? [AXUIElement] ?? []
+    let requested = rangeBounds(element, location: location, length: length)
+    let utf16Length = textLength(element)
+    var state: [String: Any] = [
+        "children": children.count,
+        "depth": depth,
+        "identity": String(CFHash(element), radix: 16),
+        "rangeBoundsError": requested.0.rawValue,
+        "role": stringAttribute(element, kAXRoleAttribute as CFString) ?? "unknown",
+        "utf16Length": utf16Length.map { $0 as Any } ?? NSNull(),
+    ]
+    if let frame = elementFrame(element) {
+        state["frame"] = ["height": frame.height, "width": frame.width, "x": frame.origin.x, "y": frame.origin.y]
+    }
+    if let bounds = requested.1 {
+        state["rangeBounds"] = ["height": bounds.height, "width": bounds.width, "x": bounds.origin.x, "y": bounds.origin.y]
+    }
+    if let size = attributedSize(element, location: location, length: length) {
+        state["attributedSize"] = ["height": size.height, "width": size.width]
+    }
+    if let utf16Length, utf16Length > 0 {
+        let full = rangeBounds(element, location: 0, length: utf16Length)
+        state["fullBoundsError"] = full.0.rawValue
+        if let bounds = full.1 {
+            state["fullBounds"] = ["height": bounds.height, "width": bounds.width, "x": bounds.origin.x, "y": bounds.origin.y]
+        }
+        if let size = attributedSize(element, location: 0, length: utf16Length) {
+            state["fullAttributedSize"] = ["height": size.height, "width": size.width]
+        }
+    }
+    states.append(state)
+
+    for child in children {
+        collectGeometryState(
+            child,
+            location: location,
+            length: length,
+            depth: depth + 1,
+            remaining: &remaining,
+            into: &states
+        )
+    }
+}
+
+func printFocusedGeometry(_ application: NSRunningApplication, location: Int, length: Int) throws {
+    let appElement = AXUIElementCreateApplication(application.processIdentifier)
+    guard let focused = axElement(copyAttribute(appElement, kAXFocusedUIElementAttribute as CFString)) else {
+        throw DriverError.failure("application has no focused accessibility element")
+    }
+    var remaining = 500
+    var states: [[String: Any]] = []
+    collectGeometryState(focused, location: location, length: length, depth: 0, remaining: &remaining, into: &states)
+    var ancestor = axElement(copyAttribute(focused, kAXParentAttribute as CFString))
+    for _ in 0 ..< 20 {
+        guard let element = ancestor else { break }
+        let role = stringAttribute(element, kAXRoleAttribute as CFString) ?? "unknown"
+        if ["AXWebArea", "AXScrollArea", "AXWindow"].contains(role), let frame = elementFrame(element) {
+            states.append(["ancestorRole": role, "frame": ["x": frame.minX, "y": frame.minY, "width": frame.width, "height": frame.height]])
+        }
+        ancestor = axElement(copyAttribute(element, kAXParentAttribute as CFString))
+    }
+    let data = try JSONSerialization.data(withJSONObject: states, options: [.sortedKeys])
+    print(String(decoding: data, as: UTF8.self))
+}
+
+let textWardenBundleIdentifier = "io.textwarden.TextWarden"
+let appPauseDurationsKey = "appPauseDurations"
+let appPausedUntilKey = "appPausedUntil"
+
+func textWardenPreferences() throws -> UserDefaults {
+    guard let defaults = UserDefaults(suiteName: textWardenBundleIdentifier) else {
+        throw DriverError.failure("could not open TextWarden preferences")
+    }
+    return defaults
+}
+
+func decodedPreference<Value: Decodable>(
+    _ type: Value.Type,
+    key: String,
+    defaults: UserDefaults
+) throws -> Value {
+    guard let data = defaults.data(forKey: key) else {
+        throw DriverError.failure("TextWarden preference is unavailable: \(key)")
+    }
+    do {
+        return try JSONDecoder().decode(type, from: data)
+    } catch {
+        throw DriverError.failure("could not decode TextWarden preference: \(key)")
+    }
+}
+
+func persistPreference(_ value: some Encodable, key: String, defaults: UserDefaults) throws {
+    do {
+        try defaults.set(JSONEncoder().encode(value), forKey: key)
+        guard defaults.synchronize() else {
+            throw DriverError.failure("could not persist TextWarden preference: \(key)")
+        }
+    } catch let error as DriverError {
+        throw error
+    } catch {
+        throw DriverError.failure("could not encode TextWarden preference: \(key)")
+    }
+}
+
+func printAppPauseState(_ bundleIdentifier: String) throws {
+    let defaults = try textWardenPreferences()
+    let durations = try decodedPreference(
+        [String: String].self,
+        key: appPauseDurationsKey,
+        defaults: defaults
+    )
+    let pausedUntil = try decodedPreference(
+        [String: Date].self,
+        key: appPausedUntilKey,
+        defaults: defaults
+    )
+    let state: [String: Any] = [
+        "bundleIdentifier": bundleIdentifier,
+        "duration": durations[bundleIdentifier] ?? NSNull(),
+        "pausedUntilUnixSeconds": pausedUntil[bundleIdentifier]?.timeIntervalSince1970 ?? NSNull(),
+    ]
+    let data = try JSONSerialization.data(withJSONObject: state, options: [.sortedKeys])
+    print(String(decoding: data, as: UTF8.self))
+}
+
+func setAppPauseState(_ bundleIdentifier: String, value: String, pausedUntilArgument: String?) throws {
+    guard NSRunningApplication.runningApplications(withBundleIdentifier: textWardenBundleIdentifier).isEmpty else {
+        throw DriverError.failure("stop TextWarden before changing its pause preferences")
+    }
+
+    let rawDuration: String?
+    switch value {
+    case "unset": rawDuration = nil
+    case "active": rawDuration = "Active"
+    case "one-hour": rawDuration = "Paused for 1 Hour"
+    case "twenty-four-hours": rawDuration = "Paused for 24 Hours"
+    case "indefinite": rawDuration = "Paused Until Resumed"
+    default: throw DriverError.usage("invalid app pause value: \(value)")
+    }
+
+    let isTimed = value == "one-hour" || value == "twenty-four-hours"
+    guard isTimed == (pausedUntilArgument != nil) else {
+        throw DriverError.usage("timed app pauses require an exact Unix timestamp")
+    }
+    let pausedUntil: Date?
+    if let pausedUntilArgument {
+        guard let seconds = Double(pausedUntilArgument), seconds.isFinite else {
+            throw DriverError.usage("invalid app pause timestamp: \(pausedUntilArgument)")
+        }
+        pausedUntil = Date(timeIntervalSince1970: seconds)
+    } else {
+        pausedUntil = nil
+    }
+
+    let defaults = try textWardenPreferences()
+    var durations = try decodedPreference(
+        [String: String].self,
+        key: appPauseDurationsKey,
+        defaults: defaults
+    )
+    var pausedUntilDates = try decodedPreference(
+        [String: Date].self,
+        key: appPausedUntilKey,
+        defaults: defaults
+    )
+    durations[bundleIdentifier] = rawDuration
+    pausedUntilDates[bundleIdentifier] = pausedUntil
+    try persistPreference(durations, key: appPauseDurationsKey, defaults: defaults)
+    try persistPreference(pausedUntilDates, key: appPausedUntilKey, defaults: defaults)
+}
+
+func usage() -> Never {
+    fputs("""
+    Usage:
+      macos-e2e-driver.swift activate BUNDLE_ID
+      macos-e2e-driver.swift capture-overlay BUNDLE_ID OUTPUT_PNG
+      macos-e2e-driver.swift capture-region BUNDLE_ID X Y WIDTH HEIGHT OUTPUT_PNG
+      macos-e2e-driver.swift move X Y
+      macos-e2e-driver.swift click-editor BUNDLE_ID X Y
+      macos-e2e-driver.swift click-app BUNDLE_ID X Y
+      macos-e2e-driver.swift right-click-app BUNDLE_ID X Y
+      macos-e2e-driver.swift drag-app BUNDLE_ID START_X START_Y END_X END_Y [HOLD_SECONDS]
+      macos-e2e-driver.swift select-range BUNDLE_ID LOCATION LENGTH
+      macos-e2e-driver.swift watch-overlays BUNDLE_ID SECONDS [ACTION_LABEL]
+      macos-e2e-driver.swift editors BUNDLE_ID
+      macos-e2e-driver.swift check-editor BUNDLE_ID EXPECTED_TEXT
+      macos-e2e-driver.swift check-editor-trimmed BUNDLE_ID EXPECTED_TEXT
+      macos-e2e-driver.swift focused-element-state BUNDLE_ID
+      macos-e2e-driver.swift focused-geometry BUNDLE_ID LOCATION LENGTH
+      macos-e2e-driver.swift app-pause-state BUNDLE_ID
+      macos-e2e-driver.swift app-pause-set BUNDLE_ID unset|active|indefinite
+      macos-e2e-driver.swift app-pause-set BUNDLE_ID one-hour|twenty-four-hours UNIX_SECONDS
+      macos-e2e-driver.swift focus-editor BUNDLE_ID INDEX
+      macos-e2e-driver.swift press-app BUNDLE_ID LABEL [OCCURRENCE]
+      macos-e2e-driver.swift press-self-chat BUNDLE_ID
+      macos-e2e-driver.swift action-frame BUNDLE_ID LABEL [OCCURRENCE]
+      macos-e2e-driver.swift press-menu BUNDLE_ID LABEL
+      macos-e2e-driver.swift tab-app BUNDLE_ID
+      macos-e2e-driver.swift escape-app BUNDLE_ID
+      macos-e2e-driver.swift shortcut-app BUNDLE_ID tab|return|escape|command-z|command-l|command-t|command-a|command-0|command-1|command-n|option-1|option-control-g|option-control-w|option-shift-r
+      macos-e2e-driver.swift type-app BUNDLE_ID TEXT
+      macos-e2e-driver.swift paste-app BUNDLE_ID TEXT
+      macos-e2e-driver.swift backspace-app BUNDLE_ID
+      macos-e2e-driver.swift clear-editor BUNDLE_ID EXPECTED_UTF16_LENGTH
+      macos-e2e-driver.swift click-textwarden X Y
+      macos-e2e-driver.swift right-click-textwarden X Y
+      macos-e2e-driver.swift drag-textwarden START_X START_Y END_X END_Y
+      macos-e2e-driver.swift press-textwarden LABEL
+      macos-e2e-driver.swift scroll DELTA_Y [DELTA_X]
+      macos-e2e-driver.swift point-state X Y
+      macos-e2e-driver.swift windows BUNDLE_ID
+      macos-e2e-driver.swift window-state BUNDLE_ID
+      macos-e2e-driver.swift window-set BUNDLE_ID X Y WIDTH HEIGHT
+      macos-e2e-driver.swift window-minimize BUNDLE_ID
+      macos-e2e-driver.swift window-restore BUNDLE_ID
+      macos-e2e-driver.swift self-test
+    """ + "\n", stderr)
+    exit(2)
+}
+
+func run(_ arguments: [String]) throws {
+    guard let command = arguments.first else { usage() }
+
+    switch command {
+    case "activate":
+        guard arguments.count == 2 else { usage() }
+        let application = try activate(arguments[1])
+        print("frontmost pid=\(application.processIdentifier) bundle=\(arguments[1])")
+
+    case "move":
+        guard arguments.count == 3 else { usage() }
+        try postMouse(.mouseMoved, at: CGPoint(
+            x: number(arguments[1], name: "x"),
+            y: number(arguments[2], name: "y")
+        ))
+
+    case "click-editor":
+        guard arguments.count == 4 else { usage() }
+        _ = try activate(arguments[1])
+        let point = try CGPoint(
+            x: number(arguments[2], name: "x"),
+            y: number(arguments[3], name: "y")
+        )
+        guard editorAt(point) != nil else {
+            throw DriverError.failure("refusing click outside an editable text element")
+        }
+        try postMouse(.mouseMoved, at: point)
+        usleep(80000)
+        try postMouse(.leftMouseDown, at: point)
+        usleep(100_000)
+        try postMouse(.leftMouseUp, at: point)
+
+    case "click-app", "right-click-app":
+        guard arguments.count == 4 else { usage() }
+        let application = try activate(arguments[1])
+        let point = try CGPoint(
+            x: number(arguments[2], name: "x"),
+            y: number(arguments[3], name: "y")
+        )
+        guard let element = elementAt(point, in: application)
+        else {
+            throw DriverError.failure("refusing click outside the target application")
+        }
+        guard !isRiskyControl(element) else {
+            throw DriverError.failure("refusing click on a send-like control")
+        }
+        try postMouse(.mouseMoved, at: point)
+        usleep(80000)
+        try postMouse(arguments[0] == "right-click-app" ? .rightMouseDown : .leftMouseDown, at: point)
+        usleep(100_000)
+        try postMouse(arguments[0] == "right-click-app" ? .rightMouseUp : .leftMouseUp, at: point)
+
+    case "editors":
+        guard arguments.count == 2 else { usage() }
+        let application = try activate(arguments[1])
+        let appElement = AXUIElementCreateApplication(application.processIdentifier)
+        let focused = axElement(copyAttribute(appElement, kAXFocusedUIElementAttribute as CFString))
+        let states = editors(in: application).enumerated().compactMap { index, editor -> [String: Any]? in
+            guard let frame = elementFrame(editor) else { return nil }
+            let length: Any = textLength(editor).map { $0 as Any } ?? NSNull()
+            return [
+                "index": index,
+                "identity": String(CFHash(editor), radix: 16),
+                "role": stringAttribute(editor, kAXRoleAttribute as CFString) ?? "unknown",
+                "focused": focused.map { CFEqual($0, editor) } ?? false,
+                "utf16Length": length,
+                "x": frame.origin.x,
+                "y": frame.origin.y,
+                "width": frame.width,
+                "height": frame.height,
+            ]
+        }
+        let data = try JSONSerialization.data(withJSONObject: states, options: [.sortedKeys])
+        print(String(decoding: data, as: UTF8.self))
+
+    case "focused-element-state":
+        guard arguments.count == 2 else { usage() }
+        try printFocusedElementState(runningApplication(arguments[1]))
+
+    case "select-range":
+        guard arguments.count == 4, let location = Int(arguments[2]), let length = Int(arguments[3]), location >= 0, length >= 0 else { usage() }
+        let editor = try focusedEditor(activate(arguments[1]))
+        guard let count = textLength(editor), location <= count, length <= count - location else { throw DriverError.failure("range exceeds editor text") }
+        var range = CFRange(location: location, length: length)
+        guard let value = AXValueCreate(.cfRange, &range),
+              AXUIElementSetAttributeValue(editor, kAXSelectedTextRangeAttribute as CFString, value) == .success else { throw DriverError.failure("could not select editor range") }
+
+    case "focused-geometry":
+        guard arguments.count == 4,
+              let location = Int(arguments[2]), location >= 0,
+              let length = Int(arguments[3]), length > 0
+        else { usage() }
+        try printFocusedGeometry(
+            activate(arguments[1]),
+            location: location,
+            length: length
+        )
+
+    case "app-pause-state":
+        guard arguments.count == 2 else { usage() }
+        try printAppPauseState(arguments[1])
+
+    case "app-pause-set":
+        guard arguments.count == 3 || arguments.count == 4 else { usage() }
+        try setAppPauseState(
+            arguments[1],
+            value: arguments[2],
+            pausedUntilArgument: arguments.count == 4 ? arguments[3] : nil
+        )
+
+    case "check-editor", "check-editor-trimmed":
+        guard arguments.count == 3, arguments[2].utf16.count <= 100_000 else { usage() }
+        let editor = try focusedEditor(activate(arguments[1]))
+        guard let actual = textValue(editor) else {
+            throw DriverError.failure("focused editor text is unavailable")
+        }
+        let comparableActual = command == "check-editor-trimmed"
+            ? actual.trimmingCharacters(in: .whitespacesAndNewlines)
+            : actual
+        guard comparableActual == arguments[2] else {
+            throw DriverError.failure("focused editor text did not match expected value")
+        }
+        print("PASS: focused editor matches expected text (\(arguments[2].utf16.count) UTF-16 units)")
+
+    case "focus-editor":
+        guard arguments.count == 3, let index = Int(arguments[2]) else { usage() }
+        let application = try activate(arguments[1])
+        let candidates = editors(in: application)
+        guard candidates.indices.contains(index), let frame = elementFrame(candidates[index]) else {
+            throw DriverError.failure("editable element index is unavailable")
+        }
+        let point = CGPoint(x: frame.midX, y: frame.midY)
+        guard processIDAt(point) == application.processIdentifier,
+              editorAt(point) != nil
+        else {
+            throw DriverError.failure("editable element center is not exposed by the target application")
+        }
+        try postMouse(.mouseMoved, at: point)
+        usleep(80000)
+        try postMouse(.leftMouseDown, at: point)
+        usleep(100_000)
+        try postMouse(.leftMouseUp, at: point)
+
+    case "press-app", "action-frame":
+        guard arguments.count == 3 || arguments.count == 4 else { usage() }
+        var occurrence = arguments.count == 4 ? Int(arguments[3]) ?? -1 : 0
+        guard occurrence >= 0 else { usage() }
+        let application = try activate(arguments[1])
+        let appElement = AXUIElementCreateApplication(application.processIdentifier)
+        var remaining = 10000
+        let requestedOccurrence = occurrence
+        var element = findPressableElement(
+            appElement,
+            label: arguments[2],
+            occurrence: &occurrence,
+            remaining: &remaining
+        )
+        if element.flatMap(elementFrame) == nil {
+            occurrence = requestedOccurrence
+            remaining = 10000
+            element = findPressableElement(
+                appElement,
+                label: arguments[2],
+                allowShortcutSuffix: true,
+                occurrence: &occurrence,
+                remaining: &remaining
+            )
+        }
+        if element.flatMap(elementFrame) == nil {
+            occurrence = requestedOccurrence
+            remaining = 10000
+            element = findPressableElement(
+                appElement,
+                label: arguments[2],
+                requiresPressAction: false,
+                occurrence: &occurrence,
+                remaining: &remaining
+            )
+        }
+        guard let element,
+              !isRiskyControl(element),
+              let frame = elementFrame(element)
+        else {
+            throw DriverError.failure("could not safely press application action: \(arguments[2])")
+        }
+        if arguments[0] == "action-frame" {
+            let data = try JSONSerialization.data(withJSONObject: ["x": frame.minX, "y": frame.minY, "width": frame.width, "height": frame.height], options: [.sortedKeys])
+            print(String(decoding: data, as: UTF8.self))
+            break
+        }
+        if supportsAction(element, kAXPressAction as CFString),
+           AXUIElementPerformAction(element, kAXPressAction as CFString) == .success
+        {
+            break
+        }
+        let point = CGPoint(x: frame.midX, y: frame.midY)
+        guard let hit = elementAt(point, in: application), !isRiskyControl(hit) else {
+            throw DriverError.failure("application action is not exposed at its accessibility frame")
+        }
+        try postMouse(.mouseMoved, at: point)
+        usleep(80000)
+        try postMouse(.leftMouseDown, at: point)
+        usleep(100_000)
+        try postMouse(.leftMouseUp, at: point)
+
+    case "press-menu":
+        guard arguments.count == 3 else { usage() }
+        let application = try activate(arguments[1])
+        let appElement = AXUIElementCreateApplication(application.processIdentifier)
+        guard let menuBar = axElement(copyAttribute(appElement, kAXMenuBarAttribute as CFString)) else {
+            throw DriverError.failure("application does not expose a menu bar")
+        }
+        var occurrence = 0
+        var remaining = 2000
+        guard let item = findPressableElement(
+            menuBar,
+            label: arguments[2],
+            allowShortcutSuffix: true,
+            occurrence: &occurrence,
+            remaining: &remaining
+        ),
+            !isRiskyControl(item),
+            AXUIElementPerformAction(item, kAXPressAction as CFString) == .success
+        else {
+            throw DriverError.failure("could not safely press application menu item: \(arguments[2])")
+        }
+
+    case "press-self-chat":
+        guard arguments.count == 2 else { usage() }
+        let application = try activate(arguments[1])
+        let appElement = AXUIElementCreateApplication(application.processIdentifier)
+        var remaining = 10000
+        var element = findSelfChatElement(
+            appElement,
+            requiresPressAction: true,
+            remaining: &remaining
+        )
+        if element.flatMap(elementFrame) == nil {
+            remaining = 10000
+            element = findSelfChatElement(
+                appElement,
+                requiresPressAction: false,
+                remaining: &remaining
+            )
+        }
+        guard let element,
+              !isRiskyControl(element),
+              let frame = elementFrame(element)
+        else {
+            throw DriverError.failure("application exposes no explicit self-chat action")
+        }
+        let point = CGPoint(x: frame.midX, y: frame.midY)
+        guard processIDAt(point) == application.processIdentifier else {
+            throw DriverError.failure("self-chat action is not exposed at its accessibility frame")
+        }
+        try postMouse(.mouseMoved, at: point)
+        usleep(80000)
+        try postMouse(.leftMouseDown, at: point)
+        usleep(100_000)
+        try postMouse(.leftMouseUp, at: point)
+
+    case "backspace-app":
+        guard arguments.count == 2 else { usage() }
+        let application = try activate(arguments[1])
+        _ = try focusedEditor(application)
+        try postKey(51)
+
+    case "tab-app":
+        guard arguments.count == 2 else { usage() }
+        let application = try activate(arguments[1])
+        _ = try focusedEditor(application)
+        try postKey(48)
+
+    case "escape-app":
+        guard arguments.count == 2 else { usage() }
+        let application = try activate(arguments[1])
+        _ = try focusedEditor(application)
+        try postKey(53)
+
+    case "shortcut-app":
+        guard arguments.count == 3 else { usage() }
+        let keyCode: CGKeyCode
+        let flags: CGEventFlags
+        switch arguments[2] {
+        case "escape":
+            keyCode = 53
+            flags = []
+        case "command-z":
+            keyCode = 6
+            flags = .maskCommand
+        case "tab":
+            keyCode = 48
+            flags = []
+        case "return":
+            keyCode = 36
+            flags = []
+        case "command-l":
+            keyCode = 37
+            flags = .maskCommand
+        case "command-t":
+            keyCode = 17
+            flags = .maskCommand
+        case "command-a":
+            keyCode = 0
+            flags = .maskCommand
+        case "command-0":
+            keyCode = 29
+            flags = .maskCommand
+        case "command-1":
+            keyCode = 18
+            flags = .maskCommand
+        case "command-n":
+            keyCode = 45
+            flags = .maskCommand
+        case "option-1":
+            keyCode = 18
+            flags = .maskAlternate
+        case "option-control-w":
+            keyCode = 13
+            flags = [.maskAlternate, .maskControl]
+        case "option-control-g":
+            keyCode = 5
+            flags = [.maskAlternate, .maskControl]
+        case "option-shift-r":
+            keyCode = 15
+            flags = [.maskAlternate, .maskShift]
+        default: usage()
+        }
+        _ = try activate(arguments[1])
+        try postKey(keyCode, flags: flags)
+
+    case "clear-editor":
+        guard arguments.count == 3, let expectedLength = Int(arguments[2]), expectedLength >= 0 else { usage() }
+        let application = try activate(arguments[1])
+        let editor = try focusedEditor(application)
+        guard textLength(editor) == expectedLength else {
+            throw DriverError.failure("refusing to clear editor with unexpected text length")
+        }
+        try postKey(0, flags: .maskCommand)
+        try postKey(51)
+
+    case "type-app":
+        guard arguments.count == 3 else { usage() }
+        let application = try activate(arguments[1])
+        _ = try focusedEditor(application)
+        try postText(arguments[2])
+
+    case "paste-app":
+        guard arguments.count == 3 else { usage() }
+        let application = try activate(arguments[1])
+        _ = try focusedEditor(application)
+        try pasteText(arguments[2], application: application)
+
+    case "click-textwarden":
+        guard arguments.count == 3 else { usage() }
+        let point = try CGPoint(
+            x: number(arguments[1], name: "x"),
+            y: number(arguments[2], name: "y")
+        )
+        let textWarden = try runningApplication("io.textwarden.TextWarden")
+        guard isPointOwnedBy(textWarden, at: point) else {
+            throw DriverError.failure("refusing click outside a TextWarden window")
+        }
+        // Coordinate tests must exercise mouse handling; use press-textwarden for AX actions.
+        try postMouse(.mouseMoved, at: point)
+        usleep(80000)
+        try postMouse(.leftMouseDown, at: point)
+        usleep(100_000)
+        try postMouse(.leftMouseUp, at: point)
+
+    case "right-click-textwarden":
+        guard arguments.count == 3 else { usage() }
+        let point = try CGPoint(
+            x: number(arguments[1], name: "x"),
+            y: number(arguments[2], name: "y")
+        )
+        let textWarden = try runningApplication("io.textwarden.TextWarden")
+        guard isPointOwnedBy(textWarden, at: point) else {
+            throw DriverError.failure("refusing right-click outside a TextWarden window")
+        }
+        try postMouse(.mouseMoved, at: point)
+        usleep(80000)
+        try postMouse(.rightMouseDown, at: point)
+        usleep(100_000)
+        try postMouse(.rightMouseUp, at: point)
+
+    case "drag-textwarden", "drag-app":
+        let generic = arguments[0] == "drag-app"
+        let offset = generic ? 1 : 0
+        guard arguments.count == 5 + offset || (generic && arguments.count == 7) else { usage() }
+        let start = try CGPoint(
+            x: number(arguments[1 + offset], name: "start x"),
+            y: number(arguments[2 + offset], name: "start y")
+        )
+        let end = try CGPoint(
+            x: number(arguments[3 + offset], name: "end x"),
+            y: number(arguments[4 + offset], name: "end y")
+        )
+        let textWarden = try runningApplication(generic ? arguments[1] : "io.textwarden.TextWarden")
+        guard isPointOwnedBy(textWarden, at: start) else {
+            throw DriverError.failure("refusing drag without a TextWarden start point")
+        }
+        try postMouse(.mouseMoved, at: start)
+        usleep(80000)
+        try postMouse(.leftMouseDown, at: start)
+        for step in 1 ... 12 {
+            let progress = CGFloat(step) / 12
+            let point = CGPoint(
+                x: start.x + (end.x - start.x) * progress,
+                y: start.y + (end.y - start.y) * progress
+            )
+            try postMouse(.leftMouseDragged, at: point)
+            usleep(20000)
+        }
+        if generic, arguments.count == 7 { try Thread.sleep(forTimeInterval: min(10, max(0, number(arguments[6], name: "hold seconds")))) }
+        try postMouse(.leftMouseUp, at: end)
+
+    case "press-textwarden":
+        guard arguments.count == 2 else { usage() }
+        let textWarden = try runningApplication("io.textwarden.TextWarden")
+        let appElement = AXUIElementCreateApplication(textWarden.processIdentifier)
+        var occurrence = 0
+        var remaining = 10000
+        guard let element = findPressableElement(
+            appElement,
+            label: arguments[1],
+            occurrence: &occurrence,
+            remaining: &remaining
+        ),
+            AXUIElementPerformAction(element, kAXPressAction as CFString) == .success
+        else {
+            throw DriverError.failure("could not press TextWarden action: \(arguments[1])")
+        }
+
+    case "scroll":
+        guard arguments.count == 2 || arguments.count == 3 else { usage() }
+        let deltaY = try Int32(number(arguments[1], name: "deltaY"))
+        let deltaX = try arguments.count == 3 ? Int32(number(arguments[2], name: "deltaX")) : 0
+        guard let event = CGEvent(
+            scrollWheelEvent2Source: CGEventSource(stateID: .hidSystemState),
+            units: .pixel,
+            wheelCount: 2,
+            wheel1: deltaY,
+            wheel2: deltaX,
+            wheel3: 0
+        ) else {
+            throw DriverError.failure("could not create scroll event")
+        }
+        event.post(tap: .cghidEventTap)
+
+    case "point-state":
+        guard arguments.count == 3 else { usage() }
+        try printPointState(CGPoint(
+            x: number(arguments[1], name: "x"),
+            y: number(arguments[2], name: "y")
+        ))
+
+    case "watch-overlays":
+        guard arguments.count == 3 || arguments.count == 4 else { usage() }
+        let application = try runningApplication(arguments[1])
+        let duration = try min(10, max(0.1, number(arguments[2], name: "seconds")))
+        let deadline = Date().addingTimeInterval(duration)
+        var samples = [[Int]]()
+        repeat {
+            let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+            let ids = windows.compactMap { window -> Int? in
+                guard window[kCGWindowOwnerPID as String] as? pid_t == application.processIdentifier,
+                      let layer = window[kCGWindowLayer as String] as? Int, layer >= 100,
+                      let bounds = window[kCGWindowBounds as String] as? [String: CGFloat],
+                      (bounds["Width"] ?? 0) > 100 else { return nil }
+                return window[kCGWindowNumber as String] as? Int
+            }.sorted()
+            samples.append(ids)
+            if samples.count == 5, arguments.count == 4 {
+                let appElement = AXUIElementCreateApplication(application.processIdentifier)
+                var occurrence = 0
+                var remaining = 10000
+                guard let element = findPressableElement(appElement, label: arguments[3], occurrence: &occurrence, remaining: &remaining),
+                      !isRiskyControl(element),
+                      AXUIElementPerformAction(element, kAXPressAction as CFString) == .success
+                else {
+                    throw DriverError.failure("could not press observed action")
+                }
+            }
+            Thread.sleep(forTimeInterval: 0.02)
+        } while Date() < deadline
+        let result: [String: Any] = ["samples": samples.count, "minimumCount": samples.map(\.count).min() ?? 0,
+                                     "maximumCount": samples.map(\.count).max() ?? 0,
+                                     "windowIDs": Array(Set(samples.flatMap(\.self))).sorted()]
+        let data = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])
+        print(String(decoding: data, as: UTF8.self))
+
+    case "capture-region":
+        guard arguments.count == 7 else { usage() }
+        let application = try runningApplication(arguments[1])
+        let rect = try CGRect(x: number(arguments[2], name: "x"), y: number(arguments[3], name: "y"),
+                              width: number(arguments[4], name: "width"), height: number(arguments[5], name: "height"))
+        guard rect.width > 0, rect.height > 0,
+              [CGPoint(x: rect.minX, y: rect.minY), CGPoint(x: rect.maxX - 1, y: rect.minY),
+               CGPoint(x: rect.minX, y: rect.maxY - 1), CGPoint(x: rect.maxX - 1, y: rect.maxY - 1)]
+              .allSatisfy({ processIDAt($0) == application.processIdentifier })
+        else { throw DriverError.failure("capture region must be inside the requested app") }
+        let capture = Process()
+        capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+        capture.arguments = ["-x", "-R", "\(rect.minX),\(rect.minY),\(rect.width),\(rect.height)", arguments[6]]
+        try capture.run()
+        capture.waitUntilExit()
+        guard capture.terminationStatus == 0 else { throw DriverError.failure("region capture failed") }
+
+    case "capture-overlay":
+        guard arguments.count == 3 else { usage() }
+        let application = try runningApplication(arguments[1])
+        let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        guard let window = windows.first(where: { window in
+            guard window[kCGWindowOwnerPID as String] as? pid_t == application.processIdentifier,
+                  let layer = window[kCGWindowLayer as String] as? Int, layer >= 3,
+                  let bounds = window[kCGWindowBounds as String] as? [String: CGFloat]
+            else { return false }
+            return (bounds["Width"] ?? 0) > 100 && (bounds["Height"] ?? 0) > 10
+        }), let id = window[kCGWindowNumber as String] as? Int else {
+            throw DriverError.failure("no visible overlay owned by the requested app")
+        }
+        let capture = Process()
+        capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+        capture.arguments = ["-x", "-l", String(id), arguments[2]]
+        try capture.run()
+        capture.waitUntilExit()
+        guard capture.terminationStatus == 0 else { throw DriverError.failure("overlay capture failed") }
+        if let bounds = window[kCGWindowBounds as String] as? [String: CGFloat] {
+            let data = try JSONSerialization.data(withJSONObject: bounds, options: [.sortedKeys])
+            print(String(decoding: data, as: UTF8.self))
+        }
+
+    case "windows":
+        guard arguments.count == 2 else { usage() }
+        try printApplicationWindows(arguments[1])
+
+    case "window-state":
+        guard arguments.count == 2 else { usage() }
+        let application = try activate(arguments[1])
+        try printWindowState(
+            bundleIdentifier: arguments[1],
+            application: application,
+            window: focusedWindow(application)
+        )
+
+    case "window-set":
+        guard arguments.count == 6 else { usage() }
+        let application = try activate(arguments[1])
+        let window = try focusedWindow(application)
+        let expectedPosition = try CGPoint(
+            x: number(arguments[2], name: "x"),
+            y: number(arguments[3], name: "y")
+        )
+        let expectedSize = try CGSize(
+            width: number(arguments[4], name: "width"),
+            height: number(arguments[5], name: "height")
+        )
+        let deadline = Date().addingTimeInterval(1)
+        while Date() < deadline {
+            try setSize(window, kAXSizeAttribute as CFString, expectedSize)
+            try setPoint(window, kAXPositionAttribute as CFString, expectedPosition)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+
+            let position = try pointAttribute(window, kAXPositionAttribute as CFString)
+            let size = try sizeAttribute(window, kAXSizeAttribute as CFString)
+            if frameMatches(
+                position: position,
+                size: size,
+                expectedPosition: expectedPosition,
+                expectedSize: expectedSize
+            ) {
+                return
+            }
+        }
+        throw DriverError.failure("window did not reach requested frame")
+
+    case "window-minimize", "window-restore":
+        guard arguments.count == 2 else { usage() }
+        let application = try activate(arguments[1])
+        let minimized = command == "window-minimize"
+        let window = if minimized {
+            try focusedWindow(application)
+        } else {
+            try minimizedWindow(application)
+        }
+        guard AXUIElementSetAttributeValue(
+            window,
+            kAXMinimizedAttribute as CFString,
+            minimized as CFBoolean
+        ) == .success else {
+            throw DriverError.failure("could not set window minimized state")
+        }
+
+    case "self-test":
+        let parsed = try number("12.5", name: "x")
+        assert(parsed == 12.5)
+        assert(isSafeTextInput("draft only"))
+        assert(!isSafeTextInput("never\nsend"))
+        assert(isSelfChatLabel("Example User (You)"))
+        assert(isSelfChatLabel("Saved Messages"))
+        assert(!isSelfChatLabel("General"))
+        assert(!isEditable(AXUIElementCreateSystemWide()))
+        assert(frameMatches(
+            position: CGPoint(x: 10, y: 20),
+            size: CGSize(width: 300, height: 200),
+            expectedPosition: CGPoint(x: 11, y: 19),
+            expectedSize: CGSize(width: 301, height: 199)
+        ))
+        do {
+            _ = try number("nan", name: "x")
+            assertionFailure("non-finite numbers must fail")
+        } catch {}
+        print("PASS: macOS E2E driver self-test")
+
+    default:
+        usage()
+    }
+}
+
+do {
+    try run(Array(CommandLine.arguments.dropFirst()))
+} catch {
+    fputs("ERROR: \(error)\n", stderr)
+    exit(1)
+}

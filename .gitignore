@@ -1,0 +1,78 @@
+# Specify framework (internal tooling)
+.specify/
+
+# Claude Code configuration (user-specific)
+.claude/
+
+# Internal planning and specification documents
+specs/**/
+
+# Research and investigation files (temporary, never commit)
+research/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Xcode
+*.xcodeproj/*
+!*.xcodeproj/project.pbxproj
+!*.xcodeproj/xcshareddata/
+*.xcworkspace/*
+!*.xcworkspace/contents.xcworkspacedata
+!*.xcworkspace/xcshareddata/
+xcuserdata/
+DerivedData/
+*.moved-aside
+*.xccheckout
+*.xcscmblueprint
+*.ipa
+*.dSYM.zip
+*.dSYM
+*.trace
+.cpu-check/
+__pycache__/
+
+# Swift Package Manager
+.build/
+Packages/
+Package.pins
+Package.resolved
+*.swiftpm/
+
+# Rust
+target/
+**/*.rs.bk
+*.rlib
+debug/
+release/
+**/generated/
+
+# Release artifacts
+releases/
+
+# Build artifacts
+*.app
+*.dmg
+build/
+*.o
+*.a
+*.dylib
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Temporary files
+*.log
+*.tmp
+CLAUDE.local.md
+
+# Generated Help Book files (built from markdown via make help-book)
+Resources/TextWarden.help/Contents/Resources/en.lproj/configuration.html
+Resources/TextWarden.help/Contents/Resources/en.lproj/troubleshooting.html
+Resources/TextWarden.help/Contents/Resources/TextWarden.helpindex

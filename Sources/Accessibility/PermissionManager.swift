@@ -1,0 +1,216 @@
+//
+//  PermissionManager.swift
+//  TextWarden
+//
+//  Manages Accessibility permissions and status
+//
+
+import AppKit
+import ApplicationServices
+import Combine
+import Foundation
+
+/// Manages Accessibility API permissions
+@MainActor
+class PermissionManager: ObservableObject {
+    static let shared = PermissionManager()
+
+    /// Whether Accessibility permissions are currently granted
+    @Published private(set) var isPermissionGranted: Bool = false
+
+    /// Callback when permission is granted
+    var onPermissionGranted: (() -> Void)?
+
+    /// Callback when permission is revoked
+    var onPermissionRevoked: (() -> Void)?
+
+    /// Timer for polling permission status
+    private var pollTimer: Timer?
+
+    /// Timer for continuous permission monitoring
+    private var revocationMonitorTimer: Timer?
+
+    private init() {
+        // Initialize with actual permission status (synchronous check)
+        isPermissionGranted = AXIsProcessTrusted()
+        Logger.logPermissionChange(granted: isPermissionGranted)
+
+        // Start continuous monitoring for revocation
+        if isPermissionGranted {
+            startRevocationMonitoring()
+        }
+    }
+
+    /// Check if Accessibility permissions are granted
+    func checkPermission() -> Bool {
+        let trusted = AXIsProcessTrusted()
+        isPermissionGranted = trusted
+        return trusted
+    }
+
+    /// Check permission status and update published property
+    /// Called by OnboardingView's polling timer
+    func checkPermissionStatus() {
+        let wasGranted = isPermissionGranted
+        let isGranted = checkPermission()
+
+        Logger.trace("Permission check (OnboardingView): wasGranted=\(wasGranted), isGranted=\(isGranted), callbackSet=\(onPermissionGranted != nil)", category: Logger.permissions)
+
+        // Call callback if permission was just granted
+        if !wasGranted, isGranted {
+            Logger.info("Permission transition detected (via checkPermissionStatus) - calling onPermissionGranted callback", category: Logger.permissions)
+            if let callback = onPermissionGranted {
+                callback()
+                Logger.debug("onPermissionGranted callback executed (from checkPermissionStatus)", category: Logger.permissions)
+            } else {
+                Logger.warning("onPermissionGranted callback is nil! AnalysisCoordinator will NOT start.", category: Logger.permissions)
+            }
+        }
+    }
+
+    /// Check if app can request permission
+    func canRequestPermission() -> Bool {
+        // Always true on macOS 13.0+
+        true
+    }
+
+    /// Request Accessibility permissions
+    /// This will trigger the system permission dialog
+    func requestPermission() {
+        Logger.info("Requesting Accessibility permission", category: Logger.permissions)
+
+        let options: NSDictionary = [
+            kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true,
+        ]
+        let result = AXIsProcessTrustedWithOptions(options)
+
+        Logger.debug("AXIsProcessTrustedWithOptions returned: \(result)", category: Logger.permissions)
+
+        // Start polling to detect when permission is granted
+        startPolling()
+    }
+
+    /// Start polling for permission status changes
+    /// Called by requestPermission() - this is the PermissionManager's internal polling
+    func startPolling(interval: TimeInterval = TimingConstants.permissionPolling) {
+        stopPolling()
+
+        Logger.debug("PermissionManager.startPolling: Starting internal polling (interval: \(interval)s, currentState: \(isPermissionGranted), callbackSet: \(onPermissionGranted != nil))", category: Logger.permissions)
+
+        pollTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+
+                let wasGranted = isPermissionGranted
+                let isGranted = checkPermission()
+
+                Logger.trace("Permission poll (PermissionManager): wasGranted=\(wasGranted), isGranted=\(isGranted), callbackSet=\(onPermissionGranted != nil)", category: Logger.permissions)
+
+                // Handle permission grant transition
+                if !wasGranted, isGranted {
+                    Logger.info("Permission transition detected (via PermissionManager.startPolling) - calling onPermissionGranted callback", category: Logger.permissions)
+                    stopPolling()
+                    // Start continuous monitoring for revocation
+                    startRevocationMonitoring()
+                    // Call callback to notify interested parties (e.g., AppDelegate to start AnalysisCoordinator)
+                    if let callback = onPermissionGranted {
+                        callback()
+                        Logger.debug("onPermissionGranted callback executed (from PermissionManager.startPolling)", category: Logger.permissions)
+                    } else {
+                        Logger.warning("onPermissionGranted callback is nil! AnalysisCoordinator will NOT start.", category: Logger.permissions)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Stop polling for permission status
+    func stopPolling() {
+        pollTimer?.invalidate()
+        pollTimer = nil
+    }
+
+    // MARK: - Permission Revocation Monitoring
+
+    /// Start continuous monitoring for permission revocation
+    private func startRevocationMonitoring(interval: TimeInterval = TimingConstants.revocationMonitoring) {
+        stopRevocationMonitoring()
+
+        Logger.info("Starting permission revocation monitoring (every \(Int(interval))s)", category: Logger.permissions)
+
+        revocationMonitorTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.checkForRevocation()
+            }
+        }
+    }
+
+    /// Stop revocation monitoring
+    private func stopRevocationMonitoring() {
+        revocationMonitorTimer?.invalidate()
+        revocationMonitorTimer = nil
+    }
+
+    /// Check if permission was revoked
+    private func checkForRevocation() {
+        let wasGranted = isPermissionGranted
+        let isGranted = checkPermission()
+
+        // Permission was revoked
+        if wasGranted, !isGranted {
+            Logger.critical("Accessibility permission was revoked!", category: Logger.permissions)
+            Logger.logPermissionChange(granted: false)
+
+            DispatchQueue.main.async { [weak self] in
+                self?.onPermissionRevoked?()
+            }
+        }
+    }
+
+    /// Open System Settings to Accessibility preferences
+    func openSystemSettings() {
+        let urlString = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+
+        if let url = URL(string: urlString) {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    /// Alias for openSystemSettings() used by OnboardingView
+    func openSystemPreferences() {
+        openSystemSettings()
+    }
+
+    deinit {
+        // Directly invalidate timers (can't call @MainActor methods from deinit)
+        pollTimer?.invalidate()
+        revocationMonitorTimer?.invalidate()
+    }
+}
+
+// MARK: - Permission Status
+
+extension PermissionManager {
+    /// Get detailed permission status
+    var permissionStatus: PermissionStatus {
+        if isPermissionGranted {
+            .granted
+        } else {
+            .denied
+        }
+    }
+
+    enum PermissionStatus {
+        case granted
+        case denied
+
+        var description: String {
+            switch self {
+            case .granted:
+                "Accessibility permissions granted"
+            case .denied:
+                "Accessibility permissions required"
+            }
+        }
+    }
+}

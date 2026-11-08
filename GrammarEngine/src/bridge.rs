@@ -1,0 +1,416 @@
+// FFI Bridge - Swift-Rust interop using swift-bridge
+//
+// Defines FFI-safe structs and functions for Swift integration.
+
+// Allow non-camel-case types for swift-bridge generated code
+#![allow(non_camel_case_types)]
+
+use crate::analyzer;
+use crate::swift_logger::{register_swift_callback, SwiftLogCallback, SwiftLoggerLayer};
+use std::sync::Once;
+use sysinfo::{Pid, ProcessesToUpdate, System};
+use tracing::Level;
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use whatlang::Lang;
+
+static INIT_LOGGING: Once = Once::new();
+
+#[swift_bridge::bridge]
+mod ffi {
+    pub enum ErrorSeverity {
+        Error,
+        Warning,
+        Info,
+    }
+
+    // Opaque type for GrammarError to support Vec<GrammarError>
+    extern "Rust" {
+        type GrammarError;
+
+        fn start(&self) -> usize;
+        fn end(&self) -> usize;
+        fn message(&self) -> String;
+        fn severity(&self) -> ErrorSeverity;
+        fn category(&self) -> String;
+        fn lint_id(&self) -> String;
+        fn suggestions(&self) -> Vec<String>;
+    }
+
+    // Opaque type for AnalysisResult
+    extern "Rust" {
+        type AnalysisResult;
+
+        fn errors(&self) -> Vec<GrammarError>;
+        fn word_count(&self) -> usize;
+        fn analysis_time_ms(&self) -> u64;
+        fn memory_before_bytes(&self) -> u64;
+        fn memory_after_bytes(&self) -> u64;
+        fn memory_delta_bytes(&self) -> i64;
+        fn is_non_english_document(&self) -> bool;
+
+        // Timing breakdown for performance profiling
+        fn early_language_check_ms(&self) -> u64;
+        fn dictionary_build_ms(&self) -> u64;
+        fn linter_setup_ms(&self) -> u64;
+        fn document_parse_ms(&self) -> u64;
+        fn harper_lint_ms(&self) -> u64;
+        fn post_process_ms(&self) -> u64;
+    }
+
+    // Opaque type for the detector-backed language catalog.
+    extern "Rust" {
+        type LanguageInfo;
+
+        fn code(&self) -> String;
+        fn english_name(&self) -> String;
+        fn native_name(&self) -> String;
+
+        fn supported_languages() -> Vec<LanguageInfo>;
+    }
+
+    extern "Rust" {
+        fn initialize_logging(log_level: String);
+
+        fn analyze_text(
+            text: String,
+            dialect: String,
+            enable_internet_abbrev: bool,
+            enable_genz_slang: bool,
+            enable_it_terminology: bool,
+            enable_brand_names: bool,
+            enable_person_names: bool,
+            enable_last_names: bool,
+            enable_language_detection: bool,
+            excluded_languages: Vec<String>,
+            enable_sentence_start_capitalization: bool,
+            // Individual rule toggles
+            enforce_oxford_comma: bool,
+            check_ellipsis: bool,
+            check_unclosed_quotes: bool,
+            check_dashes: bool,
+        ) -> AnalysisResult;
+    }
+}
+
+/// Lightweight helper to read current process memory in bytes
+fn read_process_memory(pid: Option<Pid>) -> u64 {
+    if let Some(pid) = pid {
+        let mut sys = match System::new() {
+            Ok(sys) => sys,
+            Err(error) => {
+                tracing::warn!("Failed to initialize process memory measurement: {error:?}");
+                return 0;
+            }
+        };
+        sys.refresh_processes(ProcessesToUpdate::All, false);
+        return sys.process(pid).map(|p| p.memory()).unwrap_or(0);
+    }
+    0
+}
+
+// FFI type implementations
+#[derive(Clone)]
+pub struct GrammarError {
+    start: usize,
+    end: usize,
+    message: String,
+    severity: analyzer::ErrorSeverity,
+    category: String,
+    lint_id: String,
+    suggestions: Vec<String>,
+}
+
+impl GrammarError {
+    fn start(&self) -> usize {
+        self.start
+    }
+
+    fn end(&self) -> usize {
+        self.end
+    }
+
+    fn message(&self) -> String {
+        self.message.clone()
+    }
+
+    fn severity(&self) -> ffi::ErrorSeverity {
+        match self.severity {
+            analyzer::ErrorSeverity::Error => ffi::ErrorSeverity::Error,
+            analyzer::ErrorSeverity::Warning => ffi::ErrorSeverity::Warning,
+            analyzer::ErrorSeverity::Info => ffi::ErrorSeverity::Info,
+        }
+    }
+
+    fn category(&self) -> String {
+        self.category.clone()
+    }
+
+    fn lint_id(&self) -> String {
+        self.lint_id.clone()
+    }
+
+    fn suggestions(&self) -> Vec<String> {
+        self.suggestions.clone()
+    }
+}
+
+#[derive(Clone)]
+pub struct LanguageInfo {
+    code: String,
+    english_name: String,
+    native_name: String,
+}
+
+impl LanguageInfo {
+    fn code(&self) -> String {
+        self.code.clone()
+    }
+
+    fn english_name(&self) -> String {
+        self.english_name.clone()
+    }
+
+    fn native_name(&self) -> String {
+        self.native_name.clone()
+    }
+}
+
+fn supported_languages() -> Vec<LanguageInfo> {
+    Lang::all()
+        .iter()
+        .map(|language| LanguageInfo {
+            code: language.code().to_string(),
+            english_name: language.eng_name().to_string(),
+            native_name: language.name().to_string(),
+        })
+        .collect()
+}
+
+pub struct AnalysisResult {
+    errors: Vec<GrammarError>,
+    word_count: usize,
+    analysis_time_ms: u64,
+    memory_before_bytes: u64,
+    memory_after_bytes: u64,
+    memory_delta_bytes: i64,
+    /// True if document is primarily non-English (>60% excluded language)
+    is_non_english_document: bool,
+
+    // Timing breakdown for performance profiling
+    early_language_check_ms: u64,
+    dictionary_build_ms: u64,
+    linter_setup_ms: u64,
+    document_parse_ms: u64,
+    harper_lint_ms: u64,
+    post_process_ms: u64,
+}
+
+impl AnalysisResult {
+    fn errors(&self) -> Vec<GrammarError> {
+        self.errors.clone()
+    }
+
+    fn word_count(&self) -> usize {
+        self.word_count
+    }
+
+    fn analysis_time_ms(&self) -> u64 {
+        self.analysis_time_ms
+    }
+
+    fn memory_before_bytes(&self) -> u64 {
+        self.memory_before_bytes
+    }
+
+    fn memory_after_bytes(&self) -> u64 {
+        self.memory_after_bytes
+    }
+
+    fn memory_delta_bytes(&self) -> i64 {
+        self.memory_delta_bytes
+    }
+
+    fn is_non_english_document(&self) -> bool {
+        self.is_non_english_document
+    }
+
+    fn early_language_check_ms(&self) -> u64 {
+        self.early_language_check_ms
+    }
+
+    fn dictionary_build_ms(&self) -> u64 {
+        self.dictionary_build_ms
+    }
+
+    fn linter_setup_ms(&self) -> u64 {
+        self.linter_setup_ms
+    }
+
+    fn document_parse_ms(&self) -> u64 {
+        self.document_parse_ms
+    }
+
+    fn harper_lint_ms(&self) -> u64 {
+        self.harper_lint_ms
+    }
+
+    fn post_process_ms(&self) -> u64 {
+        self.post_process_ms
+    }
+}
+
+// Initialize the logging system with unified Swift logging support
+// This should be called once from Swift at application startup, AFTER register_log_callback
+fn initialize_logging(log_level: String) {
+    INIT_LOGGING.call_once(|| {
+        let level = match log_level.to_lowercase().as_str() {
+            "debug" => Level::DEBUG,
+            "info" => Level::INFO,
+            "warn" | "warning" => Level::WARN,
+            "error" => Level::ERROR,
+            _ => Level::INFO, // default to info
+        };
+
+        let filter = EnvFilter::from_default_env().add_directive(level.into());
+
+        // Create the Swift logger layer for unified logging
+        let swift_layer = SwiftLoggerLayer::new(level);
+
+        // Also keep console logging for debugging during development
+        let fmt_layer = fmt::layer()
+            .with_target(true)
+            .with_thread_ids(false)
+            .with_line_number(true);
+
+        // Initialize with both layers
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(swift_layer)
+            .with(fmt_layer)
+            .init();
+
+        tracing::info!(
+            "Grammar Engine logging initialized at level: {} (unified with Swift)",
+            log_level
+        );
+    });
+}
+
+/// Register the Swift log callback for unified logging
+///
+/// # Safety
+/// The callback pointer must be valid and point to a function with signature:
+/// `extern "C" fn(level: i32, message: *const c_char)`
+///
+/// This must be called BEFORE initialize_logging for the callback to be active
+/// during initialization.
+#[no_mangle]
+pub extern "C" fn register_rust_log_callback(callback: SwiftLogCallback) {
+    register_swift_callback(callback);
+}
+
+// FFI wrapper that calls the analyzer and converts types
+#[tracing::instrument(skip(text), fields(text_len = text.len()))]
+fn analyze_text(
+    text: String,
+    dialect: String,
+    enable_internet_abbrev: bool,
+    enable_genz_slang: bool,
+    enable_it_terminology: bool,
+    enable_brand_names: bool,
+    enable_person_names: bool,
+    enable_last_names: bool,
+    enable_language_detection: bool,
+    excluded_languages: Vec<String>,
+    enable_sentence_start_capitalization: bool,
+    // Individual rule toggles
+    enforce_oxford_comma: bool,
+    check_ellipsis: bool,
+    check_unclosed_quotes: bool,
+    check_dashes: bool,
+) -> AnalysisResult {
+    // SECURITY: Never log the actual text content - only metadata
+    tracing::debug!(
+        "FFI analyze_text called: dialect={}, text_len={}, lang_detection={}",
+        dialect,
+        text.len(),
+        enable_language_detection
+    );
+
+    let pid = sysinfo::get_current_pid().ok();
+    let memory_before = read_process_memory(pid);
+
+    let result = analyzer::analyze_text(
+        &text,
+        &dialect,
+        enable_internet_abbrev,
+        enable_genz_slang,
+        enable_it_terminology,
+        enable_brand_names,
+        enable_person_names,
+        enable_last_names,
+        enable_language_detection,
+        excluded_languages,
+        enable_sentence_start_capitalization,
+        enforce_oxford_comma,
+        check_ellipsis,
+        check_unclosed_quotes,
+        check_dashes,
+    );
+
+    // Capture memory after analysis
+    let memory_after = read_process_memory(pid);
+
+    let memory_delta = (memory_after as i64) - (memory_before as i64);
+
+    tracing::info!(
+        "Analysis completed: {} errors found, {} words, {}ms, mem_delta={}KB",
+        result.errors.len(),
+        result.word_count,
+        result.analysis_time_ms,
+        memory_delta / 1024
+    );
+
+    // Convert analyzer types to FFI types
+    let errors = result
+        .errors
+        .into_iter()
+        .map(|err| GrammarError {
+            start: err.start,
+            end: err.end,
+            message: err.message,
+            severity: err.severity,
+            category: err.category,
+            lint_id: err.lint_id,
+            suggestions: err.suggestions,
+        })
+        .collect();
+
+    AnalysisResult {
+        errors,
+        word_count: result.word_count,
+        analysis_time_ms: result.analysis_time_ms,
+        memory_before_bytes: memory_before,
+        memory_after_bytes: memory_after,
+        memory_delta_bytes: memory_delta,
+        is_non_english_document: result.is_non_english_document,
+        early_language_check_ms: result.early_language_check_ms,
+        dictionary_build_ms: result.dictionary_build_ms,
+        linter_setup_ms: result.linter_setup_ms,
+        document_parse_ms: result.document_parse_ms,
+        harper_lint_ms: result.harper_lint_ms,
+        post_process_ms: result.post_process_ms,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn process_memory_handles_current_and_missing_pid() {
+        assert_eq!(read_process_memory(None), 0);
+        let pid = sysinfo::get_current_pid().expect("current process ID should be available");
+        assert!(read_process_memory(Some(pid)) > 0);
+    }
+}

@@ -1,0 +1,1138 @@
+//
+//  DiagnosticsView.swift
+//  TextWarden
+//
+//  Diagnostics view showing debugging information and system monitoring.
+//
+
+import SwiftUI
+import UniformTypeIdentifiers
+
+// MARK: - Diagnostics View
+
+struct DiagnosticsView: View {
+    @ObservedObject var preferences: UserPreferences
+    @ObservedObject private var permissionManager = PermissionManager.shared
+    @ObservedObject private var runtimeHealth = RuntimeHealthStore.shared
+    @State private var isExporting: Bool = false
+    @State private var showingExportSuccess: Bool = false
+    @State private var showingExportError: Bool = false
+    @State private var exportedFilePath: String = ""
+    @State private var exportedFileSize: String = ""
+    @State private var pendingResetAction: ResetAction?
+
+    var body: some View {
+        Form {
+            Section {
+                let snapshot = runtimeHealth.snapshot
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: statusIcon(for: snapshot.state))
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(statusColor(for: snapshot.state))
+                        .frame(width: 32, height: 32)
+                        .background(
+                            Circle()
+                                .fill(statusColor(for: snapshot.state).opacity(0.12))
+                        )
+
+                    VStack(alignment: .leading, spacing: 7) {
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(snapshot.applicationName ?? "TextWarden")
+                                .font(.headline)
+
+                            Spacer()
+
+                            Text(snapshot.state.displayName)
+                                .font(.caption.weight(.semibold))
+                                .foregroundColor(statusColor(for: snapshot.state))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(
+                                    Capsule()
+                                        .fill(statusColor(for: snapshot.state).opacity(0.12))
+                                )
+                        }
+
+                        Text(snapshot.title)
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+
+                        if let lastCheck = snapshot.lastSuccessfulCheck {
+                            Label(
+                                "Last checked \(lastCheck.formatted(date: .omitted, time: .shortened))",
+                                systemImage: "clock"
+                            )
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        }
+
+                        if snapshot.capabilities.rawValue != 0 {
+                            Text("Capabilities: \(snapshot.capabilities.supportLabel)")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+
+                        if let bundleID = snapshot.bundleIdentifier {
+                            Text(bundleID)
+                                .font(.caption2.monospaced())
+                                .foregroundColor(.secondary)
+                                .textSelection(.enabled)
+                        }
+
+                        runtimeHealthAction(for: snapshot)
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.regular)
+                            .padding(.top, 2)
+                    }
+                }
+                .padding(.vertical, 6)
+            } header: {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "waveform.path.ecg")
+                            .font(.title2)
+                            .foregroundColor(.accentColor)
+                        Text("Runtime Health")
+                            .font(.title3)
+                            .fontWeight(.semibold)
+                    }
+
+                    Text("Current TextWarden status and available recovery actions")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            // MARK: - Session Information
+
+            Section {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Started:")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Text(BuildInfo.launchTimestamp)
+                            .font(.caption)
+                            .fontWeight(.medium)
+                    }
+
+                    HStack {
+                        Text("Uptime:")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Text(BuildInfo.uptime)
+                            .font(.caption)
+                            .fontWeight(.medium)
+                    }
+                }
+            } header: {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "clock")
+                            .font(.title2)
+                            .foregroundColor(.accentColor)
+                        Text("Session Information")
+                            .font(.title3)
+                            .fontWeight(.semibold)
+                    }
+
+                    Text("How long TextWarden has been running")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            // MARK: - Resource Monitoring Section
+
+            ResourceMonitoringView()
+
+            // MARK: - Logging Configuration
+
+            LoggingConfigurationView(preferences: preferences)
+
+            // MARK: - Export System Diagnostics
+
+            Section {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("Export a complete diagnostic package including logs, crash reports, system information, and comprehensive performance metrics for troubleshooting")
+                        .font(.body)
+                        .foregroundColor(.secondary)
+                        .padding(.bottom, 8)
+
+                    Button(action: exportDiagnosticsToFile) {
+                        HStack {
+                            Image(systemName: "square.and.arrow.up")
+                            Text("Export Diagnostics")
+                        }
+                        .font(.body)
+                        .fontWeight(.medium)
+                        .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isExporting)
+
+                    if isExporting {
+                        HStack(spacing: 12) {
+                            ProgressView()
+                                .controlSize(.small)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Preparing diagnostic package...")
+                                    .font(.subheadline)
+                                    .fontWeight(.medium)
+                                Text("Sanitizing logs and collecting data")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            Spacer()
+                        }
+                        .padding(12)
+                        .background(.fill.tertiary, in: RoundedRectangle(cornerRadius: 8))
+                    }
+
+                    Divider()
+                        .padding(.vertical, 4)
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("What's included in the ZIP package:")
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+                        Group {
+                            Label("diagnostic_overview.json - System info, permissions, settings", systemImage: "doc.text")
+                            Label("Performance metrics - Latency (mean, median, P90, P95, P99) by timeframe", systemImage: "chart.xyaxis.line")
+                            Label("Usage statistics - Errors, suggestions, categories by timeframe", systemImage: "chart.bar")
+                            Label("Complete log files (current + rotated logs)", systemImage: "doc.on.doc")
+                            Label("crash_reports/ - Crash logs (if any)", systemImage: "exclamationmark.triangle")
+                            Label("Application state (paused/active apps)", systemImage: "app.dashed")
+                        }
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    }
+
+                    Text("⚠️ Privacy: At default log levels, no text is included. Debug/Trace logs may contain analyzed text. Please review before sharing.")
+                        .font(.caption)
+                        .foregroundColor(.orange)
+                        .padding(.top, 4)
+                }
+            } header: {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "doc.text.magnifyingglass")
+                            .font(.title2)
+                            .foregroundColor(.accentColor)
+                        Text("Export System Diagnostics")
+                            .font(.title3)
+                            .fontWeight(.semibold)
+                    }
+
+                    Text("Generate comprehensive diagnostic reports for troubleshooting")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            // MARK: - Debug Overlays
+
+            Section {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("Enable visual debug overlays to help diagnose positioning issues. When enabled, colored boxes will appear around text fields to show how TextWarden calculates positions for grammar indicators")
+                        .font(.body)
+                        .foregroundColor(.secondary)
+                        .padding(.bottom, 8)
+
+                    Toggle("Show Text Field Bounds", isOn: $preferences.showDebugBorderTextFieldBounds)
+                        .help("Display a red box showing the exact boundaries of the text field being monitored for grammar checking")
+
+                    Text("Red box showing the text field being monitored for grammar")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 20)
+                        .padding(.bottom, 8)
+
+                    Toggle("Show CGWindow Coordinates", isOn: $preferences.showDebugBorderCGWindowCoords)
+                        .help("Display a blue box showing the raw CGWindow coordinates from the system")
+
+                    Text("Blue box showing CGWindow coordinates (raw from system)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 20)
+                        .padding(.bottom, 8)
+
+                    Toggle("Show Cocoa Coordinates", isOn: $preferences.showDebugBorderCocoaCoords)
+                        .help("Display a green box showing the Cocoa coordinate system (converted from CGWindow)")
+
+                    Text("Green box showing Cocoa coordinates (converted)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 20)
+                        .padding(.bottom, 8)
+
+                    Toggle("Show Character Position Markers", isOn: $preferences.showDebugCharacterMarkers)
+                        .help("Display markers showing character positions for debugging text positioning")
+
+                    Text("Orange = underline start (Cyan = first char when combined with Text Field Bounds)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 20)
+
+                    Divider()
+                        .padding(.vertical, 4)
+
+                    HStack(spacing: 8) {
+                        Image(systemName: "info.circle.fill")
+                            .foregroundColor(.blue)
+                            .font(.caption)
+                        Text("These overlays are useful for troubleshooting position-related issues in specific applications")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            } header: {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "viewfinder")
+                            .font(.title2)
+                            .foregroundColor(.accentColor)
+                        Text("Debug Overlays")
+                            .font(.title3)
+                            .fontWeight(.semibold)
+                    }
+
+                    Text("Visual debugging tools for positioning and coordinate issues")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            // MARK: - Reset Options
+
+            Section {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("Reset various aspects of TextWarden to their default state. Use these options with caution as they cannot be undone")
+                        .font(.body)
+                        .foregroundColor(.secondary)
+                        .padding(.bottom, 8)
+
+                    // Arrange buttons in a 2x2 grid for better alignment
+                    VStack(spacing: 12) {
+                        HStack(spacing: 12) {
+                            Button {
+                                pendingResetAction = .allSettings
+                            } label: {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    HStack {
+                                        Image(systemName: "arrow.counterclockwise.circle.fill")
+                                        Text("Reset All Settings")
+                                    }
+                                    .font(.body)
+                                    .fontWeight(.medium)
+                                    .foregroundColor(.red)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .buttonStyle(.bordered)
+                            .help("Reset all preferences and restart onboarding")
+
+                            Button {
+                                pendingResetAction = .customDictionary
+                            } label: {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    HStack {
+                                        Image(systemName: "book.closed.fill")
+                                        Text("Clear Custom Dictionary")
+                                    }
+                                    .font(.body)
+                                    .fontWeight(.medium)
+                                    .foregroundColor(.red)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .buttonStyle(.bordered)
+                            .help("Remove all words from your custom dictionary")
+                        }
+
+                        HStack(spacing: 12) {
+                            Button {
+                                pendingResetAction = .ignoredRules
+                            } label: {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    HStack {
+                                        Image(systemName: "checklist")
+                                        Text("Clear Ignored Rules")
+                                    }
+                                    .font(.body)
+                                    .fontWeight(.medium)
+                                    .foregroundColor(.red)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .buttonStyle(.bordered)
+                            .help("Re-enable all previously ignored grammar rules")
+
+                            Button {
+                                pendingResetAction = .ignoredErrorTexts
+                            } label: {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    HStack {
+                                        Image(systemName: "text.badge.xmark")
+                                        Text("Clear Ignored Error Texts")
+                                    }
+                                    .font(.body)
+                                    .fontWeight(.medium)
+                                    .foregroundColor(.red)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .buttonStyle(.bordered)
+                            .help("Clear all error texts ignored with 'Ignore Everywhere'")
+                        }
+
+                        HStack(spacing: 12) {
+                            Button {
+                                pendingResetAction = .milestones
+                            } label: {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    HStack {
+                                        Image(systemName: "gift")
+                                        Text("Reset Milestones")
+                                    }
+                                    .font(.body)
+                                    .fontWeight(.medium)
+                                    .foregroundColor(.red)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .buttonStyle(.bordered)
+                            .help("Re-enable milestone celebration prompts")
+
+                            // Empty spacer to maintain grid alignment
+                            Color.clear
+                                .frame(maxWidth: .infinity)
+                        }
+                    }
+                }
+            } header: {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "arrow.counterclockwise.circle")
+                            .font(.title2)
+                            .foregroundColor(.accentColor)
+                        Text("Reset Options")
+                            .font(.title3)
+                            .fontWeight(.semibold)
+                    }
+
+                    Text("Restore settings and data to their default values")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .padding()
+        .sheet(isPresented: $showingExportSuccess) {
+            ExportSuccessSheet(
+                filePath: exportedFilePath,
+                fileSize: exportedFileSize,
+                isPresented: $showingExportSuccess
+            )
+        }
+        .alert("Export Failed", isPresented: $showingExportError) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("Failed to export diagnostic package. Please check the logs for details.")
+        }
+        .alert(item: $pendingResetAction) { action in
+            Alert(
+                title: Text(action.title),
+                message: Text(action.message),
+                primaryButton: .destructive(Text(action.confirmationTitle)) {
+                    performReset(action)
+                },
+                secondaryButton: .cancel()
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func runtimeHealthAction(for snapshot: RuntimeHealthSnapshot) -> some View {
+        switch snapshot.action {
+        case .grantPermission:
+            Button("Open Accessibility Settings") {
+                permissionManager.openSystemSettings()
+            }
+        case .resume:
+            let title = snapshot.resumeScope.flatMap { scope -> String? in
+                guard case .application = scope else { return nil }
+                return snapshot.applicationName.map { "Resume TextWarden in \($0)" }
+            } ?? "Resume TextWarden"
+            Button(title) {
+                if let scope = snapshot.resumeScope {
+                    preferences.resume(scope)
+                }
+            }
+        case .trySafely:
+            Button("Try Safely") {
+                if let bundleID = snapshot.bundleIdentifier {
+                    AnalysisCoordinator.shared.startSafeTrial(for: bundleID)
+                }
+            }
+        case .retry:
+            Button("Retry Now") {
+                AnalysisCoordinator.shared.retryCurrentCheck()
+            }
+        case .none, .enable, .resetIndicatorPosition, .openSettings, .copyDiagnostics, .reportCompatibility, .keepPaused:
+            EmptyView()
+        }
+    }
+
+    private func statusIcon(for state: CheckingState) -> String {
+        switch state {
+        case .active: "checkmark.circle.fill"
+        case .limited: "exclamationmark.circle.fill"
+        case .recovering: "arrow.triangle.2.circlepath.circle.fill"
+        case .inactive: "pause.circle.fill"
+        }
+    }
+
+    private func statusColor(for state: CheckingState) -> Color {
+        switch state {
+        case .active: .green
+        case .limited, .recovering: .orange
+        case .inactive: .secondary
+        }
+    }
+
+    // MARK: - Export Methods
+
+    private func performReset(_ action: ResetAction) {
+        switch action {
+        case .allSettings:
+            preferences.resetToDefaults()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                Self.relaunchApp()
+            }
+        case .customDictionary:
+            preferences.customDictionary.removeAll()
+        case .ignoredRules:
+            preferences.ignoredRules.removeAll()
+        case .ignoredErrorTexts:
+            preferences.ignoredErrorTexts.removeAll()
+        case .milestones:
+            preferences.milestonesDisabled = false
+            preferences.shownMilestones.removeAll()
+        }
+    }
+
+    private func exportDiagnosticsToFile() {
+        isExporting = true
+
+        // Show save panel first
+        let savePanel = NSSavePanel()
+        savePanel.title = "Export Diagnostics"
+        savePanel.message = "Choose a location to save the diagnostic package"
+        savePanel.nameFieldStringValue = "TextWarden-Diagnostics-\(formatDateForFilename()).zip"
+        savePanel.allowedContentTypes = [.zip]
+        savePanel.canCreateDirectories = true
+
+        savePanel.begin { response in
+            guard response == .OK, let url = savePanel.url else {
+                isExporting = false
+                return
+            }
+
+            // CRITICAL: Collect shortcuts on main thread BEFORE dispatching to background
+            // KeyboardShortcuts.Shortcut.description requires main thread access
+            let shortcuts = SettingsDump.collectShortcuts()
+
+            // Generate and export ZIP package (heavy I/O runs in background)
+            Task { @MainActor in
+                let success = await DiagnosticReport.exportAsZIP(
+                    to: url,
+                    preferences: preferences,
+                    shortcuts: shortcuts
+                )
+
+                isExporting = false
+
+                if success {
+                    exportedFilePath = url.path
+
+                    // Get file size
+                    if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+                       let fileSize = attrs[.size] as? Int64
+                    {
+                        let formatter = ByteCountFormatter()
+                        formatter.allowedUnits = [.useMB, .useKB]
+                        formatter.countStyle = .file
+                        exportedFileSize = formatter.string(fromByteCount: fileSize)
+                    } else {
+                        exportedFileSize = "Unknown"
+                    }
+
+                    showingExportSuccess = true
+                    Logger.info("Diagnostic package exported to: \(url.path)", category: Logger.general)
+                } else {
+                    showingExportError = true
+                    Logger.error("Failed to export diagnostic package", category: Logger.general)
+                }
+            }
+        }
+    }
+
+    private func formatDateForFilename() -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd-HHmmss"
+        return formatter.string(from: Date())
+    }
+
+    // MARK: - App Relaunch
+
+    /// Relaunch the app to apply reset settings and show onboarding
+    private static func relaunchApp() {
+        guard let appURL = Bundle.main.bundleURL as URL? else {
+            Logger.error("Failed to get app bundle URL for relaunch", category: Logger.general)
+            return
+        }
+
+        Logger.info("Relaunching TextWarden after settings reset", category: Logger.general)
+
+        // Launch a new instance of the app
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.createsNewApplicationInstance = true
+
+        NSWorkspace.shared.openApplication(at: appURL, configuration: configuration) { _, error in
+            if let error {
+                Logger.error("Failed to relaunch app: \(error.localizedDescription)", category: Logger.general)
+            } else {
+                // Terminate current instance after new one starts
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    NSApp.terminate(nil)
+                }
+            }
+        }
+    }
+}
+
+private enum ResetAction: Identifiable {
+    case allSettings
+    case customDictionary
+    case ignoredRules
+    case ignoredErrorTexts
+    case milestones
+
+    var id: String {
+        title
+    }
+
+    var title: String {
+        switch self {
+        case .allSettings: "Reset All Settings?"
+        case .customDictionary: "Clear Custom Dictionary?"
+        case .ignoredRules: "Clear Ignored Rules?"
+        case .ignoredErrorTexts: "Clear Ignored Error Texts?"
+        case .milestones: "Reset Milestones?"
+        }
+    }
+
+    var message: String {
+        switch self {
+        case .allSettings: "This restores TextWarden's settings and restarts the app."
+        case .customDictionary: "This removes every word in your custom dictionary."
+        case .ignoredRules: "This re-enables every rule you previously ignored."
+        case .ignoredErrorTexts: "This removes every text pattern ignored everywhere."
+        case .milestones: "This restores milestone prompts you have already dismissed."
+        }
+    }
+
+    var confirmationTitle: String {
+        switch self {
+        case .allSettings: "Reset Settings"
+        case .customDictionary: "Clear Dictionary"
+        case .ignoredRules: "Clear Rules"
+        case .ignoredErrorTexts: "Clear Ignored Texts"
+        case .milestones: "Reset Milestones"
+        }
+    }
+}
+
+// MARK: - Logging Configuration View
+
+struct LoggingConfigurationView: View {
+    @ObservedObject var preferences: UserPreferences
+    @State private var selectedLogLevel: LogLevel = Logger.minimumLogLevel
+    @State private var fileLoggingEnabled: Bool = Logger.fileLoggingEnabled
+    @State private var logFilePath: String = Logger.logFilePath
+    @State private var showVerboseLoggingWarning: Bool = false
+    @State private var pendingLogLevel: LogLevel?
+    @State private var isConfirmingVerboseLevel: Bool = false
+
+    var body: some View {
+        Section {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Configure log verbosity and output location for debugging")
+                    .font(.body)
+                    .foregroundColor(.secondary)
+                    .padding(.bottom, 8)
+
+                // Log Level Picker
+                HStack {
+                    Text("Log Level:")
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+
+                    Spacer()
+
+                    Picker("Log Level", selection: $selectedLogLevel) {
+                        ForEach(LogLevel.allCases, id: \.self) { level in
+                            Text(level.rawValue).tag(level)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    .onChange(of: selectedLogLevel) { oldValue, newValue in
+                        // Skip onChange if we're confirming a verbose level (prevents re-triggering warning)
+                        if isConfirmingVerboseLevel {
+                            isConfirmingVerboseLevel = false
+                            Logger.minimumLogLevel = newValue
+                            return
+                        }
+                        // Show warning when switching to verbose levels that may log user text
+                        if newValue == .debug || newValue == .trace, oldValue != .debug, oldValue != .trace {
+                            pendingLogLevel = newValue
+                            selectedLogLevel = oldValue // Revert until confirmed
+                            showVerboseLoggingWarning = true
+                        } else {
+                            Logger.minimumLogLevel = newValue
+                        }
+                    }
+                }
+
+                Text("Controls verbosity: Debug shows all messages, Critical shows only severe issues")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                Divider()
+                    .padding(.vertical, 4)
+
+                // File Logging Toggle
+                Toggle("Enable File Logging", isOn: $fileLoggingEnabled)
+                    .onChange(of: fileLoggingEnabled) { _, newValue in
+                        Logger.fileLoggingEnabled = newValue
+                    }
+                    .help("Write logs to a file for debugging purposes")
+
+                if fileLoggingEnabled {
+                    VStack(alignment: .leading, spacing: 12) {
+                        // Log File Path Configuration
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Log File Location:")
+                                .font(.subheadline)
+                                .fontWeight(.medium)
+
+                            // Path displayed in a styled text field
+                            HStack {
+                                Text(logFilePath)
+                                    .font(.caption.monospaced())
+                                    .foregroundColor(.primary)
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .help("Current log file path. Click 'Choose' to change location.")
+                                Spacer(minLength: 0)
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(Color(nsColor: .controlBackgroundColor))
+                            .cornerRadius(6)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
+                            )
+
+                            Text("You can choose a custom location using the button below, or use the default location")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+
+                            HStack(spacing: 8) {
+                                Button("Choose Location...") {
+                                    chooseLogFilePath()
+                                }
+                                .buttonStyle(.bordered)
+                                .help("Select a custom location for log files")
+
+                                if Logger.customLogFilePath != nil {
+                                    Button("Reset to Default") {
+                                        resetLogFilePathToDefault()
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .help("Use default location: ~/Library/Logs/TextWarden/")
+                                }
+
+                                Button("Open in Finder") {
+                                    NSWorkspace.shared.selectFile(logFilePath, inFileViewerRootedAtPath: "")
+                                }
+                                .buttonStyle(.bordered)
+                                .help("Show log file in Finder")
+                            }
+
+                            Text("Default: ~/Library/Logs/TextWarden/textwarden.log")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(.leading, 20)
+                    }
+                }
+            }
+        } header: {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 8) {
+                    Image(systemName: "doc.text.fill")
+                        .font(.title2)
+                        .foregroundColor(.accentColor)
+                    Text("Logging Configuration")
+                        .font(.title3)
+                        .fontWeight(.semibold)
+                }
+
+                Text("Configure debug logging and file output settings")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .sheet(isPresented: $showVerboseLoggingWarning) {
+            VerboseLoggingWarningSheet(
+                pendingLogLevel: pendingLogLevel,
+                isPresented: $showVerboseLoggingWarning,
+                onConfirm: {
+                    if let level = pendingLogLevel {
+                        isConfirmingVerboseLevel = true
+                        selectedLogLevel = level
+                    }
+                    pendingLogLevel = nil
+                },
+                onCancel: {
+                    pendingLogLevel = nil
+                }
+            )
+        }
+    }
+
+    private func chooseLogFilePath() {
+        let savePanel = NSSavePanel()
+        savePanel.title = "Choose Log File Location"
+        savePanel.message = "Select where to save log files"
+        savePanel.nameFieldStringValue = "textwarden.log"
+        savePanel.canCreateDirectories = true
+        savePanel.showsTagField = false
+
+        // Set default directory to ~/Library/Logs/TextWarden
+        let defaultLogDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/TextWarden")
+        savePanel.directoryURL = defaultLogDir
+
+        savePanel.begin { response in
+            guard response == .OK, let url = savePanel.url else { return }
+
+            // Save the custom path
+            Logger.customLogFilePath = url.path
+            logFilePath = url.path
+
+            Logger.info("Log file path changed to: \(url.path)", category: Logger.general)
+        }
+    }
+
+    private func resetLogFilePathToDefault() {
+        Logger.resetLogFilePathToDefault()
+        logFilePath = Logger.logFilePath
+
+        Logger.info("Log file path reset to default", category: Logger.general)
+    }
+}
+
+// MARK: - Export Success Sheet
+
+struct ExportSuccessSheet: View {
+    let filePath: String
+    let fileSize: String
+    @Binding var isPresented: Bool
+    @State private var showCopiedFeedback: Bool = false
+
+    private var fileName: String {
+        (filePath as NSString).lastPathComponent
+    }
+
+    private var directoryPath: String {
+        (filePath as NSString).deletingLastPathComponent
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header with success icon
+            VStack(spacing: 12) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 48))
+                    .foregroundStyle(.green)
+
+                Text("Export Successful")
+                    .font(.title2)
+                    .fontWeight(.semibold)
+            }
+            .padding(.top, 24)
+            .padding(.bottom, 20)
+
+            // File info card
+            VStack(alignment: .leading, spacing: 12) {
+                // File name with icon
+                HStack(spacing: 10) {
+                    Image(systemName: "doc.zipper")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(fileName)
+                            .font(.body)
+                            .fontWeight(.medium)
+
+                        Text(fileSize)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer()
+                }
+
+                Divider()
+
+                // Path display
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Location")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Text(directoryPath)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.primary)
+                        .lineLimit(2)
+                        .textSelection(.enabled)
+                }
+            }
+            .padding(16)
+            .background(.fill.tertiary, in: RoundedRectangle(cornerRadius: 10))
+            .padding(.horizontal, 24)
+
+            // Action buttons
+            HStack(spacing: 12) {
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(filePath, forType: .string)
+                    showCopiedFeedback = true
+
+                    // Hide feedback after delay
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        showCopiedFeedback = false
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: showCopiedFeedback ? "checkmark" : "doc.on.doc")
+                        Text(showCopiedFeedback ? "Copied!" : "Copy Path")
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .tint(showCopiedFeedback ? .green : nil)
+
+                Button {
+                    NSWorkspace.shared.selectFile(filePath, inFileViewerRootedAtPath: "")
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "folder")
+                        Text("Show in Finder")
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+            }
+            .padding(.horizontal, 24)
+            .padding(.top, 20)
+
+            // Done button
+            Button {
+                isPresented = false
+            } label: {
+                Text("Done")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .keyboardShortcut(.defaultAction)
+            .padding(.horizontal, 24)
+            .padding(.top, 12)
+            .padding(.bottom, 24)
+        }
+        .frame(width: 420)
+        .background(.regularMaterial)
+    }
+}
+
+// MARK: - Verbose Logging Warning Sheet
+
+struct VerboseLoggingWarningSheet: View {
+    let pendingLogLevel: LogLevel?
+    @Binding var isPresented: Bool
+    let onConfirm: () -> Void
+    let onCancel: () -> Void
+    @State private var showCopiedFeedback: Bool = false
+
+    private var logFilePath: String {
+        Logger.logFilePath
+    }
+
+    private var directoryPath: String {
+        (logFilePath as NSString).deletingLastPathComponent
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header with warning icon
+            VStack(spacing: 12) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 48))
+                    .foregroundStyle(.orange)
+
+                Text("Verbose Logging Warning")
+                    .font(.title2)
+                    .fontWeight(.semibold)
+            }
+            .padding(.top, 24)
+            .padding(.bottom, 16)
+
+            // Warning message
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Debug and Trace log levels may include analyzed text content in the log file for troubleshooting purposes.")
+                    .font(.body)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Be mindful of:")
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "doc.text")
+                                .frame(width: 16, alignment: .center)
+                            Text("What text you analyze while verbose logging is enabled")
+                        }
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "person.2")
+                                .frame(width: 16, alignment: .center)
+                            Text("Who you share the log file with")
+                        }
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "lock.shield")
+                                .frame(width: 16, alignment: .center)
+                            Text("Sensitive information that may appear in logs")
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 16)
+
+            // Log file path card
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 10) {
+                    Image(systemName: "doc.text")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Log File Location")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        Text(logFilePath)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.primary)
+                            .lineLimit(2)
+                            .textSelection(.enabled)
+                    }
+
+                    Spacer()
+                }
+
+                // Path action buttons
+                HStack(spacing: 8) {
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(logFilePath, forType: .string)
+                        showCopiedFeedback = true
+
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                            showCopiedFeedback = false
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: showCopiedFeedback ? "checkmark" : "doc.on.doc")
+                                .frame(width: 12)
+                            Text(showCopiedFeedback ? "Copied!" : "Copy Path")
+                        }
+                        .font(.caption)
+                        .frame(height: 16)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .tint(showCopiedFeedback ? .green : nil)
+
+                    Button {
+                        NSWorkspace.shared.selectFile(logFilePath, inFileViewerRootedAtPath: "")
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "folder")
+                                .frame(width: 12)
+                            Text("Show in Finder")
+                        }
+                        .font(.caption)
+                        .frame(height: 16)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    Spacer()
+                }
+            }
+            .padding(16)
+            .background(.fill.tertiary, in: RoundedRectangle(cornerRadius: 10))
+            .padding(.horizontal, 24)
+
+            // Action buttons
+            HStack(spacing: 12) {
+                Button {
+                    isPresented = false
+                    onCancel()
+                } label: {
+                    Text("Cancel")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .keyboardShortcut(.cancelAction)
+
+                Button {
+                    isPresented = false
+                    onConfirm()
+                } label: {
+                    Text("Enable \(pendingLogLevel?.rawValue ?? "Debug") Logging")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding(.horizontal, 24)
+            .padding(.top, 20)
+            .padding(.bottom, 24)
+        }
+        .frame(width: 460)
+        .background(.regularMaterial)
+    }
+}
