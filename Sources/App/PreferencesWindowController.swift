@@ -21,7 +21,6 @@ enum SettingsTab: Int, CaseIterable {
     case diagnostics = 6
     case about = 7
     case browser = 8
-    case typeRightAI = 9 // TypeRight
 }
 
 @MainActor

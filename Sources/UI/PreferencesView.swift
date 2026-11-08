@@ -18,13 +18,6 @@ struct PreferencesView: View {
 
     var body: some View {
         TabView(selection: $windowController.selectedTab) {
-            // TypeRight: the AI behind the cards comes first.
-            CoachAISettingsView()
-                .tabItem {
-                    Label("AI 服务商", systemImage: "sparkle")
-                }
-                .tag(SettingsTab.typeRightAI.rawValue)
-
             GeneralPreferencesView(preferences: preferences)
                 .tabItem {
                     Label("General", systemImage: "gearshape")
