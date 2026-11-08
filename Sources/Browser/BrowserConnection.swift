@@ -6,7 +6,7 @@ final class BrowserConnection: @unchecked Sendable {
     let id = UUID()
     @MainActor var browserBundleID: String?
     private let descriptor: Int32
-    private let writer = DispatchQueue(label: "io.textwarden.browser.writer")
+    private let writer = DispatchQueue(label: "com.typeright.browser.writer")
     private let lock = NSLock()
     private var closed = false
 

@@ -1773,7 +1773,7 @@ class AnalysisCoordinator: ObservableObject {
         }
 
         // TextWarden's own windows use the independent Sketch Pad pipeline.
-        guard context.bundleIdentifier != "io.textwarden.TextWarden" else {
+        guard context.bundleIdentifier != "com.typeright.app" else {
             MenuBarController.shared?.updateMenu()
             return
         }

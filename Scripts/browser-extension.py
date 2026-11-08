@@ -60,7 +60,7 @@ def prepare_safari(plist, destination, info_path):
     manifest.write_text(json.dumps(data, indent=2) + '\n')
     app = plistlib.loads(Path(plist).read_bytes())
     info = {
-        'CFBundleIdentifier': 'io.textwarden.TextWarden.BrowserExtension',
+        'CFBundleIdentifier': 'com.typeright.app.BrowserExtension',
         'CFBundleExecutable': 'TextWardenBrowserExtension',
         'CFBundleName': 'TextWarden Browser Extension',
         'CFBundleDisplayName': 'TextWarden Browser Extension (Preview)',

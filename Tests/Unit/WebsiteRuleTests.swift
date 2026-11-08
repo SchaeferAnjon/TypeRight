@@ -24,7 +24,7 @@ final class WebsiteRuleTests: XCTestCase {
 
     @MainActor
     func testTimedWebsitePausesPersistExpireAndKeepPortBoundaries() throws {
-        let name = "io.textwarden.tests.website-" + UUID().uuidString
+        let name = "com.typeright.tests.website-" + UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
         defer { defaults.removePersistentDomain(forName: name) }
         let preferences = UserPreferences(defaults: defaults)

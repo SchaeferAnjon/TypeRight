@@ -56,11 +56,11 @@ function refreshSessions(connection) {
 // Safari's native extension replies to individual requests; keep each profile's
 // message queue private instead of broadcasting editor text through dispatchMessage.
 function nativePort() {
-  if (!extensionAPI.runtime.getURL("").startsWith("safari-web-extension:")) return extensionAPI.runtime.connectNative("io.textwarden.browser");
+  if (!extensionAPI.runtime.getURL("").startsWith("safari-web-extension:")) return extensionAPI.runtime.connectNative("com.typeright.browser");
   const client = crypto.randomUUID(), messages = new Set(), disconnected = new Set();
   let closed = false, polling = false, sending = Promise.resolve();
   async function request(action, message) {
-    const response = await extensionAPI.runtime.sendNativeMessage("io.textwarden.browser", { client, action, ...(message ? { message } : {}) });
+    const response = await extensionAPI.runtime.sendNativeMessage("com.typeright.browser", { client, action, ...(message ? { message } : {}) });
     if (!response || response.error) throw new Error("Mac app unavailable");
     return response;
   }

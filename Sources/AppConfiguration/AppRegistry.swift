@@ -143,7 +143,7 @@ extension AppConfiguration {
     static let textWarden = AppConfiguration(
         identifier: "textwarden",
         displayName: "TextWarden",
-        bundleIDs: ["io.textwarden.TextWarden"],
+        bundleIDs: ["com.typeright.app"],
         category: .native,
         parserType: .generic,
         preferredStrategies: [],

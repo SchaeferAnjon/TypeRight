@@ -104,7 +104,7 @@ class PackageTests(unittest.TestCase):
             app = archive / 'Products/Applications/TextWarden.app'
             safari = app / 'Contents/PlugIns/TextWardenBrowserExtension.appex'
             (app / 'Contents/Resources').mkdir(parents=True)
-            for bundle, identifier in [(safari, 'io.textwarden.fixture.extension'), (app, 'io.textwarden.fixture')]:
+            for bundle, identifier in [(safari, 'com.typeright.fixture.extension'), (app, 'com.typeright.fixture')]:
                 (bundle / 'Contents/MacOS').mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(binary, bundle / 'Contents/MacOS/fixture')
                 (bundle / 'Contents/Info.plist').write_bytes(plistlib.dumps({
@@ -133,7 +133,7 @@ class PackageTests(unittest.TestCase):
                 return plistlib.loads(result.stdout)
             child = entitlements(exported / 'Contents/PlugIns/TextWardenBrowserExtension.appex')
             self.assertTrue(child.get('com.apple.security.app-sandbox'), 'Release export must preserve the Safari sandbox')
-            self.assertEqual(child['com.apple.security.application-groups'], ['KSW8RTNTKJ.io.textwarden.browser'])
+            self.assertEqual(child['com.apple.security.application-groups'], ['3H5S5NXPXS.com.typeright.browser'])
             self.assertNotIn('com.apple.security.files.user-selected.read-write', child)
             self.assertNotIn('com.apple.security.get-task-allow', child)
             self.assertEqual(entitlements(exported), plistlib.loads((project / 'TextWarden.entitlements').read_bytes()))

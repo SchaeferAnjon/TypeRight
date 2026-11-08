@@ -32,7 +32,7 @@ enum SignpostExporter {
 
             let entries = try store.getEntries(
                 at: position,
-                matching: NSPredicate(format: "subsystem == %@", "io.textwarden.TextWarden")
+                matching: NSPredicate(format: "subsystem == %@", "com.typeright.app")
             )
 
             var signposts: [SignpostEntry] = []

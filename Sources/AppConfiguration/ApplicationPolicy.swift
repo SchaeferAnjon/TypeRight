@@ -245,7 +245,7 @@ enum ApplicationPolicy: Equatable {
         "com.electron.wispr-flow": .pausedByDefault, // Dictation with editable notes and transcripts
 
         // Self-monitoring and the existing window-management exclusion.
-        "io.textwarden.TextWarden": .ignored,
+        "com.typeright.app": .ignored,
         "com.knollsoft.Rectangle": .ignored,
 
         // Terminals can contain prose: keep an explicit opt-in instead of a hard exclusion.

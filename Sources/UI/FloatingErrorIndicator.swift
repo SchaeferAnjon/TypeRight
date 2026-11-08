@@ -1687,7 +1687,7 @@ class FloatingErrorIndicator: NSPanel {
         addGlobalPauseItems(to: menu)
 
         // App-specific pause options (if we have a context)
-        if let ctx = context, ctx.bundleIdentifier != "io.textwarden.TextWarden" {
+        if let ctx = context, ctx.bundleIdentifier != "com.typeright.app" {
             menu.addItem(NSMenuItem.separator())
             addAppSpecificPauseItems(to: menu, context: ctx)
         }

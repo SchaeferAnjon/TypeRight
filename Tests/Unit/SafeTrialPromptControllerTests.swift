@@ -9,7 +9,7 @@ import XCTest
 
 @MainActor
 final class SafeTrialPromptControllerTests: XCTestCase {
-    private let textWardenBundleID = "io.textwarden.TextWarden"
+    private let textWardenBundleID = "com.typeright.app"
     private let screenFrame = NSRect(x: 0, y: 0, width: 1512, height: 982)
     private let visibleFrame = NSRect(x: 0, y: 0, width: 1512, height: 956)
 

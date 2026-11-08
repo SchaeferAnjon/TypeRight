@@ -160,8 +160,8 @@ enum BrowserWireError: Error {
 /// Chrome native messaging and the local socket use the same bounded framing.
 enum BrowserWire {
     static let supportedBrowsers = ["com.google.Chrome", "com.brave.Browser", "org.mozilla.firefox", "app.zen-browser.zen", "com.apple.Safari"]
-    static let safariExtensionID = "io.textwarden.TextWarden.BrowserExtension"
-    static let safariGroupID = "KSW8RTNTKJ.io.textwarden.browser"
+    static let safariExtensionID = "com.typeright.app.BrowserExtension"
+    static let safariGroupID = "3H5S5NXPXS.com.typeright.browser"
     static var safariDirectory: URL? {
         FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: safariGroupID)
     }

@@ -27,7 +27,7 @@ enum BrowserSocket {
                 Darwin.connect(descriptor, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
             }
         }
-        guard result == 0, trustedPeer(descriptor, identifiers: ["io.textwarden.TextWarden"]) else {
+        guard result == 0, trustedPeer(descriptor, identifiers: ["com.typeright.app"]) else {
             Darwin.close(descriptor)
             throw BrowserWireError.disconnected
         }
@@ -54,7 +54,7 @@ enum BrowserSocket {
               let code else { return false }
         // Identifiers are internal constants, never values supplied by the peer.
         let identity = identifiers.map { "identifier \"\($0)\"" }.joined(separator: " or ")
-        let expression = "anchor apple generic and certificate leaf[subject.OU] = \"KSW8RTNTKJ\" and (\(identity))"
+        let expression = "anchor apple generic and certificate leaf[subject.OU] = \"3H5S5NXPXS\" and (\(identity))"
         var requirement: SecRequirement?
         guard SecRequirementCreateWithString(expression as CFString, [], &requirement) == errSecSuccess,
               let requirement else { return false }

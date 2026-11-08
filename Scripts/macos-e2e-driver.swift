@@ -842,7 +842,7 @@ func printFocusedGeometry(_ application: NSRunningApplication, location: Int, le
     print(String(decoding: data, as: UTF8.self))
 }
 
-let textWardenBundleIdentifier = "io.textwarden.TextWarden"
+let textWardenBundleIdentifier = "com.typeright.app"
 let appPauseDurationsKey = "appPauseDurations"
 let appPausedUntilKey = "appPausedUntil"
 
@@ -1356,7 +1356,7 @@ func run(_ arguments: [String]) throws {
             x: number(arguments[1], name: "x"),
             y: number(arguments[2], name: "y")
         )
-        let textWarden = try runningApplication("io.textwarden.TextWarden")
+        let textWarden = try runningApplication("com.typeright.app")
         guard isPointOwnedBy(textWarden, at: point) else {
             throw DriverError.failure("refusing click outside a TextWarden window")
         }
@@ -1373,7 +1373,7 @@ func run(_ arguments: [String]) throws {
             x: number(arguments[1], name: "x"),
             y: number(arguments[2], name: "y")
         )
-        let textWarden = try runningApplication("io.textwarden.TextWarden")
+        let textWarden = try runningApplication("com.typeright.app")
         guard isPointOwnedBy(textWarden, at: point) else {
             throw DriverError.failure("refusing right-click outside a TextWarden window")
         }
@@ -1395,7 +1395,7 @@ func run(_ arguments: [String]) throws {
             x: number(arguments[3 + offset], name: "end x"),
             y: number(arguments[4 + offset], name: "end y")
         )
-        let textWarden = try runningApplication(generic ? arguments[1] : "io.textwarden.TextWarden")
+        let textWarden = try runningApplication(generic ? arguments[1] : "com.typeright.app")
         guard isPointOwnedBy(textWarden, at: start) else {
             throw DriverError.failure("refusing drag without a TextWarden start point")
         }
@@ -1416,7 +1416,7 @@ func run(_ arguments: [String]) throws {
 
     case "press-textwarden":
         guard arguments.count == 2 else { usage() }
-        let textWarden = try runningApplication("io.textwarden.TextWarden")
+        let textWarden = try runningApplication("com.typeright.app")
         let appElement = AXUIElementCreateApplication(textWarden.processIdentifier)
         var occurrence = 0
         var remaining = 10000

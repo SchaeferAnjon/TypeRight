@@ -43,7 +43,7 @@ do {
     guard let firstMessage, firstMessage.kind == "configuration", ["status", "connect"].contains(firstMessage.action) else { throw BrowserWireError.invalidMessage }
     if firstMessage.kind == "configuration", firstMessage.action == "connect" {
         let app = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        guard app.pathExtension == "app", Bundle(url: app)?.bundleIdentifier == "io.textwarden.TextWarden" else { throw BrowserWireError.invalidMessage }
+        guard app.pathExtension == "app", Bundle(url: app)?.bundleIdentifier == "com.typeright.app" else { throw BrowserWireError.invalidMessage }
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = false
         NSWorkspace.shared.openApplication(at: app, configuration: configuration)

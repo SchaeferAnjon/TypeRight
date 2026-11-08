@@ -50,21 +50,21 @@ enum BrowserSetup {
         }
         try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: bridge.path)
         let identity = bridge.appendingPathComponent("extension-id")
-        let manifests = hosts.map { $0.appendingPathComponent("io.textwarden.browser.json") }
+        let manifests = hosts.map { $0.appendingPathComponent("com.typeright.browser.json") }
         for file in [identity] + manifests {
             if let attributes = try? manager.attributesOfItem(atPath: file.path) {
                 guard attributes[.type] as? FileAttributeType == .typeRegular else { throw CocoaError(.fileWriteNoPermission) }
             }
         }
         let data = try JSONSerialization.data(withJSONObject: [
-            "name": "io.textwarden.browser",
+            "name": "com.typeright.browser",
             "description": "TextWarden local browser connection",
             "path": helper.path,
             "type": "stdio",
             "allowed_origins": ["chrome-extension://\(identifier)/"],
         ], options: [.prettyPrinted, .sortedKeys])
         let geckoData = try JSONSerialization.data(withJSONObject: [
-            "name": "io.textwarden.browser",
+            "name": "com.typeright.browser",
             "description": "TextWarden local browser connection",
             "path": helper.path,
             "type": "stdio",

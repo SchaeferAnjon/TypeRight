@@ -19,27 +19,27 @@
 	<key>CFBundlePackageType</key>
 	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.6.0</string>
+	<string>0.1.0</string>
 	<key>CFBundleVersion</key>
-	<string>40</string>
+	<string>1</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSAppleIntelligenceUsageDescription</key>
-	<string>TextWarden uses Apple Intelligence to suggest style improvements for your writing. All processing happens on your device.</string>
+	<string>TypeRight uses Apple Intelligence on your Mac to suggest style improvements for your writing.</string>
 	<key>NSHumanReadableCopyright</key>
-	<string>Copyright © 2025 Philip Schmid. All rights reserved.</string>
+	<string>Copyright © 2026 zonghan jia. Based on TextWarden by Philip Schmid (Apache-2.0).</string>
 	<key>NSSupportsAutomaticTermination</key>
 	<true/>
 	<key>NSSupportsSuddenTermination</key>
 	<true/>
 	<key>SUEnableAutomaticChecks</key>
-	<true/>
+	<false/>
 	<key>SUEnableInstallerLauncherService</key>
 	<true/>
 	<key>SUFeedURL</key>
-	<string>https://raw.githubusercontent.com/PhilipSchmid/textwarden/main/appcast.xml</string>
+	<string>https://github.com/SchaeferAnjon/TypeRight/releases/latest/download/appcast.xml</string>
 	<key>SUPublicEDKey</key>
 	<string>Vif5a8JO+wPQUakHgRhQh5ogO7CEZ/cFCAZGHe8ykg0=</string>
 </dict>

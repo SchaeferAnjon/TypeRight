@@ -39,8 +39,8 @@ final class BrowserMessageTests: XCTestCase {
         XCTAssertEqual(socketpair(AF_UNIX, SOCK_STREAM, 0, &pair), 0)
         defer { pair.forEach { Darwin.close($0) } }
         XCTAssertTrue(BrowserSocket.sameUser(pair[0]))
-        XCTAssertFalse(BrowserSocket.trustedPeer(pair[0], identifiers: ["io.textwarden.unrecognized-helper"]))
-        XCTAssertFalse(BrowserSocket.trustedPeer(-1, identifiers: ["io.textwarden.TextWarden"]))
+        XCTAssertFalse(BrowserSocket.trustedPeer(pair[0], identifiers: ["com.typeright.unrecognized-helper"]))
+        XCTAssertFalse(BrowserSocket.trustedPeer(-1, identifiers: ["com.typeright.app"]))
     }
 
     @MainActor
@@ -164,14 +164,14 @@ final class BrowserMessageTests: XCTestCase {
         let identifier = "cjihinlobjameeehbonjbheadlfmfnkk"
         XCTAssertEqual(try BrowserSetup.extensionID(in: app), identifier)
         try BrowserSetup.register(support: support, app: app)
-        let manifest = support.appendingPathComponent("Google/Chrome/NativeMessagingHosts/io.textwarden.browser.json")
+        let manifest = support.appendingPathComponent("Google/Chrome/NativeMessagingHosts/com.typeright.browser.json")
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: manifest)) as? [String: Any])
         XCTAssertEqual(json["allowed_origins"] as? [String], ["chrome-extension://\(identifier)/"])
         XCTAssertEqual(json["path"] as? String, helper.path)
-        let braveManifest = support.appendingPathComponent("BraveSoftware/Brave-Browser/NativeMessagingHosts/io.textwarden.browser.json")
+        let braveManifest = support.appendingPathComponent("BraveSoftware/Brave-Browser/NativeMessagingHosts/com.typeright.browser.json")
         XCTAssertEqual(try Data(contentsOf: braveManifest), try Data(contentsOf: manifest))
         for directory in ["Mozilla", "zen"] {
-            let geckoManifest = support.appendingPathComponent("\(directory)/NativeMessagingHosts/io.textwarden.browser.json")
+            let geckoManifest = support.appendingPathComponent("\(directory)/NativeMessagingHosts/com.typeright.browser.json")
             let gecko = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: geckoManifest)) as? [String: Any])
             XCTAssertEqual(gecko["allowed_extensions"] as? [String], [BrowserWire.geckoExtensionID])
             XCTAssertNil(gecko["allowed_origins"])

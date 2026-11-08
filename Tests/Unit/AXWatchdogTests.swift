@@ -8,7 +8,7 @@ import XCTest
 
 final class AXWatchdogTests: XCTestCase {
     func testAtomicReservationAllowsOnlyOneCallPerProcess() throws {
-        let bundleID = "io.textwarden.tests.ax-watchdog.\(UUID().uuidString)"
+        let bundleID = "com.typeright.tests.ax-watchdog.\(UUID().uuidString)"
         let watchdog = AXWatchdog.shared
 
         let first = try XCTUnwrap(watchdog.tryBeginCall(bundleID: bundleID, attribute: "first"))
@@ -22,7 +22,7 @@ final class AXWatchdogTests: XCTestCase {
 
     func testAtomicReservationBoundsGlobalConcurrency() throws {
         let watchdog = AXWatchdog.shared
-        let prefix = "io.textwarden.tests.ax-watchdog.global.\(UUID().uuidString)"
+        let prefix = "com.typeright.tests.ax-watchdog.global.\(UUID().uuidString)"
         var tokens: [AXCallToken] = []
         defer { tokens.forEach(watchdog.endCall) }
 
@@ -37,7 +37,7 @@ final class AXWatchdogTests: XCTestCase {
     }
 
     func testLateCompletionCannotClearNewerCall() throws {
-        let bundleID = "io.textwarden.tests.ax-watchdog.late.\(UUID().uuidString)"
+        let bundleID = "com.typeright.tests.ax-watchdog.late.\(UUID().uuidString)"
         let watchdog = AXWatchdog.shared
 
         let first = try XCTUnwrap(watchdog.tryBeginCall(bundleID: bundleID, attribute: "first"))
@@ -50,7 +50,7 @@ final class AXWatchdogTests: XCTestCase {
     }
 
     func testAXClientPerformsAndReleasesAtomicTransaction() throws {
-        let bundleID = "io.textwarden.tests.ax-client.\(UUID().uuidString)"
+        let bundleID = "com.typeright.tests.ax-client.\(UUID().uuidString)"
         let watchdog = AXWatchdog.shared
 
         let execution = try XCTUnwrap(
@@ -65,7 +65,7 @@ final class AXWatchdogTests: XCTestCase {
     }
 
     func testAXClientHelpersReuseOneLogicalProcessSlot() throws {
-        let bundleID = "io.textwarden.tests.ax-client.reentrant.\(UUID().uuidString)"
+        let bundleID = "com.typeright.tests.ax-client.reentrant.\(UUID().uuidString)"
 
         let outer = try XCTUnwrap(
             AXClient.perform(bundleID: bundleID, attribute: "parser") {

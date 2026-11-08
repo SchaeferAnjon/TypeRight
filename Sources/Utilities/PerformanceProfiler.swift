@@ -142,7 +142,7 @@ final class PerformanceProfiler: @unchecked Sendable {
 
     private init() {
         signposter = OSSignposter(
-            subsystem: "io.textwarden.TextWarden",
+            subsystem: "com.typeright.app",
             category: "Performance"
         )
         // Initialize metrics for all operations

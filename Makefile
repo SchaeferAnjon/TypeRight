@@ -23,7 +23,7 @@ NC := \033[0m # No Color
 PROJECT := TextWarden.xcodeproj
 SCHEME := TextWarden
 CONFIGURATION := Release
-APP_NAME := TextWarden.app
+APP_NAME := TypeRight.app
 RUST_DIR := GrammarEngine
 
 ##@ Help
@@ -55,7 +55,7 @@ run-only: ## Run from /Applications (no build)
 	@if pgrep -x "TextWarden" > /dev/null; then \
 		killall TextWarden && sleep 1; \
 	fi
-	@open /Applications/TextWarden.app
+	@open /Applications/TypeRight.app
 	@echo "$(GREEN)✅ TextWarden launched$(NC)"
 
 kill: ## Stop TextWarden
@@ -75,8 +75,8 @@ status: ## Show app status
 
 logs: ## Watch app logs
 	@echo "$(BLUE)Watching logs (Ctrl+C to stop)...$(NC)"
-	@log stream --predicate 'subsystem == "io.textwarden.TextWarden"' --style compact --color always 2>/dev/null || \
-	 log stream --predicate 'subsystem == "io.textwarden.TextWarden"' --style compact
+	@log stream --predicate 'subsystem == "com.typeright.app"' --style compact --color always 2>/dev/null || \
+	 log stream --predicate 'subsystem == "com.typeright.app"' --style compact
 
 ##@ Testing
 
@@ -230,7 +230,7 @@ reset: ## Reset app state (clear preferences)
 	@echo "$(GREEN)✅ Reset complete$(NC)"
 
 reset-onboarding: ## Reset onboarding flag (for testing first-run experience)
-	@defaults delete io.textwarden.TextWarden hasCompletedOnboarding 2>/dev/null || true
+	@defaults delete com.typeright.app hasCompletedOnboarding 2>/dev/null || true
 	@echo "$(GREEN)✅ Onboarding reset - restart TextWarden to see onboarding$(NC)"
 
 version: ## Show version info

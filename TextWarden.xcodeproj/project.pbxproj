@@ -328,7 +328,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "${PROJECT_DIR}/Scripts/build-rust.sh\n";
+			shellScript = "\"${PROJECT_DIR}/Scripts/build-rust.sh\"\n";
 		};
 		AABBCCDDEEFF001122330005 = {isa = PBXShellScriptBuildPhase; buildActionMask = 2147483647; files = (); inputPaths = ("$(PROJECT_DIR)/Info.plist", "$(PROJECT_DIR)/Scripts/browser-extension.py", "$(PROJECT_DIR)/BrowserExtension/manifest.json", "$(PROJECT_DIR)/BrowserExtension/background.js", "$(PROJECT_DIR)/BrowserExtension/content.js", "$(PROJECT_DIR)/BrowserExtension/popup.html", "$(PROJECT_DIR)/BrowserExtension/popup.css", "$(PROJECT_DIR)/BrowserExtension/popup.js", "$(PROJECT_DIR)/BrowserExtension/icon.png", "$(PROJECT_DIR)/BrowserExtension/toolbar.png", "$(PROJECT_DIR)/BrowserExtension/toolbar-16.png", "$(PROJECT_DIR)/BrowserExtension/toolbar-dark.png", "$(PROJECT_DIR)/BrowserExtension/toolbar-dark-16.png", "$(PROJECT_DIR)/BrowserExtension/toolbar-paused.png", "$(PROJECT_DIR)/BrowserExtension/toolbar-paused-16.png", "$(PROJECT_DIR)/BrowserExtension/toolbar-paused-dark.png", "$(PROJECT_DIR)/BrowserExtension/toolbar-paused-dark-16.png", ); outputPaths = ("$(DERIVED_FILE_DIR)/SafariInfo.plist", "$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/manifest.json", "$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/background.js", "$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/content.js", "$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/popup.html", "$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/popup.css", "$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/popup.js", "$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/icon.png", "$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/toolbar.png", "$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/toolbar-16.png", "$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/toolbar-dark.png", "$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/toolbar-dark-16.png", "$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/toolbar-paused.png", "$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/toolbar-paused-16.png", "$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/toolbar-paused-dark.png", "$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/toolbar-paused-dark-16.png", ); name = "Prepare Safari Extension"; shellPath = /bin/sh; shellScript = "python3 \"${PROJECT_DIR}/Scripts/browser-extension.py\" prepare-safari \"${PROJECT_DIR}/Info.plist\" \"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}\" \"${DERIVED_FILE_DIR}/SafariInfo.plist\"\n"; runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXShellScriptBuildPhase section */
@@ -368,12 +368,12 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
-				DEVELOPMENT_TEAM = KSW8RTNTKJ;
+				DEVELOPMENT_TEAM = 3H5S5NXPXS;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = io.textwarden.TextWardenTests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.typeright.appTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
@@ -381,7 +381,7 @@
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/TextWarden.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/TextWarden";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/TypeRight.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/TypeRight";
 			};
 			name = Debug;
 		};
@@ -392,12 +392,12 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
-				DEVELOPMENT_TEAM = KSW8RTNTKJ;
+				DEVELOPMENT_TEAM = 3H5S5NXPXS;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = io.textwarden.TextWardenTests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.typeright.appTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
 				STRING_CATALOG_GENERATE_SYMBOLS = NO;
@@ -405,7 +405,7 @@
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/TextWarden.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/TextWarden";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/TypeRight.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/TypeRight";
 			};
 			name = Release;
 		};
@@ -445,7 +445,7 @@
 				COPY_PHASE_STRIP = NO;
 				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = dwarf;
-				DEVELOPMENT_TEAM = KSW8RTNTKJ;
+				DEVELOPMENT_TEAM = 3H5S5NXPXS;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
@@ -509,7 +509,7 @@
 				COPY_PHASE_STRIP = NO;
 				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
-				DEVELOPMENT_TEAM = KSW8RTNTKJ;
+				DEVELOPMENT_TEAM = 3H5S5NXPXS;
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
@@ -539,7 +539,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
-				DEVELOPMENT_TEAM = KSW8RTNTKJ;
+				DEVELOPMENT_TEAM = 3H5S5NXPXS;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
@@ -568,8 +568,8 @@
 					"-framework",
 					SystemConfiguration,
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = io.textwarden.TextWarden;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_BUNDLE_IDENTIFIER = com.typeright.app;
+				PRODUCT_NAME = TypeRight;
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -595,7 +595,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
-				DEVELOPMENT_TEAM = KSW8RTNTKJ;
+				DEVELOPMENT_TEAM = 3H5S5NXPXS;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
@@ -624,8 +624,8 @@
 					"-framework",
 					SystemConfiguration,
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = io.textwarden.TextWarden;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_BUNDLE_IDENTIFIER = com.typeright.app;
+				PRODUCT_NAME = TypeRight;
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -641,8 +641,8 @@
 			};
 			name = Release;
 		};
-		AABBCCDDEEFF001122330028 = {isa = XCBuildConfiguration; buildSettings = {APPLICATION_EXTENSION_API_ONLY = YES; CODE_SIGN_ENTITLEMENTS = SafariExtension/TextWardenBrowserExtension.entitlements; CODE_SIGN_STYLE = Automatic; DEVELOPMENT_TEAM = KSW8RTNTKJ; ENABLE_APP_SANDBOX = YES; ENABLE_HARDENED_RUNTIME = YES; ENABLE_USER_SCRIPT_SANDBOXING = NO; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = "$(DERIVED_FILE_DIR)/SafariInfo.plist"; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks @executable_path/../../../../Frameworks"; MACOSX_DEPLOYMENT_TARGET = 14.0; PRODUCT_BUNDLE_IDENTIFIER = io.textwarden.TextWarden.BrowserExtension; PRODUCT_NAME = TextWardenBrowserExtension; SKIP_INSTALL = YES; SWIFT_VERSION = 5.0; SWIFT_EMIT_LOC_STRINGS = NO;}; name = Debug; };
-		AABBCCDDEEFF001122330029 = {isa = XCBuildConfiguration; buildSettings = {APPLICATION_EXTENSION_API_ONLY = YES; CODE_SIGN_ENTITLEMENTS = SafariExtension/TextWardenBrowserExtension.entitlements; CODE_SIGN_STYLE = Automatic; DEVELOPMENT_TEAM = KSW8RTNTKJ; ENABLE_APP_SANDBOX = YES; ENABLE_HARDENED_RUNTIME = YES; ENABLE_USER_SCRIPT_SANDBOXING = NO; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = "$(DERIVED_FILE_DIR)/SafariInfo.plist"; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks @executable_path/../../../../Frameworks"; MACOSX_DEPLOYMENT_TARGET = 14.0; PRODUCT_BUNDLE_IDENTIFIER = io.textwarden.TextWarden.BrowserExtension; PRODUCT_NAME = TextWardenBrowserExtension; SKIP_INSTALL = YES; SWIFT_VERSION = 5.0; SWIFT_EMIT_LOC_STRINGS = NO;}; name = Release; };
+		AABBCCDDEEFF001122330028 = {isa = XCBuildConfiguration; buildSettings = {APPLICATION_EXTENSION_API_ONLY = YES; CODE_SIGN_ENTITLEMENTS = SafariExtension/TextWardenBrowserExtension.entitlements; CODE_SIGN_STYLE = Automatic; DEVELOPMENT_TEAM = 3H5S5NXPXS; ENABLE_APP_SANDBOX = YES; ENABLE_HARDENED_RUNTIME = YES; ENABLE_USER_SCRIPT_SANDBOXING = NO; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = "$(DERIVED_FILE_DIR)/SafariInfo.plist"; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks @executable_path/../../../../Frameworks"; MACOSX_DEPLOYMENT_TARGET = 14.0; PRODUCT_BUNDLE_IDENTIFIER = com.typeright.app.BrowserExtension; PRODUCT_NAME = TextWardenBrowserExtension; SKIP_INSTALL = YES; SWIFT_VERSION = 5.0; SWIFT_EMIT_LOC_STRINGS = NO;}; name = Debug; };
+		AABBCCDDEEFF001122330029 = {isa = XCBuildConfiguration; buildSettings = {APPLICATION_EXTENSION_API_ONLY = YES; CODE_SIGN_ENTITLEMENTS = SafariExtension/TextWardenBrowserExtension.entitlements; CODE_SIGN_STYLE = Automatic; DEVELOPMENT_TEAM = 3H5S5NXPXS; ENABLE_APP_SANDBOX = YES; ENABLE_HARDENED_RUNTIME = YES; ENABLE_USER_SCRIPT_SANDBOXING = NO; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = "$(DERIVED_FILE_DIR)/SafariInfo.plist"; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks @executable_path/../../../../Frameworks"; MACOSX_DEPLOYMENT_TARGET = 14.0; PRODUCT_BUNDLE_IDENTIFIER = com.typeright.app.BrowserExtension; PRODUCT_NAME = TextWardenBrowserExtension; SKIP_INSTALL = YES; SWIFT_VERSION = 5.0; SWIFT_EMIT_LOC_STRINGS = NO;}; name = Release; };
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */

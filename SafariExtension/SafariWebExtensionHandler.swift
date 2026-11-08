@@ -20,7 +20,7 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
 
 private final class SafariBridge: @unchecked Sendable {
     static let shared = SafariBridge()
-    private let queue = DispatchQueue(label: "io.textwarden.safari.bridge")
+    private let queue = DispatchQueue(label: "com.typeright.safari.bridge")
     private var channels: [String: Channel] = [:]
     private var timer: DispatchSourceTimer?
 
@@ -80,7 +80,7 @@ private final class SafariBridge: @unchecked Sendable {
                           let directory = BrowserWire.safariDirectory else { throw BrowserWireError.invalidMessage }
                     if message.action == "connect" {
                         let app = Bundle.main.bundleURL.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-                        guard Bundle(url: app)?.bundleIdentifier == "io.textwarden.TextWarden" else { throw BrowserWireError.invalidMessage }
+                        guard Bundle(url: app)?.bundleIdentifier == "com.typeright.app" else { throw BrowserWireError.invalidMessage }
                         DispatchQueue.main.async {
                             let configuration = NSWorkspace.OpenConfiguration(); configuration.activates = false
                             NSWorkspace.shared.openApplication(at: app, configuration: configuration)

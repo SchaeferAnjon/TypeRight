@@ -14,16 +14,16 @@ NC='\033[0m'
 
 # Project settings
 APP_NAME="TextWarden"
-BUNDLE_ID="io.textwarden.TextWarden"
+BUNDLE_ID="com.typeright.app"
 PROJECT="TextWarden.xcodeproj"
 SCHEME="TextWarden"
 GITHUB_REPO="PhilipSchmid/textwarden"
 
 # Code signing settings
-DEVELOPER_ID="Developer ID Application: Philip Schmid (KSW8RTNTKJ)"
+DEVELOPER_ID="Developer ID Application: zonghan jia (3H5S5NXPXS)"
 ENTITLEMENTS="TextWarden.entitlements"
 APPLE_ID="${APPLE_ID:-}"  # Set via environment or keychain
-TEAM_ID="KSW8RTNTKJ"
+TEAM_ID="3H5S5NXPXS"
 
 # Directories
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
