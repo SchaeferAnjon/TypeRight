@@ -66,6 +66,8 @@ final class TypingCoach {
             Self.importDevKey()
         #endif
         PinyinDetector.warmUp()
+        MemberService.shared.start()
+        UsagePing.shared.start()
         KeyboardShortcuts.onKeyUp(for: .typeRightTranslate) { [weak self] in self?.translateWholeSentence() }
         keyTap.onKey = { [weak self] key in self?.handleKey(key) ?? false }
         panel.onClickOutside = { [weak self] in
@@ -104,7 +106,7 @@ final class TypingCoach {
         if let active, !stillMatches(active) { dismiss(remember: false) }
 
         if active == nil, let (error, word) = justFinishedSpellingError(in: text, errors: errors) {
-            if CoachSettings.isAIReady, CoachSettings.pinyinEnabled, PinyinDetector.isLikelyPinyin(word) {
+            if CoachSettings.pinyinEnabled, PinyinDetector.isLikelyPinyin(word), MemberService.shared.aiStatus.isOn {
                 waitingPinyin = (error.start ..< error.end, word)
             } else {
                 showSpelling(error, word: word, text: text)
@@ -145,7 +147,14 @@ final class TypingCoach {
         if range.isEmpty, end > 0 { range = sentenceRange(endingNear: end - 1, in: scalars).lowerBound ..< end }
         guard !range.isEmpty,
               !ChineseText.hanRuns(in: scalars, from: range.lowerBound, to: range.upperBound).isEmpty else { return }
-        guard CoachSettings.isAIReady else {
+        let ai = MemberService.shared.aiStatus
+        guard ai.isOn else {
+            // Trial used up, today's limit and the like: no card until the account page is designed.
+            if case let .memberBlocked(state) = ai {
+                Logger.info("TypeRight: translate shortcut without AI, member \(state)", category: Logger.llm)
+                MemberService.shared.recheckWhileBlocked()
+                return
+            }
             present(Active(content: .failed("整句翻译要用 AI：先在设置 › AI 服务商里选一家、填 Key。"), range: range,
                            analyzedText: text, harperError: nil, memoryKey: ""))
             return
@@ -191,13 +200,17 @@ final class TypingCoach {
 
     private func userPaused() {
         guard active == nil || isThinking else { return }
-        Logger.info("TypeRight: pause check (AI \(CoachSettings.isAIReady), pinyin waiting \(waitingPinyin != nil))", category: Logger.ui)
+        let ai = MemberService.shared.aiStatus
+        // With the trial used up, today's limit reached and the like, this line is all there is for now:
+        // no AI card until the account page is designed.
+        Logger.info("TypeRight: pause check (AI \(ai), pinyin waiting \(waitingPinyin != nil))", category: Logger.ui)
         let text = latestText
         let scalars = Array(text.unicodeScalars)
         let caret = min(host?.coachCaret(in: text) ?? scalars.count, scalars.count)
         let sentence = sentenceRange(endingNear: caret, in: scalars)
 
-        guard CoachSettings.isAIReady else {
+        guard ai.isOn else {
+            if case .memberBlocked = ai { MemberService.shared.recheckWhileBlocked() }
             countWithoutAI(caret: caret, scalars: scalars)
             return
         }
@@ -236,7 +249,7 @@ final class TypingCoach {
     }
 
     private func userLingered() {
-        guard active == nil, CoachSettings.isAIReady else { return }
+        guard active == nil, MemberService.shared.aiStatus.isOn else { return }
         let text = latestText
         let scalars = Array(text.unicodeScalars)
         let caret = min(host?.coachCaret(in: text) ?? scalars.count, scalars.count)
@@ -265,17 +278,39 @@ final class TypingCoach {
         sentence.trimmingCharacters(in: CharacterSet(charactersIn: ".?!").union(.whitespacesAndNewlines)).lowercased()
     }
 
+    /// Where a new card's AI request goes. Through our backend each card is one use: it gets its own
+    /// use number, which its retries share.
+    private func newCardRoute() -> CoachAIRoute? {
+        let ai = MemberService.shared.aiStatus
+        guard let route = ai.route() else {
+            Logger.info("TypeRight: no AI for this card (\(ai))", category: Logger.llm)
+            return nil
+        }
+        return route
+    }
+
+    /// Through our backend the trial or membership could not be used (used up, today's limit, offline,
+    /// device token …). For now that is one info line and no card; the account page is being designed.
+    private func memberGaveNoCard(_ error: MemberError) {
+        Logger.info("TypeRight: member AI gave no card: \(error.kind) (\(error.code), HTTP \(error.status))", category: Logger.llm)
+        if isThinking { dismiss(remember: false) }
+    }
+
     private func translate(fragmentRange: Range<Int>, sentence: Range<Int>, scalars: [Unicode.Scalar], text: String) {
+        guard let route = newCardRoute() else { return }
         let fragment = substring(scalars, fragmentRange)
         let sentenceText = substring(scalars, sentence)
         showThinking(at: fragmentRange, text: text)
         aiTask?.cancel()
         aiTask = Task { [weak self] in
             do {
-                let result = try await CoachAI.translate(fragment: fragment, in: sentenceText)
+                let result = try await CoachAI.translate(fragment: fragment, in: sentenceText, via: route)
                 guard let self, !Task.isCancelled, self.latestTextStill(has: fragment, at: fragmentRange) else { return }
                 self.present(Active(content: .translate(source: fragment, result: result), range: fragmentRange,
                                     analyzedText: self.latestText, harperError: nil, memoryKey: "han:\(fragment)"))
+            } catch let CoachAIError.member(error) {
+                guard let self, !Task.isCancelled else { return }
+                self.memberGaveNoCard(error)
             } catch {
                 guard let self, !Task.isCancelled else { return }
                 self.showFailure(error, at: fragmentRange, text: text)
@@ -284,13 +319,14 @@ final class TypingCoach {
     }
 
     private func check(sentenceRange: Range<Int>, scalars: [Unicode.Scalar], text: String, unfinished: Bool) {
+        guard let route = newCardRoute() else { return }
         let sentenceText = substring(scalars, sentenceRange)
         let lastWord = lastWordRange(in: scalars, within: sentenceRange)
         showThinking(at: lastWord, text: text)
         aiTask?.cancel()
         aiTask = Task { [weak self] in
             do {
-                let result = try await CoachAI.check(sentence: sentenceText, mayBeUnfinished: unfinished)
+                let result = try await CoachAI.check(sentence: sentenceText, mayBeUnfinished: unfinished, via: route)
                 guard let self, !Task.isCancelled else { return }
                 let clean = result.ok || result.corrected.isEmpty || result.corrected == sentenceText
                 CoachNotebook.shared.noteSentence(clean: clean)
@@ -307,6 +343,9 @@ final class TypingCoach {
                                   memoryKey: "sentence:\(Self.sentenceKey(sentenceText))")
                 card.anchorOverride = anchor
                 self.present(card)
+            } catch let CoachAIError.member(error) {
+                guard let self, !Task.isCancelled else { return }
+                self.memberGaveNoCard(error)
             } catch {
                 guard let self, !Task.isCancelled else { return }
                 self.showFailure(error, at: lastWord, text: text)

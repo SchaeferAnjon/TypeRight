@@ -5,6 +5,8 @@
 //  The AI behind the two cards that need it: turning a Chinese or pinyin fragment into English,
 //  and checking a finished sentence. Every provider is spoken to through the OpenAI-compatible
 //  chat/completions API; the user's key never leaves their Mac except to the provider they chose.
+//  Without a key of their own, the trial or membership sends the same request through our backend
+//  (MemberService.chat), which picks the model.
 //
 
 import Foundation
@@ -162,11 +164,8 @@ enum CoachSettings {
         set { defaults.set(newValue, forKey: "typeright.accent") }
     }
 
-    /// The daily anonymous check-in; off until the user agrees.
-    static var anonymousReport: Bool {
-        get { defaults.bool(forKey: "typeright.anonymousReport") }
-        set { defaults.set(newValue, forKey: "typeright.anonymousReport") }
-    }
+    /// The daily anonymous check-in; off until the user agrees (UsagePing.answer).
+    static var anonymousReport: Bool { UsageConsent.load(from: defaults) == .yes }
 
     static var onboarded: Bool {
         get { defaults.bool(forKey: "typeright.onboarded") }
@@ -191,10 +190,19 @@ enum CoachKeychain {
     private static var service: String { Bundle.main.bundleIdentifier ?? "com.typeright.app" }
 
     static func key(for provider: CoachProvider) -> String? {
+        string(account: "\(provider.rawValue)_api_key")
+    }
+
+    @discardableResult
+    static func setKey(_ key: String, for provider: CoachProvider) -> Bool {
+        setString(key, account: "\(provider.rawValue)_api_key")
+    }
+
+    static func string(account: String) -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: "\(provider.rawValue)_api_key",
+            kSecAttrAccount as String: account,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
@@ -204,16 +212,16 @@ enum CoachKeychain {
         return String(data: data, encoding: .utf8)
     }
 
+    /// Replaces the item; an empty value only deletes it.
     @discardableResult
-    static func setKey(_ key: String, for provider: CoachProvider) -> Bool {
-        let account = "\(provider.rawValue)_api_key"
+    static func setString(_ value: String, account: String) -> Bool {
         let base: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
         ]
         SecItemDelete(base as CFDictionary)
-        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return true }
         var add = base
         add[kSecValueData as String] = Data(trimmed.utf8)
@@ -294,12 +302,16 @@ enum CoachAIError: LocalizedError {
     case notConfigured
     case http(Int, String)
     case badResponse
+    /// Through our backend: the trial or membership cannot be used now, or the backend could not be reached.
+    /// `MemberError.kind` says which (used up, today's limit, offline, device token …).
+    case member(MemberError)
 
     var errorDescription: String? {
         switch self {
         case .notConfigured: "还没选 AI 或没填 Key"
         case let .http(code, body): "AI 服务返回 \(code)：\(body.prefix(160))"
         case .badResponse: "AI 返回的内容读不懂"
+        case let .member(error): MemberText.detail(error)
         }
     }
 }
@@ -314,7 +326,7 @@ enum CoachAI {
     }
 
     /// The English for `fragment` (Chinese or pinyin) as it sits in `sentence`.
-    static func translate(fragment: String, in sentence: String) async throws -> CoachTranslation {
+    static func translate(fragment: String, in sentence: String, via route: CoachAIRoute) async throws -> CoachTranslation {
         let marked = sentence.replacingOccurrences(of: fragment, with: "⟦\(fragment)⟧", options: [], range: sentence.range(of: fragment))
         let prompt = """
         Task: translate. In the sentence below, the part inside ⟦ ⟧ is Chinese or pinyin the user could not say in English. \
@@ -322,14 +334,14 @@ enum CoachAI {
         JSON: {"english": "...", "ipa": "IPA of the English words, \(CoachSettings.accent == "uk" ? "British" : "US"), with slashes", "note": "when to use it vs. close alternatives, one sentence"}
         Sentence: \(marked)
         """
-        let data = try await complete(prompt, maxTokens: 300)
+        let data = try await complete(prompt, maxTokens: 300, via: route)
         guard let result = try? JSONDecoder().decode(CoachTranslation.self, from: data),
               !result.english.trimmingCharacters(in: .whitespaces).isEmpty else { throw CoachAIError.badResponse }
         return result
     }
 
     /// Grammar, spelling and clearly unnatural wording in one finished sentence.
-    static func check(sentence: String, mayBeUnfinished: Bool = false) async throws -> CoachSentenceCheck {
+    static func check(sentence: String, mayBeUnfinished: Bool = false, via route: CoachAIRoute) async throws -> CoachSentenceCheck {
         let unfinishedRule = mayBeUnfinished
             ? "The user may still be typing: never add words to complete it and do not add final punctuation. "
             : ""
@@ -343,19 +355,45 @@ enum CoachAI {
         "type": "one of spelling, article, tense, plural, preposition, chinglish, agreement, capitalization, word-choice, punctuation, other"}]}
         Sentence: \(sentence)
         """
-        let data = try await complete(prompt, maxTokens: 500)
+        let data = try await complete(prompt, maxTokens: 500, via: route)
         guard let result = try? JSONDecoder().decode(CoachSentenceCheck.self, from: data) else { throw CoachAIError.badResponse }
         return result
     }
 
-    /// Sends one prompt and returns the JSON the model wrote.
-    static func complete(_ prompt: String, maxTokens: Int) async throws -> Data {
-        let provider = CoachSettings.provider
-        guard CoachSettings.isAIReady, let key = CoachKeychain.key(for: provider),
-              let url = URL(string: provider.endpoint) else { throw CoachAIError.notConfigured }
+    /// Seconds one request may take; a card that comes later than this is no use to someone typing.
+    static let requestTimeout: TimeInterval = 15
 
+    /// Sends one prompt and returns the JSON the model wrote.
+    static func complete(_ prompt: String, maxTokens: Int, via route: CoachAIRoute) async throws -> Data {
+        let body = try JSONSerialization.data(withJSONObject: requestBody(prompt, maxTokens: maxTokens, via: route))
+        switch route {
+        case let .own(provider):
+            guard let key = CoachKeychain.key(for: provider), !key.isEmpty,
+                  let url = URL(string: provider.endpoint), url.host != nil else { throw CoachAIError.notConfigured }
+            var request = URLRequest(url: url, timeoutInterval: requestTimeout)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+            request.httpBody = body
+
+            let (data, response) = try await URLSession.shared.data(for: request)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            guard status == 200 else { throw CoachAIError.http(status, String(data: data, encoding: .utf8) ?? "") }
+            return try content(of: data)
+        case let .member(use):
+            do {
+                return try content(of: await MemberService.shared.chat(body, use: use, timeout: requestTimeout))
+            } catch let error as MemberError {
+                throw CoachAIError.member(error)
+            }
+        }
+    }
+
+    /// The chat/completions body. Through our backend the model and thinking are the backend's choice
+    /// (deepseek-flash, thinking off), so only the prompt, the output cap and JSON mode are sent.
+    static func requestBody(_ prompt: String, maxTokens: Int, via route: CoachAIRoute) -> [String: Any] {
         var body: [String: Any] = [
-            "model": CoachSettings.model(for: provider),
+            "model": MemberAPI.model,
             "messages": [
                 ["role": "system", "content": systemPrompt()],
                 ["role": "user", "content": prompt],
@@ -364,20 +402,17 @@ enum CoachAI {
             "max_tokens": maxTokens,
             "response_format": ["type": "json_object"],
         ]
-        if provider.disablesThinking { body["thinking"] = ["type": "disabled"] }
-        if let effort = provider.reasoningEffort { body["reasoning_effort"] = effort }
+        if case let .own(provider) = route {
+            body["model"] = CoachSettings.model(for: provider)
+            if provider.disablesThinking { body["thinking"] = ["type": "disabled"] }
+            if let effort = provider.reasoningEffort { body["reasoning_effort"] = effort }
+        }
+        return body
+    }
 
-        var request = URLRequest(url: url, timeoutInterval: 15)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        guard status == 200 else { throw CoachAIError.http(status, String(data: data, encoding: .utf8) ?? "") }
-
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+    /// The JSON inside an OpenAI-style chat reply.
+    static func content(of data: Data) throws -> Data {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let choices = json["choices"] as? [[String: Any]],
               let message = choices.first?["message"] as? [String: Any],
               let content = message["content"] as? String else { throw CoachAIError.badResponse }

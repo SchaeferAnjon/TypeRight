@@ -338,7 +338,7 @@ struct TRAISettings: View {
         test = .running
         Task {
             do {
-                let result = try await CoachAI.check(sentence: "I has a question.")
+                let result = try await CoachAI.check(sentence: "I has a question.", via: .own(provider))
                 test = .ok(result.ok ? "I has a question." : result.corrected)
             } catch {
                 test = .failed((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
@@ -396,7 +396,7 @@ struct TRPrivacySettings: View {
                       note: "我们会给前 100 位用户免费额度，所以需要知道有多少人在用。只发一个随机编号、版本号、系统版本和界面语言，不含你打的字、Key、名字或邮箱。",
                       last: true) {
                     Toggle("", isOn: $report).toggleStyle(SquareToggleStyle()).labelsHidden()
-                        .onChange(of: report) { CoachSettings.anonymousReport = $0 }
+                        .onChange(of: report) { UsagePing.shared.answer($0) }
                 }
             }
             TRGroup(title: "数据") {
