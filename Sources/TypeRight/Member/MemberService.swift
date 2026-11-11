@@ -203,7 +203,10 @@ final class MemberService: ObservableObject {
     var aiStatus: CoachAIStatus {
         switch plan {
         case .local: return .localOnly
-        case .own: return ownKey().map { .own($0) } ?? .noKey
+        case .own:
+            // A key the provider turned down counts as none until a new one is saved.
+            guard let provider = ownKey(), !keyRejected(provider) else { return .noKey }
+            return .own(provider)
         case .member:
             let s = state
             return s.blocked ? .memberBlocked(s) : .member
@@ -212,6 +215,8 @@ final class MemberService: ObservableObject {
 
     /// The provider whose key is filled in and ready (replaced in unit tests).
     var ownKey: () -> CoachProvider? = { CoachSettings.isAIReady ? CoachSettings.provider : nil }
+    /// The provider answered 401 / 403 to this key (replaced in unit tests).
+    var keyRejected: (CoachProvider) -> Bool = { CoachKeyStore.shared.isRejected($0) }
     var pollInterval: Duration = .seconds(3)
     var pollLimit: TimeInterval = 30 * 60
     /// Seconds before a card's second and third request.

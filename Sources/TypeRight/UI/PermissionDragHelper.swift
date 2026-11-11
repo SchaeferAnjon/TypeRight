@@ -12,6 +12,9 @@ import AppKit
 struct DraggableAppIcon: View {
     var size: CGFloat = 48
     @State private var hovering = false
+    /// The open hand was pushed and still has to be popped (pushes and pops must pair up,
+    /// also when the icon goes away under the pointer, e.g. the panel closes after a drag).
+    @State private var cursorPushed = false
 
     var body: some View {
         Image(nsImage: NSApp.applicationIconImage)
@@ -23,7 +26,22 @@ struct DraggableAppIcon: View {
                 .stroke(TR.fix, style: StrokeStyle(lineWidth: 1.2, dash: [4, 3])))
             .scaleEffect(hovering ? 1.05 : 1)
             .animation(.easeOut(duration: 0.15), value: hovering)
-            .onHover { hovering = $0; if $0 { NSCursor.openHand.push() } else { NSCursor.pop() } }
+            .onHover { inside in
+                hovering = inside
+                if inside, !cursorPushed {
+                    NSCursor.openHand.push()
+                    cursorPushed = true
+                } else if !inside, cursorPushed {
+                    NSCursor.pop()
+                    cursorPushed = false
+                }
+            }
+            .onDisappear {
+                if cursorPushed {
+                    NSCursor.pop()
+                    cursorPushed = false
+                }
+            }
             .onDrag { NSItemProvider(object: Bundle.main.bundleURL as NSURL) }
             .help("把图标拖进系统设置的列表")
     }
@@ -132,7 +150,7 @@ final class PermissionDragHelper {
                             .font(.system(size: 12.5, weight: .semibold))
                     }
                     Text("拖进去开关就打开了，不用重开 TypeRight。")
-                        .font(.system(size: 11.5)).foregroundStyle(TR.text2)
+                        .font(.system(size: 12)).foregroundStyle(TR.text2)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 0)

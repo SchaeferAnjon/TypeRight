@@ -106,7 +106,7 @@ struct TRDayBars: View {
                 Spacer()
                 Text("今天")
             }
-            .font(.system(size: 11)).foregroundStyle(TR.text3)
+            .font(.system(size: 12)).foregroundStyle(TR.text3)
             HStack(spacing: 12) {
                 legend(TR.fix, "一次就对")
                 legend(TR.line2, "帮你改过")
@@ -117,7 +117,7 @@ struct TRDayBars: View {
     private func legend(_ color: Color, _ text: String) -> some View {
         HStack(spacing: 5) {
             RoundedRectangle(cornerRadius: 2).fill(color).frame(width: 8, height: 8)
-            Text(text).font(.system(size: 11.5)).foregroundStyle(TR.text2)
+            Text(text).font(.system(size: 12)).foregroundStyle(TR.text2)
         }
     }
 
@@ -232,7 +232,7 @@ struct TRTodayPage: View {
                             TRDiffText(from: e.from, to: e.to)
                         }
                         Text([timeText(e.date), e.app, e.kind == .word ? "生词" : e.category.title].filter { !$0.isEmpty }.joined(separator: "  "))
-                            .font(.system(size: 11.5)).foregroundStyle(TR.text3)
+                            .font(.system(size: 12)).foregroundStyle(TR.text3)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 16).padding(.vertical, 10)
@@ -262,7 +262,7 @@ struct TRTodayPage: View {
                                     }
                                 }
                                 .frame(height: 4)
-                                Text("\(learned) / \(items.count) 会了").font(.system(size: 11.5).monospacedDigit()).foregroundStyle(TR.text2)
+                                Text("\(learned) / \(items.count) 会了").font(.system(size: 12).monospacedDigit()).foregroundStyle(TR.text2)
                             }
                             if let example = items.first {
                                 TRDiffText(from: example.from, to: example.to, size: 12)
@@ -350,7 +350,7 @@ struct TRMistakesPage: View {
                 if !e.why.isEmpty { Text(e.why).font(.system(size: 12.5)).foregroundStyle(TR.text2) }
                 if !e.context.isEmpty { Text(e.context).font(.system(size: 12.5)).foregroundStyle(TR.text2).italic() }
                 Text([e.category.title, e.app, dayText(e.date), e.times > 1 ? "被改过 \(e.times) 次" : ""].filter { !$0.isEmpty }.joined(separator: " · "))
-                    .font(.system(size: 11.5)).foregroundStyle(TR.text3)
+                    .font(.system(size: 12)).foregroundStyle(TR.text3)
             }
             Spacer()
             if e.mastered {
@@ -394,7 +394,7 @@ struct TRWordsPage: View {
                             }
                             Spacer()
                             Text([w.app, dayText(w.date)].filter { !$0.isEmpty }.joined(separator: " · "))
-                                .font(.system(size: 11.5)).foregroundStyle(TR.text3)
+                                .font(.system(size: 12)).foregroundStyle(TR.text3)
                         }
                         .padding(.horizontal, 16).padding(.vertical, 12)
                         .contentShape(Rectangle())

@@ -8,6 +8,10 @@
 //  3. a sentence was just finished (. ? !)                          -> whole-sentence check, after a pause
 //  One card at a time. Tab takes the card's fix, Esc keeps the text, typing on makes it step aside.
 //
+//  What was offered is remembered per field (app and text field), by text and position: a piece
+//  offered once (taken, turned down, typed past, clicked away, or failed) is not offered or sent
+//  to the AI again until the text at that spot changes.
+//
 
 import AppKit
 import KeyboardShortcuts
@@ -21,47 +25,222 @@ protocol TypingCoachHost: AnyObject {
     func coachFallbackAnchor() -> CGRect?
     /// The caret as a scalar offset into `text`, or nil when the app does not say.
     func coachCaret(in text: String) -> Int?
-    /// Writes `replacement` over `range` of the text the analysis saw.
-    func coachReplace(range: Range<Int>, with replacement: String, analyzedText: String, harperError: GrammarErrorModel?) async -> Bool
+    /// The field's text read now, the way the analysis reads it (the analysis may lag behind typing).
+    func coachReadText() -> String?
+    /// Writes `replacement` over `range` of the text the analysis saw, then reads the field back.
+    func coachReplace(range: Range<Int>, with replacement: String, analyzedText: String, harperError: GrammarErrorModel?) async -> CoachWriteResult
     /// Name of the app being typed in, for the notebook.
     var coachAppName: String { get }
+    var coachAppID: String? { get }
+    /// The app and text field being typed in; what the coach remembers belongs to one field.
+    var coachFieldID: String? { get }
+    /// A field is monitored in an app that is not paused.
+    var coachIsWatching: Bool { get }
+    /// An input method is composing in the field (marked text not yet committed).
+    var coachIsComposing: Bool { get }
+}
+
+/// What reading the field back after a write showed.
+enum CoachWriteResult: Equatable {
+    /// The field reads `text`; the fix sits at `at` in it.
+    case written(text: String, at: Range<Int>)
+    /// The text did not change (or could not be read back).
+    case notWritten
+    /// The text changed, but not into the fix (`tomorow tomorrow`).
+    case wrongResult
+}
+
+/// The AI behind the cards (a fake in unit tests).
+struct CoachAIService {
+    var status: @MainActor () -> CoachAIStatus
+    /// The member plan is blocked: ask the backend again now and then.
+    var blocked: @MainActor () -> Void
+    var translate: @Sendable (_ fragment: String, _ sentence: String, _ route: CoachAIRoute) async throws -> CoachTranslation
+    var check: @Sendable (_ sentence: String, _ mayBeUnfinished: Bool, _ route: CoachAIRoute) async throws -> CoachSentenceCheck
+
+    static let live = CoachAIService(
+        status: { MemberService.shared.aiStatus },
+        blocked: { MemberService.shared.recheckWhileBlocked() },
+        translate: { try await CoachAI.translate(fragment: $0, in: $1, via: $2) },
+        check: { try await CoachAI.check(sentence: $0, mayBeUnfinished: $1, via: $2) }
+    )
+}
+
+/// The settings the coach goes by.
+struct CoachBehavior: Equatable {
+    var cardsEnabled = true
+    var autoTranslateMixed = true
+    var pinyinEnabled = true
+    var pauseSeconds = 0.8
+
+    static var current: CoachBehavior {
+        CoachBehavior(cardsEnabled: CoachSettings.cardsEnabled, autoTranslateMixed: CoachSettings.autoTranslateMixed,
+                      pinyinEnabled: CoachSettings.pinyinEnabled, pauseSeconds: CoachSettings.pauseSeconds)
+    }
+}
+
+protocol CoachTimer: AnyObject {
+    func cancel()
+}
+
+extension DispatchWorkItem: CoachTimer {}
+
+/// Time for the coach (a fake in unit tests). `now` is system uptime, the clock the key tap uses.
+@MainActor
+protocol CoachClock: AnyObject {
+    var now: TimeInterval { get }
+    var secondsSinceLastKey: TimeInterval { get }
+    func after(_ seconds: TimeInterval, _ action: @escaping @MainActor () -> Void) -> CoachTimer
+}
+
+@MainActor
+final class CoachSystemClock: CoachClock {
+    var now: TimeInterval { ProcessInfo.processInfo.systemUptime }
+
+    var secondsSinceLastKey: TimeInterval {
+        CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyDown)
+    }
+
+    func after(_ seconds: TimeInterval, _ action: @escaping @MainActor () -> Void) -> CoachTimer {
+        let item = DispatchWorkItem { MainActor.assumeIsolated { action() } }
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: item)
+        return item
+    }
+}
+
+/// A piece of text that was offered at a position.
+struct CoachMark: Equatable {
+    var text: String
+    var range: Range<Int>
 }
 
 @MainActor
 final class TypingCoach {
-    static let shared = TypingCoach()
+    static let shared: TypingCoach = {
+        let coach = TypingCoach(ai: .live, notebook: .shared, display: CoachCardPanel(), keys: CoachKeyTap(),
+                                clock: CoachSystemClock(), behavior: { .current },
+                                copy: { text in
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(text, forType: .string)
+                                })
+        coach.startLive()
+        return coach
+    }()
+
+    /// A failed card stays this long.
+    static let failureSeconds: TimeInterval = 4
+    /// A card without keys (no tap, Secure Event Input) stays this long.
+    static let readOnlySeconds: TimeInterval = 5
+    /// A card that came up while the user was typing, or after a wait for the AI, ignores Tab this long.
+    static let tabGrace: TimeInterval = 0.3
+    /// Without . ? ! a sentence is checked as finished after this much longer pause.
+    static let lingerSeconds: TimeInterval = 1.2
+    /// After a card is handled, what waited behind it comes this soon.
+    static let nextCardSeconds: TimeInterval = 0.4
+    /// Typing this many characters while the "想一下" capsule or a card without keys is up makes it go.
+    static let typedAway = 2
 
     weak var host: TypingCoachHost?
 
-    private let panel = CoachCardPanel()
-    private let keyTap = CoachKeyTap()
+    private let ai: CoachAIService
+    private let notebook: CoachNotebook
+    private let display: CoachCardDisplay
+    private let keys: CoachKeyInput
+    private let clock: CoachClock
+    private let behavior: () -> CoachBehavior
+    private let copy: (String) -> Void
 
-    private struct Active {
+    private struct Card {
+        let id = UUID()
         var content: CoachCardContent
         var range: Range<Int>
+        /// The text at `range` when the card was made.
+        var piece: String
         var analyzedText: String
         var harperError: GrammarErrorModel?
-        var memoryKey: String
-        var keysSinceShown = 0
         /// Where the card points when that differs from the range it replaces (sentence cards).
         var anchorOverride: Range<Int>?
+        var keys: CoachCardKeys = .normal
+        var keysSinceShown = 0
+
+        var isThinking: Bool { content == .thinking }
+
+        var isFailure: Bool {
+            if case .failed = content { return true }
+            return false
+        }
     }
 
-    private var active: Active?
+    private struct Request {
+        var task: Task<Void, Never>
+        /// Where the fragment or sentence sent to the AI is now.
+        var range: Range<Int>
+    }
+
+    /// What the coach knows about the field being typed in.
+    private struct FieldMemory {
+        static let limit = 300
+        /// Pieces already offered: not again while the text there stays the same.
+        var offered: [CoachMark] = []
+        /// Ranges TypeRight wrote: a sentence with one of them was not right the first time.
+        var fixed: [Range<Int>] = []
+        /// Sentences sent for a check or taken from a sentence card.
+        var checked = CappedSet<String>(limit: limit)
+
+        func wasOffered(_ mark: CoachMark) -> Bool { offered.contains(mark) }
+
+        mutating func offer(_ mark: CoachMark) {
+            offered.append(mark)
+            if offered.count > Self.limit { offered.removeFirst(offered.count - Self.limit) }
+        }
+
+        mutating func fix(_ range: Range<Int>) {
+            fixed.append(range)
+            if fixed.count > Self.limit { fixed.removeFirst(fixed.count - Self.limit) }
+        }
+
+        func wasFixed(within range: Range<Int>) -> Bool { fixed.contains { $0.overlaps(range) } }
+
+        mutating func apply(_ edit: CoachText.Edit) {
+            offered = offered.compactMap { mark in edit.shift(mark.range).map { CoachMark(text: mark.text, range: $0) } }
+            fixed = fixed.compactMap { edit.shift($0) }
+        }
+    }
+
+    private var active: Card?
+    /// An AI card that came back while another card was up: it comes once that one is handled.
+    private var pending: Card?
+    private var request: Request?
     private var latestText = ""
     private var latestErrors: [GrammarErrorModel] = []
-    private var pauseTimer: Timer?
-    /// A longer pause: a sentence without . ? ! (chat style) is checked as finished.
-    private var lingerTimer: Timer?
-    private var aiTask: Task<Void, Never>?
-    private var waitingPinyin: (range: Range<Int>, word: String)?
+    private var fieldID: String?
+    private var memory = FieldMemory()
+    private var waitingPinyin: CoachMark?
+    private var pauseTimer: CoachTimer?
+    private var lingerTimer: CoachTimer?
+    private var closeTimer: CoachTimer?
+    /// Apps where a write came out wrong: there Tab copies the fix instead (until TypeRight quits).
+    private var copyOnlyApps = Set<String>()
 
-    /// Things the user said no to (Esc), so they are not offered again.
-    private var declined = Set<String>()
-    /// Sentences already sent for a check.
-    private var checkedSentences = Set<String>()
+    /// The latest AI request and Tab write, so tests can wait for them.
+    private(set) var aiTask: Task<Void, Never>?
+    private(set) var writeTask: Task<Void, Never>?
 
-    private init() {
+    init(ai: CoachAIService, notebook: CoachNotebook, display: CoachCardDisplay, keys: CoachKeyInput,
+         clock: CoachClock, behavior: @escaping () -> CoachBehavior, copy: @escaping (String) -> Void)
+    {
+        self.ai = ai
+        self.notebook = notebook
+        self.display = display
+        self.keys = keys
+        self.clock = clock
+        self.behavior = behavior
+        self.copy = copy
+        keys.onKey = { [weak self] key, swallowed in self?.keyArrived(key, swallowed: swallowed) }
+        display.onClickOutside = { [weak self] in self?.clickedOutside() }
+    }
+
+    private func startLive() {
         #if DEBUG
             Self.importDevKey()
         #endif
@@ -69,11 +248,6 @@ final class TypingCoach {
         MemberService.shared.start()
         UsagePing.shared.start()
         KeyboardShortcuts.onKeyUp(for: .typeRightTranslate) { [weak self] in self?.translateWholeSentence() }
-        keyTap.onKey = { [weak self] key in self?.handleKey(key) ?? false }
-        panel.onClickOutside = { [weak self] in
-            self?.dismiss(remember: false)
-            self?.schedulePauseCheck(after: 0.4)
-        }
     }
 
     #if DEBUG
@@ -85,8 +259,7 @@ final class TypingCoach {
             else { return }
             try? FileManager.default.removeItem(atPath: path)
             let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { return }
-            CoachKeychain.setKey(trimmed, for: .deepseek)
+            guard !trimmed.isEmpty, CoachKeyStore.shared.save(trimmed, for: .deepseek) else { return }
             CoachSettings.provider = .deepseek
             Logger.info("TypeRight: development key imported", category: Logger.llm)
         }
@@ -96,71 +269,144 @@ final class TypingCoach {
 
     /// Called after every analysis of the focused field.
     func analysisDidUpdate(text: String, errors: [GrammarErrorModel]) {
-        guard CoachSettings.cardsEnabled, host != nil else {
-            Logger.info("TypeRight: analysis ignored (cards \(CoachSettings.cardsEnabled), host \(host != nil))", category: Logger.ui)
+        let behavior = behavior()
+        guard behavior.cardsEnabled, let host else {
+            Logger.trace("TypeRight: analysis ignored (cards \(behavior.cardsEnabled), host \(host != nil))", category: Logger.ui)
             return
         }
-        latestText = text
+        let field = host.coachFieldID
+        if field != fieldID {
+            forgetField()
+            fieldID = field
+        }
+        take(text)
         latestErrors = errors
 
-        if let active, !stillMatches(active) { dismiss(remember: false) }
+        if host.coachIsComposing {
+            // An input method is composing: nothing pops up and no key is taken until it commits.
+            if let card = active, !card.isThinking { close(.typedOn) }
+            return
+        }
+        if let card = active { recheck(card) }
 
-        if active == nil, let (error, word) = justFinishedSpellingError(in: text, errors: errors) {
-            if CoachSettings.pinyinEnabled, PinyinDetector.isLikelyPinyin(word), MemberService.shared.aiStatus.isOn {
-                waitingPinyin = (error.start ..< error.end, word)
+        if active?.isThinking ?? true, let (error, word) = justFinishedSpellingError(in: text, errors: errors) {
+            if behavior.pinyinEnabled, ai.status().isOn,
+               PinyinDetector.treatAsPinyin(word, firstSuggestion: error.suggestions.first)
+            {
+                waitingPinyin = CoachMark(text: word, range: error.start ..< error.end)
             } else {
                 showSpelling(error, word: word, text: text)
             }
         }
 
-        schedulePauseCheck(after: CoachSettings.pauseSeconds)
+        schedulePauseCheck(after: behavior.pauseSeconds)
     }
 
-    private func schedulePauseCheck(after seconds: Double) {
-        pauseTimer?.invalidate()
-        lingerTimer?.invalidate()
-        pauseTimer = Timer.scheduledTimer(withTimeInterval: seconds, repeats: false) { [weak self] _ in
-            MainActor.assumeIsolated { self?.userPaused() }
+    /// The field went away (focus moved, app switched, monitoring stopped).
+    func reset() {
+        forgetField()
+        fieldID = nil
+    }
+
+    private func forgetField() {
+        pauseTimer?.cancel()
+        lingerTimer?.cancel()
+        cancelRequest()
+        close(.gone)
+        pending = nil
+        waitingPinyin = nil
+        latestText = ""
+        latestErrors = []
+        memory = FieldMemory()
+    }
+
+    /// The field now reads `text`: everything remembered by position moves with the edit, and
+    /// whatever the edit touched is forgotten.
+    private func take(_ text: String) {
+        guard let edit = CoachText.edit(from: latestText, to: text) else { return }
+        latestText = text
+        memory.apply(edit)
+        if let current = request {
+            if let moved = edit.shift(current.range) {
+                request?.range = moved
+            } else {
+                Logger.info("TypeRight: the text sent to the AI was edited, request dropped", category: Logger.llm)
+                cancelRequest()
+                if active?.isThinking == true { close(.textChanged) }
+            }
+        }
+        if var card = pending {
+            if let moved = edit.shift(card.range) {
+                card.range = moved
+                card.anchorOverride = card.anchorOverride.flatMap { edit.shift($0) }
+                pending = card
+            } else {
+                pending = nil
+            }
+        }
+        if let pinyin = waitingPinyin {
+            waitingPinyin = edit.shift(pinyin.range).map { CoachMark(text: pinyin.text, range: $0) }
         }
     }
 
-    /// The monitored field went away (focus moved, app switched, monitoring stopped).
-    func reset() {
-        pauseTimer?.invalidate()
-        lingerTimer?.invalidate()
-        aiTask?.cancel()
-        waitingPinyin = nil
-        dismiss(remember: false)
+    /// Whether the card on screen still fits what is typed now.
+    private func recheck(_ card: Card) {
+        let typed = CoachText.edit(from: card.analyzedText, to: latestText)?.size ?? 0
+        if card.isThinking {
+            if typed >= Self.typedAway { close(.typedOn) }
+            return
+        }
+        if !card.isFailure, !latestTextStill(has: card.piece, at: card.range) {
+            close(.textChanged)
+        } else if card.keys == .readOnly, typed >= Self.typedAway {
+            close(.typedOn)
+        }
+    }
+
+    private func schedulePauseCheck(after seconds: Double) {
+        pauseTimer?.cancel()
+        lingerTimer?.cancel()
+        pauseTimer = clock.after(seconds) { [weak self] in self?.userPaused() }
     }
 
     /// The translate shortcut: the Chinese sentence at the caret becomes English.
     func translateWholeSentence() {
-        guard host != nil else { return }
-        let text = latestText
-        let scalars = Array(text.unicodeScalars)
-        let caret = min(host?.coachCaret(in: text) ?? scalars.count, scalars.count)
+        guard behavior().cardsEnabled, let host, host.coachIsWatching else {
+            Logger.info("TypeRight: translate key ignored (cards off, paused or no field)", category: Logger.ui)
+            return
+        }
+        if host.coachFieldID != fieldID {
+            forgetField()
+            fieldID = host.coachFieldID
+        }
+        // Some apps are analysed a second after typing stops: read what is there now.
+        if let fresh = host.coachReadText() { take(fresh) }
+        let scalars = Array(latestText.unicodeScalars)
+        let caret = min(host.coachCaret(in: latestText) ?? scalars.count, scalars.count)
         var end = caret
         while end > 0, CharacterSet.whitespacesAndNewlines.contains(scalars[end - 1]) {
             end -= 1
         }
-        var range = sentenceRange(endingNear: end, in: scalars)
-        if range.isEmpty, end > 0 { range = sentenceRange(endingNear: end - 1, in: scalars).lowerBound ..< end }
+        var range = CoachText.sentenceRange(endingNear: end, in: scalars)
+        if range.isEmpty, end > 0 { range = CoachText.sentenceRange(endingNear: end - 1, in: scalars).lowerBound ..< end }
         guard !range.isEmpty,
               !ChineseText.hanRuns(in: scalars, from: range.lowerBound, to: range.upperBound).isEmpty else { return }
-        let ai = MemberService.shared.aiStatus
-        guard ai.isOn else {
+        let status = ai.status()
+        guard status.isOn else {
             // Trial used up, today's limit and the like: no card until the account page is designed.
-            if case let .memberBlocked(state) = ai {
+            if case let .memberBlocked(state) = status {
                 Logger.info("TypeRight: translate shortcut without AI, member \(state)", category: Logger.llm)
-                MemberService.shared.recheckWhileBlocked()
+                ai.blocked()
                 return
             }
-            present(Active(content: .failed("整句翻译要用 AI：先在设置 › AI 服务商里选一家、填 Key。"), range: range,
-                           analyzedText: text, harperError: nil, memoryKey: ""))
+            showFailed("整句翻译要用 AI：先在设置 › AI 服务商里选一家、填 Key。", at: range)
             return
         }
-        dismiss(remember: false)
-        translate(fragmentRange: range, sentence: range, scalars: scalars, text: text)
+        cancelRequest()
+        close(.gone)
+        pending = nil
+        let sentence = CoachText.substring(scalars, range)
+        translate(CoachMark(text: sentence, range: range), sentence: sentence)
     }
 
     // MARK: - Spelling
@@ -169,108 +415,108 @@ final class TypingCoach {
         let scalars = Array(text.unicodeScalars)
         let caret = min(host?.coachCaret(in: text) ?? scalars.count, scalars.count)
         let candidates = errors.filter { ($0.category == "Spelling" || $0.category == "Typo") && $0.end <= caret }
-        guard let error = candidates.max(by: { $0.end < $1.end }), error.end <= scalars.count else { return nil }
+        guard let error = candidates.max(by: { $0.end < $1.end }), error.start < error.end, error.end <= scalars.count else { return nil }
 
         // The word counts as finished when a space or punctuation follows it and at most
         // a few letters of the next word have been typed since.
         let after = scalars[error.end ..< caret]
-        guard let first = after.first, !CharacterSet.letters.contains(first), after.count <= 4 else { return nil }
+        guard let first = after.first, CoachText.wordEnds.contains(first), after.count <= 4 else { return nil }
 
-        let word = String(String.UnicodeScalarView(scalars[error.start ..< error.end]))
-        Logger.info("TypeRight: finished misspelling at \(error.start)-\(error.end), caret \(caret), \(error.suggestions.count) suggestions", category: Logger.ui)
+        let word = CoachText.substring(scalars, error.start ..< error.end)
         // Chinese is handled by the translate card, never as a misspelling.
         guard !word.unicodeScalars.contains(where: ChineseText.isHan),
-              word.unicodeScalars.contains(where: { ("a" ... "z").contains($0) || ("A" ... "Z").contains($0) }),
-              !declined.contains(spellingKey(word, error)) else { return nil }
+              word.unicodeScalars.contains(where: CoachText.isLatinLetter),
+              !memory.wasOffered(CoachMark(text: word, range: error.start ..< error.end)) else { return nil }
+        Logger.info("TypeRight: finished misspelling at \(error.start)-\(error.end), caret \(caret), \(error.suggestions.count) suggestions", category: Logger.ui)
         return (error, word)
-    }
-
-    private func spellingKey(_ word: String, _ error: GrammarErrorModel) -> String {
-        "spell:\(word.lowercased()):\(error.start)"
     }
 
     private func showSpelling(_ error: GrammarErrorModel, word: String, text: String) {
         guard !error.suggestions.isEmpty else { return }
-        let content = CoachCardContent.spelling(wrong: word, fixes: Array(error.suggestions.prefix(4)))
-        present(Active(content: content, range: error.start ..< error.end, analyzedText: text,
-                       harperError: error, memoryKey: spellingKey(word, error)))
+        let mark = CoachMark(text: word, range: error.start ..< error.end)
+        memory.offer(mark)
+        present(Card(content: .spelling(wrong: word, fixes: Array(error.suggestions.prefix(4))), range: mark.range,
+                     piece: word, analyzedText: text, harperError: error), async: false)
     }
 
     // MARK: - After a pause: Chinese, pinyin, finished sentences
 
     private func userPaused() {
-        guard active == nil || isThinking else { return }
-        let ai = MemberService.shared.aiStatus
-        // With the trial used up, today's limit reached and the like, this line is all there is for now:
-        // no AI card until the account page is designed.
-        Logger.info("TypeRight: pause check (AI \(ai), pinyin waiting \(waitingPinyin != nil))", category: Logger.ui)
+        guard let host, active == nil, request == nil, !host.coachIsComposing else { return }
+        if let card = pending {
+            pending = nil
+            if latestTextStill(has: card.piece, at: card.range) {
+                present(card, async: true)
+                return
+            }
+        }
+        let status = ai.status()
         let text = latestText
         let scalars = Array(text.unicodeScalars)
-        let caret = min(host?.coachCaret(in: text) ?? scalars.count, scalars.count)
-        let sentence = sentenceRange(endingNear: caret, in: scalars)
+        let caret = min(host.coachCaret(in: text) ?? scalars.count, scalars.count)
+        let sentence = CoachText.sentenceRange(endingNear: caret, in: scalars)
+        // With the trial used up, today's limit reached and the like, this line is all there is for now:
+        // no AI card until the account page is designed.
+        Logger.info("TypeRight: pause check (AI \(status), pinyin waiting \(waitingPinyin != nil))", category: Logger.ui)
 
-        guard ai.isOn else {
-            if case .memberBlocked = ai { MemberService.shared.recheckWhileBlocked() }
+        guard status.isOn else {
+            if case .memberBlocked = status { ai.blocked() }
             countWithoutAI(caret: caret, scalars: scalars)
             return
         }
 
         // Chinese inside an English sentence.
-        if CoachSettings.autoTranslateMixed,
-           ChineseText.latinWordCount(in: scalars, from: sentence.lowerBound, to: sentence.upperBound) >= 1,
+        if behavior().autoTranslateMixed, CoachText.shouldAutoTranslate(scalars, in: sentence),
            let run = ChineseText.hanRuns(in: scalars, from: sentence.lowerBound, to: sentence.upperBound)
-           .first(where: { !declined.contains("han:\(substring(scalars, $0))") })
+           .first(where: { !memory.wasOffered(CoachMark(text: CoachText.substring(scalars, $0), range: $0)) })
         {
-            translate(fragmentRange: run, sentence: sentence, scalars: scalars, text: text)
+            translate(CoachMark(text: CoachText.substring(scalars, run), range: run), sentence: CoachText.substring(scalars, sentence))
             return
         }
 
         // Pinyin the spell checker rejected.
         if let pinyin = waitingPinyin {
             waitingPinyin = nil
-            if pinyin.range.upperBound <= scalars.count, substring(scalars, pinyin.range) == pinyin.word {
-                translate(fragmentRange: pinyin.range, sentence: sentence, scalars: scalars, text: text)
+            if latestTextStill(has: pinyin.text, at: pinyin.range), !memory.wasOffered(pinyin) {
+                translate(pinyin, sentence: CoachText.substring(scalars, sentence))
                 return
             }
         }
 
         // A sentence that was just finished.
-        if let finished = finishedSentence(before: caret, in: scalars) {
-            checkIfNew(finished, scalars: scalars, text: text, unfinished: false)
+        if let finished = CoachText.finishedSentence(before: caret, in: scalars) {
+            checkIfNew(finished, scalars: scalars, unfinished: false)
             return
         }
 
         // No . ? ! yet: chat messages often go out without one, so after a longer pause
         // check what is there as if it were finished.
-        lingerTimer?.invalidate()
-        lingerTimer = Timer.scheduledTimer(withTimeInterval: 1.2, repeats: false) { [weak self] _ in
-            MainActor.assumeIsolated { self?.userLingered() }
-        }
+        lingerTimer?.cancel()
+        lingerTimer = clock.after(Self.lingerSeconds) { [weak self] in self?.userLingered() }
     }
 
     private func userLingered() {
-        guard active == nil, MemberService.shared.aiStatus.isOn else { return }
-        let text = latestText
-        let scalars = Array(text.unicodeScalars)
-        let caret = min(host?.coachCaret(in: text) ?? scalars.count, scalars.count)
+        guard let host, active == nil, request == nil, ai.status().isOn else { return }
+        let scalars = Array(latestText.unicodeScalars)
+        let caret = min(host.coachCaret(in: latestText) ?? scalars.count, scalars.count)
         // Only when the caret sits at the end of what was typed.
         guard scalars[caret...].allSatisfy({ CharacterSet.whitespacesAndNewlines.contains($0) }) else { return }
-        var range = sentenceRange(endingNear: caret, in: scalars)
+        var range = CoachText.sentenceRange(endingNear: caret, in: scalars)
         while range.upperBound > range.lowerBound, CharacterSet.whitespaces.contains(scalars[range.upperBound - 1]) {
             range = range.lowerBound ..< range.upperBound - 1
         }
         guard ChineseText.latinWordCount(in: scalars, from: range.lowerBound, to: range.upperBound) >= 4 else { return }
-        checkIfNew(range, scalars: scalars, text: text, unfinished: true)
+        checkIfNew(range, scalars: scalars, unfinished: true)
     }
 
-    private func checkIfNew(_ range: Range<Int>, scalars: [Unicode.Scalar], text: String, unfinished: Bool) {
-        let key = Self.sentenceKey(substring(scalars, range))
-        guard !checkedSentences.contains(key), !declined.contains("sentence:\(key)"),
+    private func checkIfNew(_ range: Range<Int>, scalars: [Unicode.Scalar], unfinished: Bool) {
+        let key = Self.sentenceKey(CoachText.substring(scalars, range))
+        guard !memory.checked.contains(key),
               ChineseText.hanRuns(in: scalars, from: range.lowerBound, to: range.upperBound).isEmpty,
               ChineseText.latinWordCount(in: scalars, from: range.lowerBound, to: range.upperBound) >= 3
         else { return }
-        checkedSentences.insert(key)
-        check(sentenceRange: range, scalars: scalars, text: text, unfinished: unfinished)
+        memory.checked.insert(key)
+        check(sentenceRange: range, scalars: scalars, unfinished: unfinished)
     }
 
     /// The same sentence with or without its final . ? ! counts once.
@@ -281,113 +527,169 @@ final class TypingCoach {
     /// Where a new card's AI request goes. Through our backend each card is one use: it gets its own
     /// use number, which its retries share.
     private func newCardRoute() -> CoachAIRoute? {
-        let ai = MemberService.shared.aiStatus
-        guard let route = ai.route() else {
-            Logger.info("TypeRight: no AI for this card (\(ai))", category: Logger.llm)
+        let status = ai.status()
+        guard let route = status.route() else {
+            Logger.info("TypeRight: no AI for this card (\(status))", category: Logger.llm)
             return nil
         }
         return route
     }
 
-    /// Through our backend the trial or membership could not be used (used up, today's limit, offline,
-    /// device token …). For now that is one info line and no card; the account page is being designed.
-    private func memberGaveNoCard(_ error: MemberError) {
-        Logger.info("TypeRight: member AI gave no card: \(error.kind) (\(error.code), HTTP \(error.status))", category: Logger.llm)
-        if isThinking { dismiss(remember: false) }
-    }
-
-    private func translate(fragmentRange: Range<Int>, sentence: Range<Int>, scalars: [Unicode.Scalar], text: String) {
+    /// Asks for the English of a fragment once: the fragment counts as offered from now on, whatever
+    /// comes back, so a failure or a closed card never sends the same text again by itself.
+    private func translate(_ mark: CoachMark, sentence: String) {
         guard let route = newCardRoute() else { return }
-        let fragment = substring(scalars, fragmentRange)
-        let sentenceText = substring(scalars, sentence)
-        showThinking(at: fragmentRange, text: text)
-        aiTask?.cancel()
-        aiTask = Task { [weak self] in
+        memory.offer(mark)
+        showThinking(at: mark.range)
+        let translate = ai.translate
+        let task = Task { [weak self] in
             do {
-                let result = try await CoachAI.translate(fragment: fragment, in: sentenceText, via: route)
-                guard let self, !Task.isCancelled, self.latestTextStill(has: fragment, at: fragmentRange) else { return }
-                self.present(Active(content: .translate(source: fragment, result: result), range: fragmentRange,
-                                    analyzedText: self.latestText, harperError: nil, memoryKey: "han:\(fragment)"))
-            } catch let CoachAIError.member(error) {
-                guard let self, !Task.isCancelled else { return }
-                self.memberGaveNoCard(error)
-            } catch {
-                guard let self, !Task.isCancelled else { return }
-                self.showFailure(error, at: fragmentRange, text: text)
-            }
-        }
-    }
-
-    private func check(sentenceRange: Range<Int>, scalars: [Unicode.Scalar], text: String, unfinished: Bool) {
-        guard let route = newCardRoute() else { return }
-        let sentenceText = substring(scalars, sentenceRange)
-        let lastWord = lastWordRange(in: scalars, within: sentenceRange)
-        showThinking(at: lastWord, text: text)
-        aiTask?.cancel()
-        aiTask = Task { [weak self] in
-            do {
-                let result = try await CoachAI.check(sentence: sentenceText, mayBeUnfinished: unfinished, via: route)
-                guard let self, !Task.isCancelled else { return }
-                let clean = result.ok || result.corrected.isEmpty || result.corrected == sentenceText
-                CoachNotebook.shared.noteSentence(clean: clean)
-                if clean { CoachNotebook.shared.noteCorrectUse(in: sentenceText) }
-                guard !clean,
-                      self.latestTextStill(has: sentenceText, at: sentenceRange)
-                else {
-                    if self.isThinking { self.dismiss(remember: false) }
+                let result = try await translate(mark.text, sentence, route)
+                guard let self, !Task.isCancelled, let range = self.finishRequest() else { return }
+                guard self.latestTextStill(has: mark.text, at: range) else {
+                    self.dropThinking()
                     return
                 }
-                let anchor = self.firstChangeRange(result, in: scalars, within: sentenceRange) ?? lastWord
-                var card = Active(content: .sentence(original: sentenceText, check: result), range: sentenceRange,
-                                  analyzedText: self.latestText, harperError: nil,
-                                  memoryKey: "sentence:\(Self.sentenceKey(sentenceText))")
-                card.anchorOverride = anchor
-                self.present(card)
-            } catch let CoachAIError.member(error) {
-                guard let self, !Task.isCancelled else { return }
-                self.memberGaveNoCard(error)
+                self.deliver(Card(content: .translate(source: mark.text, result: result), range: range, piece: mark.text,
+                                  analyzedText: self.latestText))
             } catch {
                 guard let self, !Task.isCancelled else { return }
-                self.showFailure(error, at: lastWord, text: text)
+                self.requestFailed(error)
             }
         }
+        request = Request(task: task, range: mark.range)
+        aiTask = task
+    }
+
+    private func check(sentenceRange: Range<Int>, scalars: [Unicode.Scalar], unfinished: Bool) {
+        guard let route = newCardRoute() else { return }
+        let sentenceText = CoachText.substring(scalars, sentenceRange)
+        // A sentence TypeRight already changed was not right the first time, whatever the AI says now.
+        let assisted = memory.wasFixed(within: sentenceRange)
+        showThinking(at: CoachText.lastWordRange(in: scalars, within: sentenceRange))
+        let check = ai.check
+        let notebook = notebook
+        let task = Task { [weak self] in
+            do {
+                let result = try await check(sentenceText, unfinished, route)
+                guard let self, !Task.isCancelled, let range = self.finishRequest() else { return }
+                let clean = result.ok || result.corrected.isEmpty || result.corrected == sentenceText
+                notebook.noteSentence(clean: clean && !assisted)
+                if clean, !assisted { notebook.noteCorrectUse(in: sentenceText) }
+                guard !clean, self.latestTextStill(has: sentenceText, at: range) else {
+                    self.dropThinking()
+                    return
+                }
+                let now = Array(self.latestText.unicodeScalars)
+                let anchor = CoachText.firstChangeRange(result, in: now, within: range) ?? CoachText.lastWordRange(in: now, within: range)
+                self.deliver(Card(content: .sentence(original: sentenceText, check: result), range: range, piece: sentenceText,
+                                  analyzedText: self.latestText, anchorOverride: anchor))
+            } catch {
+                guard let self, !Task.isCancelled else { return }
+                self.requestFailed(error)
+            }
+        }
+        request = Request(task: task, range: sentenceRange)
+        aiTask = task
+    }
+
+    /// The request is over; where its text is now.
+    private func finishRequest() -> Range<Int>? {
+        defer { request = nil }
+        return request?.range
+    }
+
+    private func cancelRequest() {
+        request?.task.cancel()
+        request = nil
+    }
+
+    private func requestFailed(_ error: Error) {
+        let range = finishRequest()
+        if case let CoachAIError.member(memberError) = error {
+            // Through our backend the trial or membership could not be used (used up, today's limit,
+            // offline, device token …). For now that is one info line and no card; the account page is being designed.
+            Logger.info("TypeRight: member AI gave no card: \(memberError.kind) (\(memberError.code), HTTP \(memberError.status))", category: Logger.llm)
+            dropThinking()
+            return
+        }
+        let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        Logger.warning("TypeRight: AI request failed: \(message)", category: Logger.llm)
+        showFailed(message, at: range)
     }
 
     // MARK: - Showing and taking cards
 
-    private var isThinking: Bool {
-        if case .thinking = active?.content { return true }
-        return false
+    private enum CloseReason {
+        case accepted, declined, typedOn, clickedOutside, textChanged, timeUp, gone
     }
 
-    private func showThinking(at range: Range<Int>, text: String) {
-        present(Active(content: .thinking, range: range, analyzedText: text, harperError: nil, memoryKey: ""))
+    private func showThinking(at range: Range<Int>) {
+        present(Card(content: .thinking, range: range, piece: CoachText.substring(Array(latestText.unicodeScalars), range),
+                     analyzedText: latestText), async: false)
     }
 
-    private func showFailure(_ error: Error, at range: Range<Int>, text: String) {
-        let message = "AI 没回上来：" + ((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
-        Logger.warning("TypeRight: AI request failed: \(message.prefix(200))", category: Logger.llm)
-        present(Active(content: .failed(message), range: range, analyzedText: text, harperError: nil, memoryKey: ""))
-        let shown = active?.content
-        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
-            MainActor.assumeIsolated {
-                if let self, self.active?.content == shown { self.dismiss(remember: false) }
-            }
+    /// The capsule goes when its request ends without a card.
+    private func dropThinking() {
+        if active?.isThinking == true { close(.gone) }
+    }
+
+    /// A failed card, at the range's place in the current text (or the field's corner).
+    private func showFailed(_ message: String, at range: Range<Int>?) {
+        let scalars = Array(latestText.unicodeScalars)
+        let range = range.flatMap { $0.upperBound <= scalars.count ? $0 : nil } ?? 0 ..< 0
+        deliver(Card(content: .failed(message), range: range, piece: CoachText.substring(scalars, range), analyzedText: latestText))
+    }
+
+    /// An AI card or a failure: shown now unless another card is up, then it waits for that one.
+    private func deliver(_ card: Card) {
+        if active?.isThinking ?? true {
+            present(card, async: true)
+        } else {
+            pending = card
         }
     }
 
-    private func present(_ card: Active) {
+    private func present(_ card: Card, async: Bool) {
         guard let host else { return }
+        var card = card
+        let scalarCount = card.analyzedText.unicodeScalars.count
         let anchorRange = card.anchorOverride ?? card.range
-        let wordAnchor = host.coachAnchor(for: anchorRange, in: card.analyzedText)
+        let wordAnchor = anchorRange.isEmpty || anchorRange.upperBound > scalarCount ? nil : host.coachAnchor(for: anchorRange, in: card.analyzedText)
         guard let anchor = wordAnchor ?? host.coachFallbackAnchor() else {
             Logger.info("TypeRight: no anchor for card, not showing", category: Logger.ui)
             return
         }
-        Logger.info("TypeRight: card \(Self.kind(card.content)) at \(Int(anchor.minX)),\(Int(anchor.minY)) \(wordAnchor == nil ? "(fallback)" : "(word)")", category: Logger.ui)
+        closeTimer?.cancel()
+        let interactive = card.isThinking || keys.canIntercept
+        if !interactive {
+            card.keys = .readOnly
+        } else if card.content.acceptText != nil, let app = host.coachAppID, copyOnlyApps.contains(app) {
+            card.keys = .copy
+        }
+        Logger.info("TypeRight: card \(Self.kind(card.content)) at \(Int(anchor.minX)),\(Int(anchor.minY)) \(wordAnchor == nil ? "(fallback)" : "(word)")\(card.keys == .readOnly ? " read-only" : "")", category: Logger.ui)
         active = card
-        panel.show(card.content, anchor: anchor)
-        if card.content.acceptText != nil || isFailure(card.content) { keyTap.turnOn() } else { keyTap.turnOff() }
+        display.show(card.content, keys: card.keys, anchor: anchor)
+        keys.set(policy(for: card, async: async))
+        let id = card.id
+        if card.isFailure || (card.keys == .readOnly && !card.isThinking) {
+            closeTimer = clock.after(card.isFailure ? Self.failureSeconds : Self.readOnlySeconds) { [weak self] in
+                guard let self, self.active?.id == id else { return }
+                self.close(.timeUp)
+                self.schedulePauseCheck(after: Self.nextCardSeconds)
+            }
+        }
+    }
+
+    /// Which keys the card takes. A card that came after a wait, or while the user was still typing,
+    /// ignores Tab for a moment: that Tab was meant for the app (next form field, completion).
+    /// A failed card takes no key; keys are only watched so typing or Esc closes it.
+    private func policy(for card: Card, async: Bool) -> CoachKeyPolicy? {
+        if card.isThinking || card.keys == .readOnly { return nil }
+        if card.isFailure { return CoachKeyPolicy(tab: false, tabFrom: 0, esc: false) }
+        let typing = clock.secondsSinceLastKey < Self.tabGrace
+        let tabFrom = async || typing ? clock.now + Self.tabGrace : clock.now
+        return CoachKeyPolicy(tab: card.content.acceptText != nil, tabFrom: tabFrom, esc: true)
     }
 
     private static func kind(_ content: CoachCardContent) -> String {
@@ -400,151 +702,139 @@ final class TypingCoach {
         }
     }
 
-    private func isFailure(_ content: CoachCardContent) -> Bool {
-        if case .failed = content { return true }
-        return false
-    }
-
-    private func dismiss(remember: Bool) {
-        if remember, let key = active?.memoryKey, !key.isEmpty { declined.insert(key) }
+    private func close(_ reason: CloseReason) {
+        guard let card = active else { return }
         active = nil
-        panel.hide()
-        keyTap.turnOff()
+        closeTimer?.cancel()
+        display.hide()
+        keys.set(nil)
+        // Closing the capsule ends its request: no card turns up after the user moved on.
+        if card.isThinking { cancelRequest() }
+        Logger.debug("TypeRight: card \(Self.kind(card.content)) closed (\(reason))", category: Logger.ui)
     }
 
-    private func handleKey(_ key: CoachKeyTap.Key) -> Bool {
+    /// After Tab, Esc or a click outside: what waited behind the card comes now.
+    private func showNext() {
+        if let card = pending {
+            pending = nil
+            if latestTextStill(has: card.piece, at: card.range) {
+                var card = card
+                card.analyzedText = latestText
+                present(card, async: true)
+                return
+            }
+        }
+        schedulePauseCheck(after: Self.nextCardSeconds)
+    }
+
+    private func clickedOutside() {
+        guard active != nil else { return }
+        close(.clickedOutside)
+        showNext()
+    }
+
+    private func keyArrived(_ key: CoachKey, swallowed: Bool) {
         guard var card = active else {
-            keyTap.turnOff()
-            return false
+            keys.set(nil)
+            return
         }
         switch key {
-        case .tab:
-            guard let replacement = card.content.acceptText else { return false }
-            accept(card, replacement: replacement)
-            return true
+        case .tab where swallowed:
+            accept(card)
         case .escape:
-            dismiss(remember: true)
-            // Whatever was waiting behind this card (Chinese after a misspelling) comes next.
-            schedulePauseCheck(after: 0.4)
-            return true
-        case let .other(printable):
+            close(.declined)
+            showNext()
+        case .other(printable: true):
             card.keysSinceShown += 1
-            active = card
-            if !printable || card.keysSinceShown >= 2 { dismiss(remember: false) }
-            return false
+            if card.keysSinceShown >= Self.typedAway {
+                close(.typedOn)
+            } else {
+                active = card
+            }
+        default:
+            // A Tab that went to the app, arrows, return, shortcuts.
+            close(.typedOn)
         }
     }
 
-    private func accept(_ card: Active, replacement: String) {
-        dismiss(remember: false)
-        let appName = host?.coachAppName ?? ""
-        Task { [weak self] in
-            guard let host = self?.host else { return }
-            let ok = await host.coachReplace(range: card.range, with: replacement,
-                                             analyzedText: card.analyzedText, harperError: card.harperError)
-            if ok {
-                let context = Self.context(of: card, after: replacement)
-                CoachNotebook.shared.record(card.content, app: appName, context: context)
-            }
+    private func accept(_ card: Card) {
+        close(.accepted)
+        guard let host, let accepted = card.content.acceptText else { return }
+        let replacement: String = if case .translate = card.content {
+            CoachText.spaced(accepted, replacing: card.range, in: Array(card.analyzedText.unicodeScalars))
+        } else {
+            accepted
+        }
+        let app = host.coachAppID ?? ""
+        if card.keys == .copy {
+            copy(replacement)
+            showFailed("已复制「\(replacement)」：这个 App 里 TypeRight 不直接改字，粘贴替换一下就好。", at: card.range)
+            return
+        }
+        let appName = host.coachAppName
+        writeTask = Task { [weak self] in
+            let result = await host.coachReplace(range: card.range, with: replacement, analyzedText: card.analyzedText,
+                                                 harperError: card.harperError)
+            self?.finishWrite(card, replacement: replacement, result: result, app: app, appName: appName)
+        }
+    }
+
+    private func finishWrite(_ card: Card, replacement: String, result: CoachWriteResult, app: String, appName: String) {
+        switch result {
+        case let .written(text, at):
+            take(text)
+            memory.fix(at)
+            if case let .sentence(_, check) = card.content { memory.checked.insert(Self.sentenceKey(check.corrected)) }
+            notebook.record(card.content, app: appName, context: Self.context(of: card, after: replacement))
+            showNext()
+        case .notWritten:
+            Logger.warning("TypeRight: write-back left the text unchanged in \(app)", category: Logger.analysis)
+            showFailed("没改成：这个输入框里的字没变，自己改一下吧。", at: card.range)
+        case .wrongResult:
+            Logger.warning("TypeRight: write-back gave the wrong text in \(app); Tab copies there from now on", category: Logger.analysis)
+            copyOnlyApps.insert(app)
+            copy(replacement)
+            showFailed("这个 App 里没改对。改法「\(replacement)」已复制，粘贴替换一下；之后在这里按 Tab 只复制，不直接改。", at: nil)
         }
     }
 
     /// The sentence around the fix as it reads afterwards.
-    private static func context(of card: Active, after replacement: String) -> String {
+    private static func context(of card: Card, after replacement: String) -> String {
         if case let .sentence(_, check) = card.content { return check.corrected }
         let scalars = Array(card.analyzedText.unicodeScalars)
         guard card.range.upperBound <= scalars.count else { return "" }
         var start = card.range.lowerBound
-        while start > 0, !sentenceEnds.contains(scalars[start - 1]) {
+        while start > 0, !CoachText.sentenceEnds.contains(scalars[start - 1]) {
             start -= 1
         }
         var end = card.range.upperBound
-        while end < scalars.count, !sentenceEnds.contains(scalars[end]) {
+        while end < scalars.count, !CoachText.sentenceEnds.contains(scalars[end]) {
             end += 1
         }
-        let before = String(String.UnicodeScalarView(scalars[start ..< card.range.lowerBound]))
-        let after = String(String.UnicodeScalarView(scalars[card.range.upperBound ..< end]))
+        let before = CoachText.substring(scalars, start ..< card.range.lowerBound)
+        let after = CoachText.substring(scalars, card.range.upperBound ..< end)
         return (before + replacement + after).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Without an AI the sentence count comes from the spell checker: a finished sentence
-    /// it found nothing in counts as right the first time.
+    /// it found nothing in, and TypeRight did not change, counts as right the first time.
     private func countWithoutAI(caret: Int, scalars: [Unicode.Scalar]) {
-        guard let finished = finishedSentence(before: caret, in: scalars) else { return }
-        let sentenceText = substring(scalars, finished)
+        guard let finished = CoachText.finishedSentence(before: caret, in: scalars) else { return }
+        let sentenceText = CoachText.substring(scalars, finished)
         let key = Self.sentenceKey(sentenceText)
-        guard !checkedSentences.contains(key),
+        guard !memory.checked.contains(key),
               ChineseText.latinWordCount(in: scalars, from: finished.lowerBound, to: finished.upperBound) >= 3 else { return }
-        checkedSentences.insert(key)
+        memory.checked.insert(key)
         let clean = !latestErrors.contains { $0.start < finished.upperBound && $0.end > finished.lowerBound }
-        CoachNotebook.shared.noteSentence(clean: clean)
-        if clean { CoachNotebook.shared.noteCorrectUse(in: sentenceText) }
+            && !memory.wasFixed(within: finished)
+        notebook.noteSentence(clean: clean)
+        if clean { notebook.noteCorrectUse(in: sentenceText) }
     }
 
     // MARK: - Text helpers
 
-    private func stillMatches(_ card: Active) -> Bool {
-        if case .thinking = card.content { return true }
-        let original = substring(Array(card.analyzedText.unicodeScalars), card.range)
-        return latestTextStill(has: original, at: card.range)
-    }
-
     private func latestTextStill(has piece: String, at range: Range<Int>) -> Bool {
         let scalars = Array(latestText.unicodeScalars)
-        return range.upperBound <= scalars.count && substring(scalars, range) == piece
-    }
-
-    private func substring(_ scalars: [Unicode.Scalar], _ range: Range<Int>) -> String {
-        let clamped = range.clamped(to: 0 ..< scalars.count)
-        return String(String.UnicodeScalarView(scalars[clamped]))
-    }
-
-    private static let sentenceEnds: Set<Unicode.Scalar> = [".", "?", "!", "\n", "。", "？", "！"]
-
-    /// From just after the previous sentence end up to `end`.
-    private func sentenceRange(endingNear end: Int, in scalars: [Unicode.Scalar]) -> Range<Int> {
-        var start = end
-        while start > 0, !Self.sentenceEnds.contains(scalars[start - 1]) {
-            start -= 1
-        }
-        while start < end, scalars[start] == " " || scalars[start] == "\t" {
-            start += 1
-        }
-        return start ..< end
-    }
-
-    /// The sentence whose . ? ! sits right before the caret (spaces allowed in between).
-    private func finishedSentence(before caret: Int, in scalars: [Unicode.Scalar]) -> Range<Int>? {
-        var end = caret
-        while end > 0, scalars[end - 1] == " " {
-            end -= 1
-        }
-        guard end > 0, [".", "?", "!"].contains(scalars[end - 1]) else { return nil }
-        let range = sentenceRange(endingNear: end - 1, in: scalars)
-        return range.lowerBound < end - 1 ? range.lowerBound ..< end : nil
-    }
-
-    private func lastWordRange(in scalars: [Unicode.Scalar], within range: Range<Int>) -> Range<Int> {
-        var end = range.upperBound
-        while end > range.lowerBound, !CharacterSet.letters.contains(scalars[end - 1]) {
-            end -= 1
-        }
-        var start = end
-        while start > range.lowerBound, CharacterSet.letters.contains(scalars[start - 1]) {
-            start -= 1
-        }
-        return start < end ? start ..< end : range
-    }
-
-    private func firstChangeRange(_ check: CoachSentenceCheck, in scalars: [Unicode.Scalar], within range: Range<Int>) -> Range<Int>? {
-        let sentence = substring(scalars, range)
-        for change in check.changes where !change.from.isEmpty {
-            if let found = sentence.range(of: change.from) {
-                let start = sentence.unicodeScalars.distance(from: sentence.unicodeScalars.startIndex, to: found.lowerBound)
-                let length = change.from.unicodeScalars.count
-                return range.lowerBound + start ..< range.lowerBound + start + length
-            }
-        }
-        return nil
+        return range.upperBound <= scalars.count && CoachText.substring(scalars, range) == piece
     }
 }

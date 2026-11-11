@@ -197,7 +197,7 @@ struct TRAppSettings: View {
                         Image(nsImage: app.icon).resizable().frame(width: 22, height: 22)
                         VStack(alignment: .leading, spacing: 1) {
                             Text(app.name).font(.system(size: 13)).foregroundStyle(TR.text)
-                            Text(supportText(app.id)).font(.system(size: 11.5)).foregroundStyle(TR.text2)
+                            Text(supportText(app.id)).font(.system(size: 12)).foregroundStyle(TR.text2)
                         }
                         Spacer()
                         Toggle("", isOn: binding(for: app.id)).toggleStyle(SquareToggleStyle()).labelsHidden()
@@ -275,9 +275,15 @@ struct TRKeySettings: View {
 struct TRAISettings: View {
     @State private var provider = CoachSettings.provider
     @State private var key = ""
+    /// The key as typed, not saved yet, and for which provider.
+    @State private var unsaved: CoachProvider?
+    /// Reading the keychain failed: an empty field must not delete the stored key.
+    @State private var readFailed = false
+    @State private var saveTask: Task<Void, Never>?
     @State private var model = ""
     @State private var baseURL = CoachSettings.customBaseURL
     @State private var test: TestState = .idle
+    @FocusState private var keyFocused: Bool
 
     enum TestState: Equatable { case idle, running, ok(String), failed(String) }
 
@@ -287,6 +293,7 @@ struct TRAISettings: View {
                 .font(.system(size: 12.5)).foregroundStyle(TR.text2).fixedSize(horizontal: false, vertical: true)
             TRProviderList(selection: $provider)
                 .onChange(of: provider) { new in
+                    saveKey()
                     CoachSettings.provider = new
                     load()
                 }
@@ -298,10 +305,12 @@ struct TRAISettings: View {
                             .onChange(of: baseURL) { CoachSettings.customBaseURL = $0 }
                     }
                     HStack {
-                        SecureField("粘贴 API Key", text: $key)
+                        SecureField("粘贴 API Key", text: Binding(get: { key }, set: { typed($0) }))
                             .textFieldStyle(.roundedBorder)
                             .font(.system(size: 12.5, design: .monospaced))
-                            .onChange(of: key) { CoachKeychain.setKey($0, for: provider) }
+                            .focused($keyFocused)
+                            .onSubmit(saveKey)
+                            .onChange(of: keyFocused) { _, focused in if !focused { saveKey() } }
                         if let page = provider.keyPage { Link("去拿 Key", destination: page).font(.system(size: 12.5)) }
                     }
                     TextField("模型（留空用 \(provider.defaultModel)）", text: $model)
@@ -322,15 +331,57 @@ struct TRAISettings: View {
             }
         }
         .onAppear(perform: load)
+        .onDisappear(perform: saveKey)
+    }
+
+    /// Typing only marks the key as changed; it is saved when the field loses focus, on Return,
+    /// or half a second after the last keystroke, not once per character.
+    private func typed(_ value: String) {
+        key = value
+        unsaved = provider
+        saveTask?.cancel()
+        saveTask = Task {
+            try? await Task.sleep(for: .milliseconds(500))
+            guard !Task.isCancelled else { return }
+            saveKey()
+        }
+    }
+
+    private func saveKey() {
+        saveTask?.cancel()
+        guard let target = unsaved else { return }
+        unsaved = nil
+        let value = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.isEmpty, readFailed {
+            test = .failed("钥匙串这次没读出来，原来的 Key 没有动。")
+            return
+        }
+        if CoachKeyStore.shared.save(value, for: target) {
+            readFailed = false
+        } else {
+            test = .failed("Key 没存进钥匙串，再粘贴一次试试。")
+        }
     }
 
     private func load() {
-        key = CoachKeychain.key(for: provider) ?? ""
+        switch CoachKeyStore.shared.key(for: provider) {
+        case let .found(stored):
+            key = stored
+            readFailed = false
+        case .missing:
+            key = ""
+            readFailed = false
+        case .failed:
+            key = ""
+            readFailed = true
+        }
+        unsaved = nil
         model = UserDefaults.standard.string(forKey: "typeright.model.\(provider.rawValue)") ?? ""
-        test = .idle
+        test = readFailed ? .failed("钥匙串这次没读出来，原来的 Key 没有动。") : .idle
     }
 
     private func runTest() {
+        saveKey()
         guard !key.trimmingCharacters(in: .whitespaces).isEmpty else {
             test = .failed("先把 Key 粘贴进来")
             return
@@ -363,8 +414,8 @@ struct TRProviderList: View {
                         Text(p.displayName).font(.system(size: 13)).foregroundStyle(TR.text)
                         Text(p.blurb).font(.system(size: 12)).foregroundStyle(TR.text2)
                         Spacer()
-                        if !(CoachKeychain.key(for: p) ?? "").isEmpty {
-                            Text("已填 Key").font(.system(size: 11.5)).foregroundStyle(TR.fix)
+                        if CoachKeyStore.shared.hasKey(p) {
+                            Text("已填 Key").font(.system(size: 12)).foregroundStyle(TR.fix)
                         }
                     }
                     .padding(.horizontal, 14).frame(height: 38)

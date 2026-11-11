@@ -55,6 +55,15 @@ enum CoachPalette {
     }
 }
 
+/// What the keys row says. `copy`: in an app where writing back went wrong, Tab copies the fix
+/// instead. `readOnly`: keys cannot be taken (no key tap, or a password field holds Secure Event
+/// Input), so no key hints at all and the card leaves by itself.
+enum CoachCardKeys: Equatable {
+    case normal
+    case copy
+    case readOnly
+}
+
 /// Where the tail sits: on top when the card is under the word, at the bottom when above it.
 struct CoachTailPlacement: Equatable {
     var pointsUp: Bool
@@ -64,6 +73,7 @@ struct CoachTailPlacement: Equatable {
 struct CoachCardView: View {
     let content: CoachCardContent
     let tail: CoachTailPlacement?
+    var keys: CoachCardKeys = .normal
     var onSpeak: (String) -> Void = { _ in }
 
     @Environment(\.colorScheme) private var scheme
@@ -93,7 +103,7 @@ struct CoachCardView: View {
             default:
                 VStack(alignment: .leading, spacing: 8) {
                     main
-                    keysRow
+                    if keys != .readOnly { keysRow }
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 12)
@@ -174,14 +184,14 @@ struct CoachCardView: View {
 
     private var keysRow: some View {
         HStack(spacing: 6) {
-            if content.acceptText != nil {
+            if let accept = content.acceptText {
                 KeyCap(label: "Tab")
-                Text(content.acceptLabel).lineLimit(1)
+                Text(keys == .copy ? "复制 \(accept)" : content.acceptLabel).lineLimit(1)
                 Spacer().frame(width: 6)
             }
             KeyCap(label: "Esc")
             Text(content.acceptText == nil ? "关掉" : "不改")
-            if case .translate = content {
+            if case .translate = content, keys == .normal {
                 Spacer(minLength: 12)
                 Text("记进生词本").foregroundStyle(.tertiary)
             }
@@ -202,14 +212,14 @@ struct CoachCardView: View {
         Text(text).font(.system(size: 18, weight: .semibold)).foregroundStyle(CoachPalette.fix(scheme))
     }
 
-    /// The corrected sentence with each changed piece tinted green.
+    /// The corrected sentence with each changed piece tinted green: whole words only, found in the
+    /// order of the changes, so a change `a` never lights up the a inside `have`.
     private func highlighted(_ check: CoachSentenceCheck) -> AttributedString {
         var text = AttributedString(check.corrected)
-        for change in check.changes where !change.to.isEmpty {
-            if let range = text.range(of: change.to) {
-                text[range].foregroundColor = CoachPalette.fix(scheme)
-                text[range].backgroundColor = CoachPalette.fixSoft(scheme)
-            }
+        for found in CoachText.orderedWordRanges(of: check.changes.map(\.to), in: check.corrected) {
+            guard let found, let range = Range(found, in: text) else { continue }
+            text[range].foregroundColor = CoachPalette.fix(scheme)
+            text[range].backgroundColor = CoachPalette.fixSoft(scheme)
         }
         return text
     }

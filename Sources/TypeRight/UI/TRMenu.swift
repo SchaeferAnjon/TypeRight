@@ -100,7 +100,7 @@ struct TRMenuHeader: View {
         let words = notebook.today.filter { $0.kind == .word }.count
         VStack(alignment: .leading, spacing: 6) {
             Text("今天改了 \(today.fixes) 处").font(.system(size: 14, weight: .semibold))
-            Text(subtitle(today, words: words)).font(.system(size: 11.5)).foregroundStyle(.secondary)
+            Text(subtitle(today, words: words)).font(.system(size: 12)).foregroundStyle(.secondary)
             HStack(alignment: .bottom, spacing: 3) {
                 let peak = max(days.map(\.sentences).max() ?? 0, 1)
                 ForEach(days, id: \.day) { d in

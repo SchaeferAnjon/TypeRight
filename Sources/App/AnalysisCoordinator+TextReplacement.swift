@@ -556,7 +556,7 @@ extension AnalysisCoordinator {
             statistics.recordSuggestionApplied(category: error.category)
             invalidateCacheAfterReplacement(at: correctedStart ..< correctedEnd)
 
-            var newPosition = CFRange(location: correctedStart + suggestion.count, length: 0)
+            var newPosition = CFRange(location: Self.caretAfterReplacement(at: utf16Location, with: suggestion), length: 0)
             if let newRangeValue = AXValueCreate(.cfRange, &newPosition) {
                 _ = AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, newRangeValue)
             }
@@ -568,6 +568,13 @@ extension AnalysisCoordinator {
             Logger.debug("AX API replacement failed (\(replaceError.rawValue)), trying keyboard fallback", category: Logger.analysis)
             await applyTextReplacementViaKeyboardAsync(for: error, with: suggestion, element: element)
         }
+    }
+
+    /// The caret right after a replacement written at `utf16Location`. AX selection ranges count
+    /// UTF-16 units, so the suggestion is measured in UTF-16 too (an emoji before it or CJK in it
+    /// would otherwise put the caret inside the new word).
+    nonisolated static func caretAfterReplacement(at utf16Location: Int, with suggestion: String) -> Int {
+        utf16Location + suggestion.utf16.count
     }
 
     /// Apply text replacement for a style suggestion

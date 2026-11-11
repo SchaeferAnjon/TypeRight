@@ -66,14 +66,16 @@ final class TRMainWindowController: ObservableObject {
 /// A menu bar app shows its windows by turning into a regular app while one is open.
 @MainActor
 enum TRAppActivation {
-    private static var observers: [NSObjectProtocol] = []
+    /// One close observer per window (windows are kept and shown again, not rebuilt).
+    private static var observers: [ObjectIdentifier: NSObjectProtocol] = [:]
 
     static func bringForward(_ window: NSWindow?) {
         guard let window else { return }
         NSApp.setActivationPolicy(.regular)
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        let token = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { _ in
+        guard observers[ObjectIdentifier(window)] == nil else { return }
+        observers[ObjectIdentifier(window)] = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { _ in
             MainActor.assumeIsolated {
                 // Back to menu-bar only once no titled window of ours is left on screen.
                 DispatchQueue.main.async {
@@ -82,7 +84,6 @@ enum TRAppActivation {
                 }
             }
         }
-        observers.append(token)
     }
 }
 
@@ -177,7 +178,7 @@ struct TRStatusCard: View {
                 Circle().fill(preferences.isEnabled ? TR.ok : TR.warn).frame(width: 7, height: 7)
                 Text(preferences.isEnabled ? "正在帮你看" : "已暂停").font(.system(size: 12, weight: .medium)).foregroundStyle(TR.text)
             }
-            Text(aiLine).font(.system(size: 11.5)).foregroundStyle(TR.text2).fixedSize(horizontal: false, vertical: true)
+            Text(aiLine).font(.system(size: 12)).foregroundStyle(TR.text2).fixedSize(horizontal: false, vertical: true)
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)

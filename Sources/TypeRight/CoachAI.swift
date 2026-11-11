@@ -95,18 +95,6 @@ enum CoachProvider: String, CaseIterable, Identifiable {
             return base.hasSuffix("/chat/completions") ? base : base + "/chat/completions"
         }
     }
-
-    /// Providers whose fast model thinks unless told not to.
-    var disablesThinking: Bool { [.deepseek, .zhipu, .doubao].contains(self) }
-
-    /// Providers that cannot turn thinking off take the lowest effort instead.
-    var reasoningEffort: String? {
-        switch self {
-        case .openai: "low"
-        case .gemini: "minimal"
-        default: nil
-        }
-    }
 }
 
 // MARK: - Settings
@@ -180,52 +168,135 @@ enum CoachSettings {
     static var isAIReady: Bool {
         let provider = provider
         if provider == .custom, URL(string: provider.endpoint)?.host == nil { return false }
-        return !(CoachKeychain.key(for: provider) ?? "").isEmpty && !model(for: provider).isEmpty
+        return CoachKeyStore.shared.hasKey(provider) && !model(for: provider).isEmpty
     }
 }
 
 // MARK: - Keychain
 
+/// What reading one keychain item gave.
+enum CoachKeyRead: Equatable {
+    case found(String)
+    case missing
+    /// The keychain could not be read (locked, access refused …): nothing is known about the item.
+    case failed(OSStatus)
+}
+
 enum CoachKeychain {
     private static var service: String { Bundle.main.bundleIdentifier ?? "com.typeright.app" }
 
-    static func key(for provider: CoachProvider) -> String? {
-        string(account: "\(provider.rawValue)_api_key")
+    private static func base(_ account: String) -> [String: Any] {
+        [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service, kSecAttrAccount as String: account]
     }
 
-    @discardableResult
-    static func setKey(_ key: String, for provider: CoachProvider) -> Bool {
-        setString(key, account: "\(provider.rawValue)_api_key")
+    static func read(account: String) -> CoachKeyRead {
+        var query = base(account)
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var item: CFTypeRef?
+        return readResult(status: SecItemCopyMatching(query as CFDictionary, &item), data: item as? Data)
+    }
+
+    /// Keeps "there is none" apart from "it could not be read", so a failed read never empties the field.
+    static func readResult(status: OSStatus, data: Data?) -> CoachKeyRead {
+        switch status {
+        case errSecSuccess:
+            guard let data, let text = String(data: data, encoding: .utf8) else { return .failed(errSecDecode) }
+            return .found(text)
+        case errSecItemNotFound:
+            return .missing
+        default:
+            return .failed(status)
+        }
     }
 
     static func string(account: String) -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-              let data = item as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
+        if case let .found(text) = read(account: account) { return text }
+        return nil
     }
 
-    /// Replaces the item; an empty value only deletes it.
+    /// Replaces the item's value in place; an empty value deletes it. False when the keychain refused.
     @discardableResult
     static func setString(_ value: String, account: String) -> Bool {
-        let base: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-        ]
-        SecItemDelete(base as CFDictionary)
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return true }
-        var add = base
-        add[kSecValueData as String] = Data(trimmed.utf8)
-        return SecItemAdd(add as CFDictionary, nil) == errSecSuccess
+        guard !trimmed.isEmpty else {
+            let status = SecItemDelete(base(account) as CFDictionary)
+            return status == errSecSuccess || status == errSecItemNotFound
+        }
+        let data = Data(trimmed.utf8)
+        let updated = SecItemUpdate(base(account) as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+        if updated == errSecSuccess { return true }
+        guard updated == errSecItemNotFound else {
+            Logger.warning("TypeRight: keychain update failed (\(updated))", category: Logger.general)
+            return false
+        }
+        var add = base(account)
+        add[kSecValueData as String] = data
+        let added = SecItemAdd(add as CFDictionary, nil)
+        if added != errSecSuccess { Logger.warning("TypeRight: keychain add failed (\(added))", category: Logger.general) }
+        return added == errSecSuccess
+    }
+}
+
+/// The providers' keys. Whether each provider has one is kept in memory and updated on every save,
+/// so pauses and the provider list never wait on the keychain. A key the provider turned down
+/// (HTTP 401 / 403) stays marked until a new one is saved; the AI cards stop until then.
+final class CoachKeyStore: @unchecked Sendable {
+    static let shared = CoachKeyStore(read: { CoachKeychain.read(account: $0) },
+                                      write: { CoachKeychain.setString($0, account: $1) })
+
+    private let readItem: (String) -> CoachKeyRead
+    private let writeItem: (String, String) -> Bool
+    private let lock = NSLock()
+    private var known: [CoachProvider: Bool] = [:]
+    private var rejected: Set<CoachProvider> = []
+
+    init(read: @escaping (String) -> CoachKeyRead, write: @escaping (_ value: String, _ account: String) -> Bool) {
+        readItem = read
+        writeItem = write
+    }
+
+    private static func account(_ provider: CoachProvider) -> String { "\(provider.rawValue)_api_key" }
+
+    /// Reads the key from the keychain (the request and the settings page need the value itself).
+    func key(for provider: CoachProvider) -> CoachKeyRead {
+        let result = readItem(Self.account(provider))
+        lock.withLock {
+            switch result {
+            case let .found(text): known[provider] = !text.isEmpty
+            case .missing: known[provider] = false
+            case .failed: break
+            }
+        }
+        if case let .failed(status) = result {
+            Logger.warning("TypeRight: could not read the \(provider.rawValue) key from the keychain (\(status))", category: Logger.general)
+        }
+        return result
+    }
+
+    func hasKey(_ provider: CoachProvider) -> Bool {
+        if let cached = lock.withLock({ known[provider] }) { return cached }
+        if case let .found(text) = key(for: provider) { return !text.isEmpty }
+        return false
+    }
+
+    /// Saves a key (empty deletes it). False when the keychain refused; the cache then asks again next time.
+    @discardableResult
+    func save(_ key: String, for provider: CoachProvider) -> Bool {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        let saved = writeItem(trimmed, Self.account(provider))
+        lock.withLock {
+            known[provider] = saved ? !trimmed.isEmpty : nil
+            if saved { rejected.remove(provider) }
+        }
+        return saved
+    }
+
+    func isRejected(_ provider: CoachProvider) -> Bool { lock.withLock { rejected.contains(provider) } }
+
+    func markRejected(_ provider: CoachProvider) {
+        _ = lock.withLock { rejected.insert(provider) }
+        Logger.warning("TypeRight: \(provider.rawValue) turned the key down; AI cards stop until a new key is saved", category: Logger.llm)
     }
 }
 
@@ -300,18 +371,47 @@ struct CoachSentenceCheck: Decodable, Equatable {
 
 enum CoachAIError: LocalizedError {
     case notConfigured
-    case http(Int, String)
+    /// The provider answered with this HTTP status; what it wrote goes to the log only.
+    case http(Int)
+    case timedOut
+    case offline
     case badResponse
     /// Through our backend: the trial or membership cannot be used now, or the backend could not be reached.
     /// `MemberError.kind` says which (used up, today's limit, offline, device token …).
     case member(MemberError)
 
+    /// The provider turned the key down.
+    var keyRejected: Bool {
+        if case let .http(code) = self { return code == 401 || code == 403 }
+        return false
+    }
+
     var errorDescription: String? {
         switch self {
-        case .notConfigured: "还没选 AI 或没填 Key"
-        case let .http(code, body): "AI 服务返回 \(code)：\(body.prefix(160))"
-        case .badResponse: "AI 返回的内容读不懂"
+        case .notConfigured: "还没选 AI 或没填 Key。"
+        case let .http(code):
+            switch code {
+            case 401, 403: "AI 的 Key 不对或已经失效，去设置 › AI 服务商换一个。"
+            case 402: "AI 账户的余额不够了，充值后再用。"
+            case 429: "AI 服务商限流了，过一会儿再试。"
+            case 500 ... 599: "AI 服务商那边出错了（\(code)），过一会儿再试。"
+            default: "AI 服务商没接受这次请求（\(code)）。"
+            }
+        case .timedOut: "AI 超过 15 秒没回，这次先跳过。"
+        case .offline: "连不上网，AI 这次没回。拼写照样在本机查。"
+        case .badResponse: "AI 返回的内容读不懂。"
         case let .member(error): MemberText.detail(error)
+        }
+    }
+
+    /// No answer from the provider: timeout and no network get their own words, a cancelled request stays a cancellation.
+    static func from(_ error: URLError) -> Error {
+        switch error.code {
+        case .timedOut: CoachAIError.timedOut
+        case .notConnectedToInternet, .networkConnectionLost, .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed,
+             .internationalRoamingOff, .dataNotAllowed: CoachAIError.offline
+        case .cancelled: CancellationError()
+        default: error
         }
     }
 }
@@ -326,7 +426,9 @@ enum CoachAI {
     }
 
     /// The English for `fragment` (Chinese or pinyin) as it sits in `sentence`.
-    static func translate(fragment: String, in sentence: String, via route: CoachAIRoute) async throws -> CoachTranslation {
+    static func translate(fragment: String, in sentence: String, via route: CoachAIRoute,
+                          keys: CoachKeyStore = .shared, send: @escaping Send = Self.urlSession) async throws -> CoachTranslation
+    {
         let marked = sentence.replacingOccurrences(of: fragment, with: "⟦\(fragment)⟧", options: [], range: sentence.range(of: fragment))
         let prompt = """
         Task: translate. In the sentence below, the part inside ⟦ ⟧ is Chinese or pinyin the user could not say in English. \
@@ -334,14 +436,16 @@ enum CoachAI {
         JSON: {"english": "...", "ipa": "IPA of the English words, \(CoachSettings.accent == "uk" ? "British" : "US"), with slashes", "note": "when to use it vs. close alternatives, one sentence"}
         Sentence: \(marked)
         """
-        let data = try await complete(prompt, maxTokens: 300, via: route)
+        let data = try await complete(prompt, maxTokens: 300, via: route, keys: keys, send: send)
         guard let result = try? JSONDecoder().decode(CoachTranslation.self, from: data),
               !result.english.trimmingCharacters(in: .whitespaces).isEmpty else { throw CoachAIError.badResponse }
         return result
     }
 
     /// Grammar, spelling and clearly unnatural wording in one finished sentence.
-    static func check(sentence: String, mayBeUnfinished: Bool = false, via route: CoachAIRoute) async throws -> CoachSentenceCheck {
+    static func check(sentence: String, mayBeUnfinished: Bool = false, via route: CoachAIRoute,
+                      keys: CoachKeyStore = .shared, send: @escaping Send = Self.urlSession) async throws -> CoachSentenceCheck
+    {
         let unfinishedRule = mayBeUnfinished
             ? "The user may still be typing: never add words to complete it and do not add final punctuation. "
             : ""
@@ -355,7 +459,7 @@ enum CoachAI {
         "type": "one of spelling, article, tense, plural, preposition, chinglish, agreement, capitalization, word-choice, punctuation, other"}]}
         Sentence: \(sentence)
         """
-        let data = try await complete(prompt, maxTokens: 500, via: route)
+        let data = try await complete(prompt, maxTokens: 500, via: route, keys: keys, send: send)
         guard let result = try? JSONDecoder().decode(CoachSentenceCheck.self, from: data) else { throw CoachAIError.badResponse }
         return result
     }
@@ -363,12 +467,18 @@ enum CoachAI {
     /// Seconds one request may take; a card that comes later than this is no use to someone typing.
     static let requestTimeout: TimeInterval = 15
 
-    /// Sends one prompt and returns the JSON the model wrote.
-    static func complete(_ prompt: String, maxTokens: Int, via route: CoachAIRoute) async throws -> Data {
+    typealias Send = @Sendable (URLRequest) async throws -> (Data, URLResponse)
+    static let urlSession: Send = { try await URLSession.shared.data(for: $0) }
+
+    /// Sends one prompt and returns the JSON the model wrote. A 401 or 403 from the provider marks
+    /// the key as turned down (`CoachKeyStore`), which stops the AI cards until a new key is saved.
+    static func complete(_ prompt: String, maxTokens: Int, via route: CoachAIRoute,
+                         keys: CoachKeyStore = .shared, send: @escaping Send = Self.urlSession) async throws -> Data
+    {
         let body = try JSONSerialization.data(withJSONObject: requestBody(prompt, maxTokens: maxTokens, via: route))
         switch route {
         case let .own(provider):
-            guard let key = CoachKeychain.key(for: provider), !key.isEmpty,
+            guard case let .found(key) = keys.key(for: provider), !key.isEmpty,
                   let url = URL(string: provider.endpoint), url.host != nil else { throw CoachAIError.notConfigured }
             var request = URLRequest(url: url, timeoutInterval: requestTimeout)
             request.httpMethod = "POST"
@@ -376,9 +486,20 @@ enum CoachAI {
             request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
             request.httpBody = body
 
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let data: Data, response: URLResponse
+            do {
+                (data, response) = try await send(request)
+            } catch let error as URLError {
+                Logger.warning("TypeRight: \(provider.rawValue) gave no answer: URLError \(error.code.rawValue)", category: Logger.llm)
+                throw CoachAIError.from(error)
+            }
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-            guard status == 200 else { throw CoachAIError.http(status, String(data: data, encoding: .utf8) ?? "") }
+            guard status == 200 else {
+                Logger.warning("TypeRight: \(provider.rawValue) answered HTTP \(status): \(String(decoding: data.prefix(300), as: UTF8.self))", category: Logger.llm)
+                let error = CoachAIError.http(status)
+                if error.keyRejected { keys.markRejected(provider) }
+                throw error
+            }
             return try content(of: data)
         case let .member(use):
             do {
@@ -389,23 +510,77 @@ enum CoachAI {
         }
     }
 
+    /// Output room for the thinking a model cannot turn off: it counts toward the output cap.
+    static let thinkingRoom = 1500
+
     /// The chat/completions body. Through our backend the model and thinking are the backend's choice
     /// (deepseek-flash, thinking off), so only the prompt, the output cap and JSON mode are sent.
-    static func requestBody(_ prompt: String, maxTokens: Int, via route: CoachAIRoute) -> [String: Any] {
+    /// With an own key each provider gets what its documentation accepts (checked 2026-11):
+    /// thinking off where it can be turned off, no `temperature` where reasoning models reject or
+    /// ignore it, `max_completion_tokens` where `max_tokens` is deprecated, and no JSON mode where
+    /// it is not supported (Claude answers 400 to `json_object`; Gemini does not document it).
+    static func requestBody(_ prompt: String, maxTokens: Int, via route: CoachAIRoute, model: String? = nil) -> [String: Any] {
         var body: [String: Any] = [
             "model": MemberAPI.model,
             "messages": [
                 ["role": "system", "content": systemPrompt()],
                 ["role": "user", "content": prompt],
             ],
-            "temperature": 0.2,
-            "max_tokens": maxTokens,
-            "response_format": ["type": "json_object"],
         ]
-        if case let .own(provider) = route {
-            body["model"] = CoachSettings.model(for: provider)
-            if provider.disablesThinking { body["thinking"] = ["type": "disabled"] }
-            if let effort = provider.reasoningEffort { body["reasoning_effort"] = effort }
+        let json = ["type": "json_object"]
+        guard case let .own(provider) = route else {
+            body["temperature"] = 0.2
+            body["max_tokens"] = maxTokens
+            body["response_format"] = json
+            return body
+        }
+        let model = model ?? CoachSettings.model(for: provider)
+        body["model"] = model
+        switch provider {
+        case .deepseek, .doubao:
+            body["temperature"] = 0.2
+            body["max_tokens"] = maxTokens
+            body["response_format"] = json
+            body["thinking"] = ["type": "disabled"]
+        case .zhipu:
+            body["temperature"] = 0.2
+            body["response_format"] = json
+            if model.lowercased().hasPrefix("glm-5.3") {
+                // GLM-5.3 and its flash model always think.
+                body["max_tokens"] = maxTokens + thinkingRoom
+            } else {
+                body["max_tokens"] = maxTokens
+                body["thinking"] = ["type": "disabled"]
+            }
+        case .qwen:
+            body["temperature"] = 0.2
+            body["max_tokens"] = maxTokens
+            body["response_format"] = json
+            body["enable_thinking"] = false
+        case .kimi:
+            // K3 always thinks, at the most effort unless told otherwise; its temperature is fixed.
+            body["max_completion_tokens"] = maxTokens + thinkingRoom
+            body["reasoning_effort"] = "low"
+            body["response_format"] = json
+        case .openai:
+            body["max_completion_tokens"] = maxTokens + thinkingRoom
+            body["reasoning_effort"] = "low"
+            body["response_format"] = json
+        case .gemini:
+            // Gemini 3 cannot stop thinking; minimal is its lowest level.
+            body["max_tokens"] = maxTokens + thinkingRoom
+            body["reasoning_effort"] = "minimal"
+        case .claude:
+            // Claude 5 models think by default; the compatibility layer documents no way to turn it off.
+            body["max_tokens"] = maxTokens + thinkingRoom
+        case .openrouter:
+            body["max_tokens"] = maxTokens + thinkingRoom
+            body["reasoning"] = ["effort": "low"]
+            body["response_format"] = json
+        case .custom:
+            body["temperature"] = 0.2
+            body["max_tokens"] = maxTokens
+            body["response_format"] = json
         }
         return body
     }

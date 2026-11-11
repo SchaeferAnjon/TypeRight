@@ -7,6 +7,7 @@
 //  A point counts as learned once the user writes it right three times without help.
 //
 
+import AppKit
 import Combine
 import Foundation
 
@@ -70,6 +71,34 @@ struct NotebookEntry: Codable, Identifiable, Equatable {
     var mastered = false
 }
 
+extension NotebookEntry {
+    private enum CodingKeys: String, CodingKey {
+        case id, kind, category, from, to, why, ipa, context, app, date, times, correctUses, mastered
+    }
+
+    /// Fields added later or missing get defaults and an unknown kind of mistake becomes "other",
+    /// so a notebook written by another version still opens.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        func value<T: Decodable>(_ key: CodingKeys, _ fallback: T) -> T {
+            ((try? c.decodeIfPresent(T.self, forKey: key)) ?? nil) ?? fallback
+        }
+        id = value(.id, UUID())
+        kind = Kind(rawValue: value(.kind, "")) ?? .mistake
+        category = MistakeCategory(rawValue: value(.category, "")) ?? .other
+        from = value(.from, "")
+        to = value(.to, "")
+        why = value(.why, "")
+        ipa = value(.ipa, "")
+        context = value(.context, "")
+        app = value(.app, "")
+        date = value(.date, .distantPast)
+        times = value(.times, 1)
+        correctUses = value(.correctUses, 0)
+        mastered = value(.mastered, false)
+    }
+}
+
 struct DayStat: Codable, Equatable {
     var day: String
     /// English sentences checked.
@@ -78,6 +107,20 @@ struct DayStat: Codable, Equatable {
     var clean = 0
     /// Fixes taken with Tab.
     var fixes = 0
+
+    init(day: String) {
+        self.day = day
+    }
+
+    private enum CodingKeys: String, CodingKey { case day, sentences, clean, fixes }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        day = (try? c.decodeIfPresent(String.self, forKey: .day)) ?? ""
+        sentences = ((try? c.decodeIfPresent(Int.self, forKey: .sentences)) ?? nil) ?? 0
+        clean = ((try? c.decodeIfPresent(Int.self, forKey: .clean)) ?? nil) ?? 0
+        fixes = ((try? c.decodeIfPresent(Int.self, forKey: .fixes)) ?? nil) ?? 0
+    }
 }
 
 @MainActor
@@ -92,21 +135,50 @@ final class CoachNotebook: ObservableObject {
     private struct Stored: Codable {
         var entries: [NotebookEntry]
         var days: [DayStat]
+
+        init(entries: [NotebookEntry], days: [DayStat]) {
+            self.entries = entries
+            self.days = days
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            entries = try c.decodeIfPresent([NotebookEntry].self, forKey: .entries) ?? []
+            days = try c.decodeIfPresent([DayStat].self, forKey: .days) ?? []
+        }
     }
 
-    private let fileURL: URL
-    private var recentCorrectSentences = Set<String>()
+    let fileURL: URL
+    /// Beyond this many entries the oldest go, learned ones first.
+    let maxEntries: Int
+    /// Off when an unreadable file could not be moved aside: nothing is written over it this run.
+    private(set) var canWrite = true
+    private var recentCorrectSentences = CappedSet<String>(limit: 500)
+    /// Writes happen on this queue, at most one per `saveDelay`, with the latest state.
+    private let writer = DispatchQueue(label: "TypeRight.notebook", qos: .utility)
+    private var saveScheduled = false
+    static let saveDelay: TimeInterval = 0.5
+    private var quitObserver: NSObjectProtocol?
 
-    init(fileURL: URL? = nil) {
+    init(fileURL: URL? = nil, maxEntries: Int = 5000) {
+        self.maxEntries = maxEntries
         if let fileURL {
             self.fileURL = fileURL
         } else {
-            let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-                .appendingPathComponent(Bundle.main.bundleIdentifier ?? "com.typeright.app", isDirectory: true)
-            try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+            let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+                ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support", isDirectory: true)
+            let base = support.appendingPathComponent(Bundle.main.bundleIdentifier ?? "com.typeright.app", isDirectory: true)
+            do {
+                try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+            } catch {
+                Logger.error("TypeRight: could not create \(base.path): \(error.localizedDescription)", category: Logger.general)
+            }
             self.fileURL = base.appendingPathComponent("notebook.json")
         }
         load()
+        quitObserver = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.flush() }
+        }
     }
 
     // MARK: Recording
@@ -147,15 +219,45 @@ final class CoachNotebook: ObservableObject {
         guard !recentCorrectSentences.contains(key) else { return }
         recentCorrectSentences.insert(key)
         var changed = false
-        for i in entries.indices where !entries[i].mastered && entries[i].kind == .mistake {
-            let entry = entries[i]
-            guard !entry.to.isEmpty, Self.contains(sentence, word: entry.to),
-                  entry.from.isEmpty || !Self.contains(sentence, word: entry.from) else { continue }
+        for i in entries.indices where !entries[i].mastered && Self.usesCorrectly(entries[i], in: sentence) {
             entries[i].correctUses += 1
             if entries[i].correctUses >= Self.usesToMaster { entries[i].mastered = true }
             changed = true
         }
         if changed { save() }
+    }
+
+    /// Whether `sentence` uses this point the right way.
+    /// - A word from the word book counts when the user writes it.
+    /// - A capitalization fix (i → I) is compared letter case and all.
+    /// - An added word (from is empty) counts only between the same neighbours as in the fixed sentence;
+    ///   without a neighbour there is nothing to tell a right use from a chance one, so it never counts.
+    /// - Anything else counts when the fix is there and the mistake is not.
+    nonisolated static func usesCorrectly(_ entry: NotebookEntry, in sentence: String) -> Bool {
+        guard entry.to.contains(where: { $0.isLetter }) else { return false }
+        switch entry.kind {
+        case .word:
+            return contains(sentence, word: entry.to)
+        case .mistake:
+            if entry.from.isEmpty {
+                guard let phrase = insertionPhrase(entry.to, in: entry.context) else { return false }
+                return contains(sentence, word: phrase)
+            }
+            if entry.from.lowercased() == entry.to.lowercased() {
+                return contains(sentence, word: entry.to, caseSensitive: true)
+                    && !contains(sentence, word: entry.from, caseSensitive: true)
+            }
+            return contains(sentence, word: entry.to) && !contains(sentence, word: entry.from)
+        }
+    }
+
+    /// The added words with the word before and the word after them in `context`, e.g. "to the store".
+    nonisolated static func insertionPhrase(_ added: String, in context: String) -> String? {
+        guard let found = CoachText.wordRange(of: added, in: context) else { return nil }
+        let before = context[..<found.lowerBound].split(whereSeparator: { !$0.isLetter && !$0.isNumber && $0 != "'" }).last
+        let after = context[found.upperBound...].split(whereSeparator: { !$0.isLetter && !$0.isNumber && $0 != "'" }).first
+        guard before != nil || after != nil else { return nil }
+        return ([before.map(String.init), added, after.map(String.init)] as [String?]).compactMap { $0 }.joined(separator: " ")
     }
 
     func setMastered(_ id: UUID, _ mastered: Bool) {
@@ -217,6 +319,12 @@ final class CoachNotebook: ObservableObject {
         } else {
             entries.append(entry)
         }
+        if entries.count > maxEntries {
+            let dropped = entries.sorted { ($0.mastered ? 0 : 1, $0.date) < ($1.mastered ? 0 : 1, $1.date) }
+                .prefix(entries.count - maxEntries).map(\.id)
+            let gone = Set(dropped)
+            entries.removeAll { gone.contains($0.id) }
+        }
     }
 
     private func bumpToday(_ change: (inout DayStat) -> Void) {
@@ -236,31 +344,64 @@ final class CoachNotebook: ObservableObject {
         return String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
     }
 
-    nonisolated static func contains(_ sentence: String, word: String) -> Bool {
+    nonisolated static func contains(_ sentence: String, word: String, caseSensitive: Bool = false) -> Bool {
         let pattern = "(?<![A-Za-z])" + NSRegularExpression.escapedPattern(for: word) + "(?![A-Za-z])"
-        return sentence.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
+        let options: String.CompareOptions = caseSensitive ? [.regularExpression] : [.regularExpression, .caseInsensitive]
+        return sentence.range(of: pattern, options: options) != nil
     }
 
+    /// A file that cannot be read is moved aside (same folder, name with the time) and kept;
+    /// new records then go into a new file. If it cannot be moved, nothing is written this run.
     private func load() {
-        guard let data = try? Data(contentsOf: fileURL) else { return }
+        guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        guard let stored = try? decoder.decode(Stored.self, from: data) else {
-            Logger.warning("TypeRight: notebook file unreadable, starting empty", category: Logger.general)
-            return
+        do {
+            let stored = try decoder.decode(Stored.self, from: Data(contentsOf: fileURL))
+            entries = stored.entries
+            days = stored.days
+        } catch {
+            Logger.error("TypeRight: notebook file unreadable: \(error)", category: Logger.general)
+            let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+            let aside = fileURL.deletingLastPathComponent()
+                .appendingPathComponent("\(fileURL.deletingPathExtension().lastPathComponent)-unreadable-\(stamp).json")
+            do {
+                try FileManager.default.moveItem(at: fileURL, to: aside)
+                Logger.warning("TypeRight: unreadable notebook kept as \(aside.lastPathComponent), starting a new one", category: Logger.general)
+            } catch {
+                canWrite = false
+                Logger.error("TypeRight: could not move the unreadable notebook aside (\(error.localizedDescription)); not writing this run", category: Logger.general)
+            }
         }
-        entries = stored.entries
-        days = stored.days
     }
 
     private func save() {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        guard let data = try? encoder.encode(Stored(entries: entries, days: days)) else { return }
-        do {
-            try data.write(to: fileURL, options: .atomic)
-        } catch {
-            Logger.error("TypeRight: could not save notebook: \(error.localizedDescription)", category: Logger.general)
+        guard canWrite, !saveScheduled else { return }
+        saveScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.saveDelay) { [weak self] in
+            MainActor.assumeIsolated { self?.writeNow() }
+        }
+    }
+
+    /// Writes what is pending now and waits for it (quitting, tests).
+    func flush() {
+        if saveScheduled { writeNow() }
+        writer.sync {}
+    }
+
+    private func writeNow() {
+        guard saveScheduled else { return }
+        saveScheduled = false
+        let stored = Stored(entries: entries, days: days)
+        let url = fileURL
+        writer.async {
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            do {
+                try encoder.encode(stored).write(to: url, options: .atomic)
+            } catch {
+                Logger.error("TypeRight: could not save notebook: \(error.localizedDescription)", category: Logger.general)
+            }
         }
     }
 }
