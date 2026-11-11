@@ -92,18 +92,10 @@ final class UpdaterViewModel: ObservableObject {
     @Published var lastUpdateCheckDate: Date?
 
     /// Current status of update check
-    @Published var checkStatus: UpdateCheckStatus = .idle {
-        didSet {
-            UserDefaults.standard.set(checkStatus.rawValue, forKey: "TWUpdateCheckStatus")
-        }
-    }
+    @Published var checkStatus: UpdateCheckStatus = .idle
 
-    /// Cached status text for display (updated only when status changes)
-    @Published var statusText: String = "Last checked: Never" {
-        didSet {
-            UserDefaults.standard.set(statusText, forKey: "TWUpdateStatusText")
-        }
-    }
+    /// Status line in 关于; after a restart it says when Sparkle last checked.
+    @Published var statusText: String = "还没检查过"
 
     private let updaterController: SPUStandardUpdaterController
     private let updaterDelegate: UpdaterDelegate
@@ -148,17 +140,7 @@ final class UpdaterViewModel: ObservableObject {
         // Load last update check date from Sparkle's UserDefaults
         lastUpdateCheckDate = updaterController.updater.lastUpdateCheckDate
 
-        // Restore persisted status (survives app restarts and view recreation)
-        if let savedStatusText = UserDefaults.standard.string(forKey: "TWUpdateStatusText") {
-            statusText = savedStatusText
-        } else {
-            statusText = "Last checked: \(formatDate(lastUpdateCheckDate))"
-        }
-        if let savedStatusRaw = UserDefaults.standard.string(forKey: "TWUpdateCheckStatus"),
-           let savedStatus = UpdateCheckStatus(rawValue: savedStatusRaw)
-        {
-            checkStatus = savedStatus
-        }
+        statusText = lastUpdateCheckDate.map { "上次检查：\(formatDate($0))" } ?? "还没检查过"
 
         // Set update check interval to 24 hours
         updaterController.updater.updateCheckInterval = 24 * 60 * 60
@@ -174,14 +156,14 @@ final class UpdaterViewModel: ObservableObject {
             isUpdateCheckInProgress = false
             checkStatus = .success
             lastUpdateCheckDate = date
-            statusText = "Up to date (\(formatDate(date)))"
+            statusText = "已经是最新版（\(formatDate(date))）"
         }
 
         delegate.onError = { [weak self] timestamp in
             guard let self else { return }
             isUpdateCheckInProgress = false
             checkStatus = .error
-            statusText = "Failed to check (\(timestamp))"
+            statusText = "没检查成（\(timestamp)）"
         }
 
         // Sparkle handles automatic checks every 24h when automaticallyChecksForUpdates is true
@@ -202,7 +184,7 @@ final class UpdaterViewModel: ObservableObject {
         Logger.info("Manual update check triggered", category: Logger.lifecycle)
         isUpdateCheckInProgress = true
         checkStatus = .checking
-        statusText = "Checking..."
+        statusText = "正在检查…"
         updaterController.checkForUpdates(nil)
         // Status will be updated by the delegate callback
     }
@@ -222,17 +204,6 @@ final class UpdaterViewModel: ObservableObject {
         isUpdateCheckInProgress = true
         updaterController.updater.checkForUpdatesInBackground()
         // lastUpdateCheckDate will be updated by the delegate callback
-    }
-
-    /// Format a date for display
-    private func formatDate(_ date: Date?) -> String {
-        guard let date else {
-            return "Never"
-        }
-        let formatter = DateFormatter()
-        formatter.dateStyle = .short
-        formatter.timeStyle = .short
-        return formatter.string(from: date)
     }
 
     /// Format a date for display (non-optional)

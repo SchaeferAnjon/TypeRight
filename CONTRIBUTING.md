@@ -9,7 +9,7 @@ TextWarden is a Swift and Rust macOS grammar checker. Contributions are welcome,
 - Rust 1.95 or later through [rustup](https://rustup.rs/)
 - Intel and Apple Silicon Rust targets
 - Homebrew
-- SwiftFormat, SwiftLint, and Pandoc
+- SwiftFormat and SwiftLint
 
 The shipped app targets macOS 14. macOS 26 and Xcode 26 are required for developing and testing its Apple Foundation Models integration.
 
@@ -18,7 +18,7 @@ Install the command-line dependencies:
 ```bash
 rustup update stable
 rustup target add x86_64-apple-darwin aarch64-apple-darwin
-brew install swiftformat swiftlint pandoc
+brew install swiftformat swiftlint
 ```
 
 Check the toolchain:
@@ -29,7 +29,6 @@ rustc --version
 rustup target list --installed
 swiftformat --version
 swiftlint --version
-pandoc --version
 ```
 
 ## Set Up the Project
@@ -42,7 +41,7 @@ make test
 open TextWarden.xcodeproj
 ```
 
-`make build` compiles the Rust grammar engine for Intel and Apple Silicon, creates a universal static library, generates the Help Book from Markdown, and builds the Swift app. See [BUILD.md](BUILD.md) for individual targets and troubleshooting.
+`make build` compiles the Rust grammar engine for Intel and Apple Silicon, creates a universal static library, and builds the Swift app. See [BUILD.md](BUILD.md) for individual targets and troubleshooting.
 
 Harper is pinned to a [small security patch on top of 3.0.0](https://github.com/PhilipSchmid/harper/commit/ae6acb45fd6cf10708728bb9e82289dea38154df). It upgrades `zip` to a patched 9.x version, validates archive header consistency, and uses the same Burn inference components directly to remove unused vulnerable backends. Grammar rules and model data are unchanged. Return to an official Harper release once it includes these fixes and no longer resolves `zip` below 9.0.5; rerun the grammar tests, archive security regression, and CPU gate before changing the pin.
 
@@ -62,7 +61,7 @@ textwarden/
 │   └── Utilities/          # Shared conversion and readability helpers
 ├── GrammarEngine/          # Rust library and Harper integration
 ├── Tests/                  # Swift unit, integration, contract, and performance tests
-├── Scripts/                # Build, release, reset, and Help Book scripts
+├── Scripts/                # Build, release, and reset scripts
 └── docs/                   # Internal and application-specific documentation
 ```
 

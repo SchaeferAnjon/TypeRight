@@ -75,6 +75,8 @@ final class TRSettingsWindowController: ObservableObject {
 
 struct TRSettingsView: View {
     @ObservedObject var controller: TRSettingsWindowController
+    /// Screenshots put pages with made-up data here; the window shows the real pages.
+    var samplePage: ((TRSettingsPage) -> AnyView?)? = nil
 
     var body: some View {
         HStack(spacing: 0) {
@@ -98,10 +100,11 @@ struct TRSettingsView: View {
                 .padding(.horizontal, 28).frame(height: 52)
                 Rectangle().fill(TR.line).frame(height: 0.5)
                 if controller.page == .advanced {
-                    PreferencesView()
+                    samplePage?(.advanced) ?? AnyView(PreferencesView())
                 } else {
                     ScrollView {
-                        page.padding(.horizontal, 32).padding(.vertical, 24).frame(maxWidth: 720)
+                        (samplePage?(controller.page) ?? AnyView(page))
+                            .padding(.horizontal, 32).padding(.vertical, 24).frame(maxWidth: 720)
                     }
                 }
             }
@@ -184,8 +187,18 @@ struct TRGeneralSettings: View {
 // MARK: - App
 
 struct TRAppSettings: View {
-    @ObservedObject private var preferences = UserPreferences.shared
-    @State private var apps: [(id: String, name: String, icon: NSImage)] = []
+    typealias App = (id: String, name: String, icon: NSImage)
+
+    @ObservedObject private var preferences: UserPreferences
+    @State private var apps: [App] = []
+    /// Screenshots show a fixed list instead of the apps running on this Mac.
+    private let sampleApps: [App]?
+
+    @MainActor
+    init(preferences: UserPreferences? = nil, sampleApps: [App]? = nil) {
+        self.preferences = preferences ?? .shared
+        self.sampleApps = sampleApps
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -228,8 +241,12 @@ struct TRAppSettings: View {
     }
 
     private func loadApps() {
+        if let sampleApps {
+            apps = sampleApps
+            return
+        }
         var seen = Set<String>()
-        var list: [(id: String, name: String, icon: NSImage)] = []
+        var list: [App] = []
         let mine = Bundle.main.bundleIdentifier
         for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
             guard let id = app.bundleIdentifier, id != mine, !seen.contains(id) else { continue }
@@ -249,6 +266,10 @@ struct TRAppSettings: View {
 // MARK: - 快捷键
 
 struct TRKeySettings: View {
+    /// Screenshots use names nobody has set, so they never show the user's own keys.
+    var translate: KeyboardShortcuts.Name = .typeRightTranslate
+    var pause: KeyboardShortcuts.Name = .toggleTextWarden
+
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
             TRGroup(title: "弹框出来时") {
@@ -258,10 +279,10 @@ struct TRKeySettings: View {
             }
             TRGroup(title: "自己选的键") {
                 TRRow(title: "整句翻译", note: "整句都是中文时，按这个键把这句变成英文") {
-                    KeyboardShortcuts.Recorder("", name: .typeRightTranslate)
+                    KeyboardShortcuts.Recorder("", name: translate)
                 }
                 TRRow(title: "暂停 / 继续", note: "所有 App 里暂停或继续弹框", last: true) {
-                    KeyboardShortcuts.Recorder("", name: .toggleTextWarden)
+                    KeyboardShortcuts.Recorder("", name: pause)
                 }
             }
             Text("快捷键要带 ⌘、⌥、⌃ 或 ⇧ 里至少一个。没设的键不会响。")
@@ -284,8 +305,14 @@ struct TRAISettings: View {
     @State private var baseURL = CoachSettings.customBaseURL
     @State private var test: TestState = .idle
     @FocusState private var keyFocused: Bool
+    /// What the 试一下 line shows on open (screenshots show a finished test).
+    private let initialTest: TestState
 
     enum TestState: Equatable { case idle, running, ok(String), failed(String) }
+
+    init(initialTest: TestState = .idle) {
+        self.initialTest = initialTest
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -376,8 +403,8 @@ struct TRAISettings: View {
             readFailed = true
         }
         unsaved = nil
-        model = UserDefaults.standard.string(forKey: "typeright.model.\(provider.rawValue)") ?? ""
-        test = readFailed ? .failed("钥匙串这次没读出来，原来的 Key 没有动。") : .idle
+        model = CoachSettings.typedModel(for: provider)
+        test = readFailed ? .failed("钥匙串这次没读出来，原来的 Key 没有动。") : initialTest
     }
 
     private func runTest() {
@@ -431,6 +458,9 @@ struct TRProviderList: View {
 // MARK: - 隐私
 
 struct TRPrivacySettings: View {
+    /// Matches UsagePing.Body field by field: id, version, platform, arch, plan, lang, product.
+    static let pingNote = "我们会给前 100 位用户免费额度，所以需要知道有多少人在用。只发这几样：一个这台 Mac 上随机生成的编号、版本号、系统（darwin）、芯片（arm64 或 x64）、用哪种用法（会员、自带 Key 或只用本机）、系统语言和产品名。不含你打的字、Key、名字或邮箱。"
+
     @State private var report = CoachSettings.anonymousReport
     @State private var confirmClear = false
 
@@ -444,7 +474,7 @@ struct TRPrivacySettings: View {
             }
             TRGroup(title: "匿名报到") {
                 TRRow(title: "每天匿名报到一次",
-                      note: "我们会给前 100 位用户免费额度，所以需要知道有多少人在用。只发一个随机编号、版本号、系统版本和界面语言，不含你打的字、Key、名字或邮箱。",
+                      note: TRPrivacySettings.pingNote,
                       last: true) {
                     Toggle("", isOn: $report).toggleStyle(SquareToggleStyle()).labelsHidden()
                         .onChange(of: report) { UsagePing.shared.answer($0) }

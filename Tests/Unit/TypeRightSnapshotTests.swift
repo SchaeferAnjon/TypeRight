@@ -2,18 +2,29 @@
 //  TypeRightSnapshotTests.swift
 //  TypeRight
 //
-//  Draws every TypeRight screen into off-screen windows and saves PNGs, light and dark, so the
-//  interface can be reviewed without putting windows on the user's screen. Runs only when
-//  TYPERIGHT_SNAPSHOT_DIR is set (xcodebuild: TEST_RUNNER_TYPERIGHT_SNAPSHOT_DIR=<folder>).
+//  Draws TypeRight screens into off-screen windows and saves PNGs, so the interface can be
+//  reviewed without putting windows on the user's screen. Runs only when TYPERIGHT_SNAPSHOT_DIR
+//  is set (xcodebuild: TEST_RUNNER_TYPERIGHT_SNAPSHOT_DIR=<folder>).
+//
+//  The test host has the same bundle id as the user's TypeRight, so nothing here reads the
+//  user's settings, keychain or running apps: settings come from a throwaway suite, keys from a
+//  made-up store, app lists and shortcut names are fixed samples.
 //
 
+import KeyboardShortcuts
 import SwiftUI
 @testable import TextWarden
 import XCTest
 
 @MainActor
 final class TypeRightSnapshotTests: XCTestCase {
+    private static let sampleKey = "sk-typeright-sample-0000000000000000"
+
     private var dir: URL!
+    private var suites: [String] = []
+    private var files: [URL] = []
+    private var savedDefaults: UserDefaults?
+    private var savedKeys: CoachKeyStore?
 
     override func setUp() async throws {
         guard let path = ProcessInfo.processInfo.environment["TYPERIGHT_SNAPSHOT_DIR"] else {
@@ -21,7 +32,25 @@ final class TypeRightSnapshotTests: XCTestCase {
         }
         dir = URL(fileURLWithPath: path)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        savedDefaults = CoachSettings.defaults
+        savedKeys = CoachKeyStore.shared
+        CoachSettings.defaults = try suite()
+        CoachSettings.provider = .deepseek
+        useKeys(deepseek: true)
     }
+
+    override func tearDown() async throws {
+        if let savedDefaults { CoachSettings.defaults = savedDefaults }
+        if let savedKeys { CoachKeyStore.shared = savedKeys }
+        for name in suites {
+            UserDefaults(suiteName: name)?.removePersistentDomain(forName: name)
+        }
+        for file in files {
+            try? FileManager.default.removeItem(at: file)
+        }
+    }
+
+    // MARK: Every screen, light and dark
 
     func testDrawScreens() throws {
         let notebook = try sampleNotebook()
@@ -31,12 +60,14 @@ final class TypeRightSnapshotTests: XCTestCase {
             draw(TRMainView(controller: main, notebook: notebook), NSSize(width: 1180, height: 760), "main-\(page.rawValue)")
         }
         let settings = TRSettingsWindowController.shared
+        let pages = try samplePages()
         for page in TRSettingsPage.allCases where page != .advanced {
             settings.page = page
-            draw(TRSettingsView(controller: settings), NSSize(width: 940, height: 680), "settings-\(page.rawValue)")
+            draw(TRSettingsView(controller: settings, samplePage: pages), NSSize(width: 940, height: 680), "settings-\(page.rawValue)")
         }
         for step in TROnboardingStep.allCases {
-            draw(TROnboardingView(start: step, onFinish: {}), NSSize(width: 980, height: 680), "onboarding-\(step.rawValue)-\(step.title)")
+            draw(TROnboardingView(start: step, accessGranted: false, translateKey: unsetName(), onFinish: {}),
+                 NSSize(width: 980, height: 680), "onboarding-\(step.rawValue)-\(step.title)")
         }
         let cards: [(String, CoachCardContent)] = [
             ("spelling", .spelling(wrong: "tomorow", fixes: ["tomorrow", "tomorrows"])),
@@ -56,29 +87,136 @@ final class TypeRightSnapshotTests: XCTestCase {
         draw(TRMenuHeader(notebook: notebook), NSSize(width: 300, height: 104), "menu-header")
     }
 
-    // MARK: Helpers
+    // MARK: What changed in this round (light)
 
-    private func draw(_ view: some View, _ size: NSSize?, _ name: String) {
-        for dark in [false, true] {
-            let host = NSHostingView(rootView: AnyView(view))
-            let fitting = size ?? host.fittingSize
-            host.frame = NSRect(origin: .zero, size: fitting)
-            let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
-            window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
-            window.contentView = host
-            host.layoutSubtreeIfNeeded()
-            RunLoop.current.run(until: Date().addingTimeInterval(0.25))
-            host.layoutSubtreeIfNeeded()
-            guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { continue }
-            host.cacheDisplay(in: host.bounds, to: rep)
-            let file = dir.appendingPathComponent("\(name)-\(dark ? "dark" : "light").png")
-            try? rep.representation(using: .png, properties: [:])?.write(to: file)
+    func testDrawReviewScreens() throws {
+        let settings = TRSettingsWindowController.shared
+        let preferences = try samplePreferences()
+        let vocabulary = try sampleVocabulary()
+        let sample = PreferencesView.Sample(
+            appBundleIDs: ["com.apple.mail", "com.apple.Notes", "com.apple.Safari", "com.apple.TextEdit",
+                           "com.apple.Terminal", "com.apple.keychainaccess", "com.apple.systempreferences"],
+            health: RuntimeHealthSnapshot(state: .active, reason: nil, capabilities: [.textReading, .grammar, .safeReplacement],
+                                          applicationName: "邮件", bundleIdentifier: "com.apple.mail",
+                                          lastSuccessfulCheck: Date(), action: nil),
+            fixAllName: unsetName(),
+            rewriteName: unsetName()
+        )
+        settings.page = .advanced
+        let tabs: [(SettingsTab, CGFloat)] = [(.general, 1000), (.grammar, 2520), (.style, 760), (.applications, 900),
+                                              (.websites, 760), (.diagnostics, 2400), (.about, 1000)]
+        for (tab, height) in tabs {
+            PreferencesWindowController.shared.selectTab(tab)
+            let view = TRSettingsView(controller: settings, samplePage: { page in
+                page == .advanced ? AnyView(PreferencesView(preferences: preferences, vocabulary: vocabulary, sample: sample)) : nil
+            })
+            draw(view, NSSize(width: 940, height: height), "advanced-\(tab.rawValue)-\(tab)", appearances: [false])
+        }
+
+        settings.page = .privacy
+        draw(TRSettingsView(controller: settings), NSSize(width: 940, height: 680), "settings-privacy", appearances: [false])
+
+        let notebook = try sampleNotebook()
+        let rejected = TRMenuState(app: .init(id: "com.apple.mail", name: "邮件", paused: false), allPaused: false,
+                                   ai: .keyRejected(.deepseek), needsAccess: false)
+        draw(MenuReplica(menu: TypeRightMenu.shared.build(state: rejected, notebook: notebook), notebook: notebook),
+             nil, "menu-key-rejected", appearances: [false, true])
+
+        let mainMenu = try XCTUnwrap(NSApp.mainMenu)
+        draw(MenuBarReplica(menu: mainMenu), nil, "menubar-front", appearances: [false])
+
+        draw(SafeTrialPromptView(applicationName: "终端", applicationIcon: NSWorkspace.shared.icon(forFile: "/System/Applications/Utilities/Terminal.app"),
+                                 showsPanelBackground: true, onTry: {}, onKeepPaused: {}).padding(16),
+             nil, "safe-trial-prompt", appearances: [false, true])
+    }
+
+    // MARK: The five pictures in the website's guide (light only)
+
+    func testDrawGuideShots() throws {
+        let settings = TRSettingsWindowController.shared
+        let pages = try samplePages(aiTest: .ok("I have a question."))
+
+        useKeys(deepseek: false)
+        drawGuide(TROnboardingView(start: .access, accessGranted: false, translateKey: unsetName(), onFinish: {}),
+                  NSSize(width: 980, height: 680), "guide-access")
+        useKeys(deepseek: true)
+
+        let notebook = try sampleNotebook()
+        let state = TRMenuState(app: .init(id: "com.apple.mail", name: "邮件", paused: false), allPaused: false,
+                                ai: .ready(.deepseek), needsAccess: false)
+        drawGuide(MenuReplica(menu: TypeRightMenu.shared.build(state: state, notebook: notebook), notebook: notebook, highlight: "设置…"),
+                  nil, "guide-menu")
+
+        for (page, name, height) in [(TRSettingsPage.ai, "guide-ai-provider", 712.0), (.keys, "guide-shortcuts", 680), (.apps, "guide-apps", 680)] {
+            settings.page = page
+            drawGuide(TRSettingsView(controller: settings, samplePage: pages), NSSize(width: 940, height: height), name)
+        }
+    }
+
+    // MARK: Sample data
+
+    private func suite() throws -> UserDefaults {
+        let name = "TypeRightSnapshots.\(UUID().uuidString)"
+        suites.append(name)
+        return try XCTUnwrap(UserDefaults(suiteName: name))
+    }
+
+    private func useKeys(deepseek: Bool) {
+        CoachKeyStore.shared = CoachKeyStore(read: { account in
+            deepseek && account.hasPrefix(CoachProvider.deepseek.rawValue) ? .found(Self.sampleKey) : .missing
+        }, write: { _, _ in true })
+    }
+
+    /// A shortcut name nobody has set: the recorder shows its empty state, never the user's keys.
+    private func unsetName() -> KeyboardShortcuts.Name {
+        KeyboardShortcuts.Name("typeRightSnapshot.\(UUID().uuidString)")
+    }
+
+    private func samplePreferences() throws -> UserPreferences {
+        let preferences = try UserPreferences(defaults: suite())
+        preferences.disableWebsite("github.com")
+        preferences.disableWebsite("*.google.com")
+        // Shows the style choices under 改写 (this Mac may not have Apple Intelligence).
+        preferences.enableStyleChecking = true
+        return preferences
+    }
+
+    private func sampleVocabulary() throws -> CustomVocabulary {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("typeright-vocabulary-\(UUID().uuidString).json")
+        files.append(url)
+        let vocabulary = CustomVocabulary(fileURL: url)
+        for word in ["Kubernetes", "TypeRight", "Bürgeramt"] {
+            try vocabulary.addWord(word)
+        }
+        return vocabulary
+    }
+
+    /// Settings pages that would otherwise show this Mac's apps or shortcuts.
+    private func samplePages(aiTest: TRAISettings.TestState = .idle) throws -> (TRSettingsPage) -> AnyView? {
+        let preferences = try samplePreferences()
+        let apps: [TRAppSettings.App] = [
+            ("com.apple.mail", "邮件", "/System/Applications/Mail.app"),
+            ("com.apple.Notes", "备忘录", "/System/Applications/Notes.app"),
+            ("com.apple.Safari", "Safari 浏览器", "/Applications/Safari.app"),
+            ("com.apple.TextEdit", "文本编辑", "/System/Applications/TextEdit.app"),
+            ("com.apple.Terminal", "终端", "/System/Applications/Utilities/Terminal.app"),
+        ].map { ($0.0, $0.1, NSWorkspace.shared.icon(forFile: $0.2)) }
+        let translate = unsetName()
+        let pause = unsetName()
+        return { page in
+            switch page {
+            case .apps: AnyView(TRAppSettings(preferences: preferences, sampleApps: apps))
+            case .keys: AnyView(TRKeySettings(translate: translate, pause: pause))
+            case .ai: AnyView(TRAISettings(initialTest: aiTest))
+            default: nil
+            }
         }
     }
 
     /// Two weeks of made-up use, written in the notebook's own file format.
     private func sampleNotebook() throws -> CoachNotebook {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("typeright-sample-\(UUID().uuidString).json")
+        files.append(url)
         let now = Date()
         func ago(_ minutes: Double) -> String { ISO8601DateFormatter().string(from: now.addingTimeInterval(-minutes * 60)) }
         func entry(_ kind: String, _ cat: String, _ from: String, _ to: String, _ why: String, _ ipa: String, _ context: String,
@@ -99,13 +237,143 @@ final class TypeRightSnapshotTests: XCTestCase {
             entry("word", "other", "居留许可", "residence permit", "", "/ˈrezɪdəns ˈpɜːrmɪt/", "My residence permit expires in May.", "邮件", 7000),
         ]
         let calendar = Calendar.current
-        let days: [[String: Any]] = (0 ..< 14).map { offset in
-            let date = calendar.date(byAdding: .day, value: -offset, to: now)!
+        let days: [[String: Any]] = try (0 ..< 14).map { offset in
+            let date = try XCTUnwrap(calendar.date(byAdding: .day, value: -offset, to: now))
             let sentences = [12, 18, 9, 21, 16, 4, 3, 19, 22, 17, 20, 15, 8, 14][offset]
             return ["day": CoachNotebook.dayKey(date), "sentences": sentences, "clean": Int(Double(sentences) * (0.62 + 0.012 * Double(14 - offset))), "fixes": sentences / 4]
         }
         let data = try JSONSerialization.data(withJSONObject: ["entries": entries, "days": days])
         try data.write(to: url)
         return CoachNotebook(fileURL: url)
+    }
+
+    // MARK: Drawing
+
+    private func draw(_ view: some View, _ size: NSSize?, _ name: String, appearances dark: [Bool] = [false, true]) {
+        for dark in dark {
+            render(view, size, dark: dark, to: dir.appendingPathComponent("\(name)-\(dark ? "dark" : "light").png"))
+        }
+    }
+
+    private func drawGuide(_ view: some View, _ size: NSSize?, _ name: String) {
+        render(view, size, dark: false, to: dir.appendingPathComponent("\(name).png"))
+    }
+
+    private func render(_ view: some View, _ size: NSSize?, dark: Bool, to file: URL) {
+        let host = NSHostingView(rootView: AnyView(view))
+        let fitting = size ?? host.fittingSize
+        host.frame = NSRect(origin: .zero, size: fitting)
+        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+        window.contentView = host
+        host.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+        host.layoutSubtreeIfNeeded()
+        guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else {
+            XCTFail("could not draw \(file.lastPathComponent)")
+            return
+        }
+        host.cacheDisplay(in: host.bounds, to: rep)
+        do {
+            try XCTUnwrap(rep.representation(using: .png, properties: [:])).write(to: file)
+        } catch {
+            XCTFail("could not save \(file.lastPathComponent): \(error)")
+        }
+    }
+}
+
+// MARK: - Menus drawn from their real items
+
+/// NSMenu cannot be drawn off-screen, so this lays out the real menu's items (titles, images,
+/// separators, key equivalents, enabled state) the way the system menu does.
+private struct MenuReplica: View {
+    let menu: NSMenu
+    var notebook: CoachNotebook?
+    var highlight: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(menu.items.filter { !$0.isHidden && !$0.isAlternate }.enumerated()), id: \.offset) { _, item in
+                row(item)
+            }
+        }
+        .padding(.vertical, 5)
+        .frame(width: notebook == nil ? nil : 300, alignment: .leading)
+        .fixedSize(horizontal: notebook == nil, vertical: true)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color(nsColor: .windowBackgroundColor)))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.primary.opacity(0.14), lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.18), radius: 12, y: 4)
+        .padding(20)
+    }
+
+    @ViewBuilder private func row(_ item: NSMenuItem) -> some View {
+        if item.isSeparatorItem {
+            Rectangle().fill(Color.primary.opacity(0.1)).frame(height: 1).padding(.horizontal, 12).padding(.vertical, 5)
+        } else if item.view != nil, let notebook {
+            TRMenuHeader(notebook: notebook)
+        } else {
+            let enabled = item.action != nil || item.submenu != nil
+            HStack(spacing: 6) {
+                if let image = item.image {
+                    Image(nsImage: image)
+                }
+                Text(item.title).font(.system(size: 13)).foregroundStyle(enabled ? Color.primary : Color.secondary)
+                Spacer(minLength: 24)
+                if item.submenu != nil {
+                    Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+                } else if !item.keyEquivalent.isEmpty {
+                    Text(keys(item)).font(.system(size: 13)).foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 14)
+            .frame(height: 22)
+            .overlay {
+                if item.title == highlight {
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(TR.fix, lineWidth: 2)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, -1)
+                }
+            }
+        }
+    }
+
+    private func keys(_ item: NSMenuItem) -> String {
+        let mask = item.keyEquivalentModifierMask
+        var text = ""
+        if mask.contains(.control) { text += "⌃" }
+        if mask.contains(.option) { text += "⌥" }
+        if mask.contains(.shift) || item.keyEquivalent != item.keyEquivalent.lowercased() { text += "⇧" }
+        if mask.contains(.command) { text += "⌘" }
+        return text + item.keyEquivalent.uppercased()
+    }
+}
+
+/// The menu bar while a TypeRight window is in front: every top-level menu, opened side by side.
+private struct MenuBarReplica: View {
+    let menu: NSMenu
+
+    var body: some View {
+        let items = menu.items.filter { $0.submenu != nil && !$0.isHidden }
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 18) {
+                Image(systemName: "apple.logo").font(.system(size: 14))
+                ForEach(Array(items.enumerated()), id: \.offset) { index, item in
+                    Text(index == 0 ? "TypeRight" : item.title).font(.system(size: 13, weight: index == 0 ? .bold : .regular))
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 14)
+            .frame(height: 26)
+            .background(Color(nsColor: .windowBackgroundColor).opacity(0.9))
+            HStack(alignment: .top, spacing: 0) {
+                ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                    if let submenu = item.submenu {
+                        MenuReplica(menu: submenu)
+                    }
+                }
+            }
+        }
+        .background(Color(nsColor: .underPageBackgroundColor))
     }
 }

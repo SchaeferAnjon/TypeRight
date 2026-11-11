@@ -150,9 +150,6 @@ enum TimingConstants {
 
     // MARK: - App Lifecycle
 
-    /// Delay before checking startup milestones after menu bar initialization
-    static let startupMilestoneCheckDelay: TimeInterval = 2.0
-
     /// Delay before showing changelog window after app launch
     static let changelogDisplayDelay: TimeInterval = 0.5
 

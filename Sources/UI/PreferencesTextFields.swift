@@ -67,7 +67,7 @@ struct LeftAlignedTextField: NSViewRepresentable {
 /// A native macOS search field wrapper for SwiftUI
 struct SearchField: NSViewRepresentable {
     @Binding var text: String
-    var placeholder: String = "Search..."
+    var placeholder: String = "搜索…"
 
     func makeNSView(context: Context) -> NSSearchField {
         let searchField = NSSearchField()

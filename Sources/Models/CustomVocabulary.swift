@@ -18,7 +18,7 @@ class CustomVocabulary: ObservableObject {
 
     @Published private(set) var words: Set<String> = []
 
-    private init() {
+    private convenience init() {
         // Setup file URL in Application Support
         let baseURL: URL
         if let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
@@ -35,9 +35,12 @@ class CustomVocabulary: ObservableObject {
             withIntermediateDirectories: true
         )
 
-        fileURL = textWardenDir.appendingPathComponent("custom-vocabulary.json")
+        self.init(fileURL: textWardenDir.appendingPathComponent("custom-vocabulary.json"))
+    }
 
-        // Load existing vocabulary
+    /// A vocabulary kept in `fileURL` (screenshots use a temporary file, never the user's list).
+    init(fileURL: URL) {
+        self.fileURL = fileURL
         load()
     }
 
@@ -163,9 +166,9 @@ enum VocabularyError: Error, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .limitExceeded:
-            "Custom vocabulary limit of 1000 words exceeded"
+            "词典最多 1000 个词，已经满了"
         case .invalidWord:
-            "Invalid word (empty or whitespace only)"
+            "词不能是空的"
         }
     }
 }

@@ -1,13 +1,12 @@
 # Building TextWarden
 
-TextWarden combines a Swift macOS app with a Rust static library. The standard build creates a universal grammar engine for Intel and Apple Silicon, generates the Apple Help Book, then builds the app with Xcode.
+TextWarden combines a Swift macOS app with a Rust static library. The standard build creates a universal grammar engine for Intel and Apple Silicon, then builds the app with Xcode.
 
 ## Prerequisites
 
 - Xcode 26 or later, including the Command Line Tools
 - Rust 1.95 or later, installed with [rustup](https://rustup.rs/)
 - The `x86_64-apple-darwin` and `aarch64-apple-darwin` Rust targets
-- [Pandoc](https://pandoc.org/) for the Help Book
 - [`web-ext`](https://extensionworkshop.com/documentation/develop/getting-started-with-web-ext/) and Mozilla API credentials for release builds
 
 The app's deployment target is macOS 14. Apple Intelligence code uses the macOS 26 SDK behind availability checks. Checks also run on macOS 14; newer APIs and their checks are availability-gated.
@@ -18,7 +17,7 @@ Install the tools and targets:
 xcode-select --install
 rustup update stable
 rustup target add x86_64-apple-darwin aarch64-apple-darwin
-brew install pandoc web-ext
+brew install web-ext
 ```
 
 SwiftFormat and SwiftLint are also required for the local CI checks:
@@ -33,7 +32,6 @@ Confirm the active toolchain:
 xcodebuild -version
 rustc --version
 rustup target list --installed
-pandoc --version
 ```
 
 ## Build from the Command Line
@@ -47,7 +45,7 @@ make build
 This target performs two steps in order:
 
 1. `Scripts/build-rust.sh` builds `GrammarEngine` for Intel and Apple Silicon, then combines both archives as `GrammarEngine/target/libgrammar_engine_universal.a`.
-2. `make build-swift` builds the `TextWarden` scheme in Release configuration. Its Help Book phase regenerates and bundles `CONFIGURATION.md` and `TROUBLESHOOTING.md` with Pandoc on every build, including archives.
+2. `make build-swift` builds the `TextWarden` scheme in Release configuration.
 
 The first build also resolves Cargo and Swift Package Manager dependencies.
 
@@ -79,7 +77,7 @@ The app build includes the shared extension files, native messaging helper, and 
 
 ## Build in Xcode
 
-Open `TextWarden.xcodeproj` and select the **TextWarden** scheme. The Xcode project builds the Rust library and regenerates the Help Book automatically. Pandoc must be installed before building:
+Open `TextWarden.xcodeproj` and select the **TextWarden** scheme. The Xcode project builds the Rust library automatically:
 
 ```bash
 open TextWarden.xcodeproj
@@ -152,13 +150,6 @@ lipo -info GrammarEngine/target/libgrammar_engine_universal.a
 ```
 
 The result should contain `x86_64` and `arm64`.
-
-### Pandoc is missing
-
-```bash
-brew install pandoc
-make help-book
-```
 
 ### Accessibility permission does not update
 

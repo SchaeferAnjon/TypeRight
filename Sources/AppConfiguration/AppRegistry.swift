@@ -145,7 +145,7 @@ extension AppConfiguration {
     /// Sketch Pad runs its separate, in-process analysis pipeline.
     static let textWarden = AppConfiguration(
         identifier: "textwarden",
-        displayName: "TextWarden",
+        displayName: "TypeRight",
         bundleIDs: ["com.typeright.app"],
         category: .native,
         parserType: .generic,

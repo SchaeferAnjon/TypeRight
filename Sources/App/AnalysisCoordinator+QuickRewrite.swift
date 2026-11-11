@@ -55,7 +55,7 @@ extension AnalysisCoordinator {
         if let task = quickRewriteTask {
             Logger.debug("Quick Rewrite: Cancelling pending request", category: Logger.llm)
             task.cancel()
-            QuickRewriteStatus.shared.show("Rewrite cancelled", completion: .cancelled)
+            QuickRewriteStatus.shared.show("改写取消了", completion: .cancelled)
             return
         }
         guard userPreferences.isEnabled, userPreferences.enableStyleChecking,
@@ -65,12 +65,12 @@ extension AnalysisCoordinator {
               textMonitor.isEditableElement(element)
         else {
             Logger.debug("Quick Rewrite: App or Style checking is inactive, or no editable context", category: Logger.llm)
-            QuickRewriteStatus.shared.show("Enable TextWarden and Style checking in this app to rewrite")
+            QuickRewriteStatus.shared.show("先在这个 App 里让 TypeRight 继续，并在 设置 › 高级 › 改写 里打开改写")
             return
         }
         guard capabilities(for: context).contains(.safeReplacement) else {
             Logger.debug("Quick Rewrite: Safe replacement unavailable", category: Logger.llm)
-            QuickRewriteStatus.shared.show("Quick Rewrite is unavailable in this app's safe trial")
+            QuickRewriteStatus.shared.show("这个 App 里不能改写选中的文字")
             return
         }
         let config = appRegistry.effectiveConfiguration(for: context.bundleIdentifier)
@@ -78,18 +78,18 @@ extension AnalysisCoordinator {
               selection.isCurrent()
         else {
             Logger.debug("Quick Rewrite: Selection missing or no longer current", category: Logger.llm)
-            QuickRewriteStatus.shared.show("Select text to rewrite")
+            QuickRewriteStatus.shared.show("先选中要改写的文字")
             return
         }
         // ponytail: bound input for the on-device context window; add chunking only for a document rewrite feature.
         guard selection.text.utf8.count <= GenerationContext.maximumSelectionBytes else {
             Logger.debug("Quick Rewrite: Selection exceeds input limit", category: Logger.llm)
-            QuickRewriteStatus.shared.show("Select a shorter passage to rewrite")
+            QuickRewriteStatus.shared.show("选短一点的一段再改写")
             return
         }
         guard #available(macOS 26.0, *) else {
             Logger.debug("Quick Rewrite: Unsupported macOS version", category: Logger.llm)
-            QuickRewriteStatus.shared.show("Quick Rewrite requires macOS 26 and Apple Intelligence")
+            QuickRewriteStatus.shared.show("改写要 macOS 26 和 Apple 智能")
             return
         }
         let engine = FoundationModelsEngine()
@@ -101,7 +101,7 @@ extension AnalysisCoordinator {
         let style = WritingStyle.allCases.first { $0.displayName == userPreferences.selectedWritingStyle } ?? .default
         let preset = StyleTemperaturePreset(rawValue: userPreferences.styleTemperaturePreset) ?? .balanced
         let vocabulary = customVocabulary.allWords().filter { selection.text.localizedCaseInsensitiveContains($0) }
-        QuickRewriteStatus.shared.show("Rewriting · \(style.displayName)", busy: true)
+        QuickRewriteStatus.shared.show("正在改写 · \(Self.rewriteStyleLabel(style))", busy: true)
         floatingIndicator.updateQuickRewrite(isGenerating: true)
 
         quickRewriteTask = Task { @MainActor [weak self] in
@@ -134,18 +134,18 @@ extension AnalysisCoordinator {
                 else { throw CancellationError() }
                 guard !result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                     Logger.debug("Quick Rewrite: Empty result", category: Logger.llm)
-                    QuickRewriteStatus.shared.show("No rewrite returned. Please try again.")
+                    QuickRewriteStatus.shared.show("没拿到改写，再试一次")
                     return
                 }
                 guard rewrite.hasChanges(comparedTo: selection.text) else {
                     Logger.debug(result == selection.text ? "Quick Rewrite: Result unchanged" : "Quick Rewrite: Ignored boundary-whitespace-only result", category: Logger.llm)
-                    QuickRewriteStatus.shared.show("No rewrite suggested")
+                    QuickRewriteStatus.shared.show("不用改")
                     return
                 }
                 Logger.debug("Quick Rewrite: Awaiting review", category: Logger.llm)
                 guard await QuickRewriteStatus.shared.confirmReplacement(original: selection.text, proposed: result, reason: rewrite.reason) else {
                     Logger.debug("Quick Rewrite: Review cancelled", category: Logger.llm)
-                    QuickRewriteStatus.shared.show("Rewrite cancelled", completion: .cancelled)
+                    QuickRewriteStatus.shared.show("改写取消了", completion: .cancelled)
                     return
                 }
                 Logger.debug("Quick Rewrite: Review accepted", category: Logger.llm)
@@ -166,17 +166,28 @@ extension AnalysisCoordinator {
                 switch outcome {
                 case .success, .unverified:
                     refreshAfterGeneratedInsertion(in: context, element: element)
-                    QuickRewriteStatus.shared.show(outcome == .success ? "Text rewritten" : "Rewrite pasted", completion: outcome == .success ? .applied : nil)
+                    QuickRewriteStatus.shared.show(outcome == .success ? "改好了" : "改写已粘贴，看一下对不对", completion: outcome == .success ? .applied : nil)
                     Logger.info("Quick Rewrite: Applied selection rewrite", category: Logger.analysis)
                 case .failed:
                     Logger.debug("Quick Rewrite: Replacement failed", category: Logger.llm)
-                    QuickRewriteStatus.shared.show("Could not replace the selection. Please try again.")
+                    QuickRewriteStatus.shared.show("没能替换选中的文字，再试一次")
                 }
             } catch {
                 let cancelled = Task.isCancelled || error is CancellationError
                 QuickRewriteStatus.shared.show(QuickRewriteStatus.failureMessage(for: error, cancelled: cancelled), completion: cancelled ? .cancelled : nil)
                 Logger.debug("Quick Rewrite: Request ended without replacement", category: Logger.llm)
             }
+        }
+    }
+
+    /// The status line is Chinese; the stored style keeps its English name.
+    static func rewriteStyleLabel(_ style: WritingStyle) -> String {
+        switch style {
+        case .default: "默认"
+        case .formal: "正式"
+        case .informal: "随意"
+        case .business: "商务"
+        case .concise: "简洁"
         }
     }
 }

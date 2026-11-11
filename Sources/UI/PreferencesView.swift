@@ -2,77 +2,81 @@
 //  PreferencesView.swift
 //  TextWarden
 //
-//  Settings/Preferences window
+//  TextWarden's settings, shown in TypeRight under 设置 › 高级.
 //
 
 import AppKit
-import Charts
 import KeyboardShortcuts
-import LaunchAtLogin
 import SwiftUI
 import UniformTypeIdentifiers
 
 struct PreferencesView: View {
-    @ObservedObject private var preferences = UserPreferences.shared
+    /// Made-up data for screenshots, so nothing from this Mac shows up in them.
+    struct Sample {
+        var appBundleIDs: Set<String>
+        var health: RuntimeHealthSnapshot
+        var fixAllName: KeyboardShortcuts.Name
+        var rewriteName: KeyboardShortcuts.Name
+    }
+
+    /// The settings shown; screenshots pass a throwaway store instead of the user's.
+    @ObservedObject var preferences: UserPreferences = .shared
+    var vocabulary: CustomVocabulary = .shared
+    var sample: Sample?
     @ObservedObject private var windowController = PreferencesWindowController.shared
 
     var body: some View {
         TabView(selection: $windowController.selectedTab) {
-            GeneralPreferencesView(preferences: preferences)
+            GeneralPreferencesView(preferences: preferences,
+                                   fixAllName: sample?.fixAllName ?? .fixAllObvious,
+                                   rewriteName: sample?.rewriteName ?? .quickRewrite)
                 .tabItem {
-                    Label("General", systemImage: "gearshape")
+                    Label("通用", systemImage: "gearshape")
                 }
                 .tag(SettingsTab.general.rawValue)
-                .accessibilityLabel("General settings tab")
+                .accessibilityLabel("通用")
 
-            SpellCheckingView()
+            SpellCheckingView(preferences: preferences, vocabulary: vocabulary)
                 .tabItem {
-                    Label("Grammar", systemImage: "text.badge.checkmark")
+                    Label("拼写", systemImage: "text.badge.checkmark")
                 }
                 .tag(SettingsTab.grammar.rawValue)
-                .accessibilityLabel("Grammar checking settings tab")
+                .accessibilityLabel("拼写和语法")
 
-            StyleCheckingSettingsView()
+            StyleCheckingSettingsView(preferences: preferences)
                 .tabItem {
-                    Label("Style", systemImage: "sparkles")
+                    Label("改写", systemImage: "sparkles")
                 }
                 .tag(SettingsTab.style.rawValue)
-                .accessibilityLabel("Style checking settings tab")
+                .accessibilityLabel("用 Apple 智能改写")
 
-            ApplicationSettingsView(preferences: preferences)
+            ApplicationSettingsView(preferences: preferences, sampleBundleIDs: sample?.appBundleIDs)
                 .tabItem {
-                    Label("Applications", systemImage: "app.badge")
+                    Label("全部 App", systemImage: "app.badge")
                 }
                 .tag(SettingsTab.applications.rawValue)
-                .accessibilityLabel("Application settings tab")
+                .accessibilityLabel("全部 App")
 
-            WebsiteSettingsView(preferences: preferences)
+            WebsiteSettingsView(preferences: preferences, showsCurrentSite: sample == nil)
                 .tabItem {
-                    Label("Websites", systemImage: "globe")
+                    Label("网站", systemImage: "globe")
                 }
                 .tag(SettingsTab.websites.rawValue)
-                .accessibilityLabel("Website settings tab")
+                .accessibilityLabel("网站")
 
-            StatisticsView()
+            DiagnosticsView(preferences: preferences, vocabulary: vocabulary, sampleHealth: sample?.health)
                 .tabItem {
-                    Label("Statistics", systemImage: "chart.bar.fill")
-                }
-                .tag(SettingsTab.statistics.rawValue)
-                .accessibilityLabel("Usage statistics tab")
-
-            DiagnosticsView(preferences: preferences)
-                .tabItem {
-                    Label("Diagnostics", systemImage: "wrench.and.screwdriver")
+                    Label("诊断", systemImage: "wrench.and.screwdriver")
                 }
                 .tag(SettingsTab.diagnostics.rawValue)
-                .accessibilityLabel("Diagnostics and troubleshooting tab")
+                .accessibilityLabel("诊断")
 
             AboutView()
                 .tabItem {
-                    Label("About", systemImage: "info.circle")
+                    Label("关于", systemImage: "info.circle")
                 }
                 .tag(SettingsTab.about.rawValue)
-                .accessibilityLabel("About TextWarden tab")
+                .accessibilityLabel("关于 TypeRight")
         }
         .frame(minWidth: 750, minHeight: 600)
         // Theme is managed via NSApp.appearance in PreferencesWindowController
@@ -80,32 +84,32 @@ struct PreferencesView: View {
     }
 }
 
-// MARK: - Spell Checking (combines Categories and Dictionary)
+// MARK: - Spelling (categories, language and dictionary)
 
 struct SpellCheckingView: View {
-    @ObservedObject private var preferences = UserPreferences.shared
-    @ObservedObject private var vocabulary = CustomVocabulary.shared
+    @ObservedObject var preferences: UserPreferences
+    @ObservedObject var vocabulary: CustomVocabulary
     @State private var newWord = ""
     @State private var searchText = ""
     @State private var errorMessage: String?
 
     var body: some View {
         Form {
-            // MARK: Grammar Categories Group
+            // MARK: Categories
 
             FilteringPreferencesContent(preferences: preferences)
 
             // MARK: Language Settings
 
             Section {
-                Picker("English dialect:", selection: $preferences.selectedDialect) {
+                Picker("拼法按：", selection: $preferences.selectedDialect) {
                     ForEach(UserPreferences.availableDialects, id: \.self) { dialect in
-                        Text(dialect).tag(dialect)
+                        Text(UserPreferences.dialectLabel(dialect)).tag(dialect)
                     }
                 }
-                .help("Select the English dialect for grammar checking")
+                .help("按哪种英语的拼法和用法检查")
 
-                Text("Choose your preferred English variant for spelling and grammar rules")
+                Text("比如 color 和 colour：美式英语算 colour 拼错，英式英语反过来。")
                     .font(.caption)
                     .foregroundColor(.secondary)
             } header: {
@@ -114,22 +118,18 @@ struct SpellCheckingView: View {
                         Image(systemName: "globe")
                             .font(.title2)
                             .foregroundColor(.accentColor)
-                        Text("Language")
+                        Text("英语")
                             .font(.title3)
                             .fontWeight(.semibold)
                     }
 
-                    Text("Configure language and dialect settings for grammar checking")
+                    Text("按哪种英语检查")
                         .font(.caption)
                         .foregroundColor(.secondary)
-
-                    Text("Dialect")
-                        .font(.headline)
-                        .padding(.top, 8)
                 }
             }
 
-            // MARK: Custom Vocabulary Group Header
+            // MARK: Vocabulary Group Header
 
             Section {
                 EmptyView()
@@ -139,18 +139,16 @@ struct SpellCheckingView: View {
                         Image(systemName: "text.book.closed.fill")
                             .font(.title2)
                             .foregroundColor(.accentColor)
-                        Text("Custom Vocabulary")
+                        Text("词典")
                             .font(.title3)
                             .fontWeight(.semibold)
                     }
 
-                    Text("Add words to prevent false positives and configure language detection")
+                    Text("这些词不算拼错；别的语言的段落可以整段跳过")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
             }
-
-            // MARK: Custom Dictionary Content
 
             CustomVocabularyContent(
                 vocabulary: vocabulary,
@@ -165,7 +163,7 @@ struct SpellCheckingView: View {
     }
 }
 
-// MARK: - Filtering Preferences Content (extracted from FilteringPreferencesView)
+// MARK: - Categories
 
 private struct FilteringPreferencesContent: View {
     @ObservedObject var preferences: UserPreferences
@@ -191,14 +189,14 @@ private struct FilteringPreferencesContent: View {
             // Quick Actions
             Section {
                 HStack {
-                    Button("Enable All") {
+                    Button("全部打开") {
                         preferences.enabledCategories = UserPreferences.allCategories
                     }
                     .buttonStyle(.bordered)
 
                     Spacer()
 
-                    Button("Disable All") {
+                    Button("全部关掉") {
                         preferences.enabledCategories = []
                     }
                     .buttonStyle(.bordered)
@@ -209,203 +207,126 @@ private struct FilteringPreferencesContent: View {
                         Image(systemName: "line.3.horizontal.decrease.circle.fill")
                             .font(.title2)
                             .foregroundColor(.accentColor)
-                        Text("Grammar Categories")
+                        Text("查哪些错")
                             .font(.title3)
                             .fontWeight(.semibold)
                     }
 
-                    Text("Enable or disable specific types of grammar and style checks")
+                    Text("在这台 Mac 上查，不联网。拼错的词弹框只用「拼写」和「手误」；「一键改掉明显的错」会用到所有打开的类别。")
                         .font(.caption)
                         .foregroundColor(.secondary)
-
-                    Text("Quick Actions")
-                        .font(.headline)
-                        .padding(.top, 8)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
 
             // Core Grammar Checks
             Section {
-                Toggle("Spelling", isOn: categoryBinding("Spelling"))
-                    .help("When your brain doesn't know the right spelling")
+                Toggle("拼写", isOn: categoryBinding("Spelling"))
+                    .help("不知道这个词怎么拼")
 
-                Toggle("Typos", isOn: categoryBinding("Typo"))
-                    .help("When your brain knows the right spelling but your fingers made a mistake")
+                Toggle("手误", isOn: categoryBinding("Typo"))
+                    .help("知道怎么拼，手打错了")
 
-                Toggle("Grammar", isOn: categoryBinding("Grammar"))
-                    .help("Detect grammatical errors and incorrect sentence structure")
+                Toggle("语法", isOn: categoryBinding("Grammar"))
+                    .help("句子结构和语法错误")
 
-                Toggle("Agreement", isOn: categoryBinding("Agreement"))
-                    .help("Check subject-verb and pronoun agreement (e.g., 'he go' → 'he goes')")
+                Toggle("主谓一致", isOn: categoryBinding("Agreement"))
+                    .help("比如 he go → he goes")
 
                 VStack(alignment: .leading, spacing: 8) {
-                    Toggle("Punctuation", isOn: categoryBinding("Punctuation"))
-                        .help("Check punctuation usage, including hyphenation in compound adjectives")
+                    Toggle("标点", isOn: categoryBinding("Punctuation"))
+                        .help("标点用法，包括复合形容词里的连字符")
 
                     if preferences.enabledCategories.contains("Punctuation") {
                         VStack(alignment: .leading, spacing: 6) {
-                            Toggle("Oxford comma", isOn: $preferences.enforceOxfordComma)
-                                .help("Flag lists that are missing the serial comma")
+                            Toggle("牛津逗号", isOn: $preferences.enforceOxfordComma)
+                                .help("列三样以上时，and 前面也要逗号")
 
-                            Toggle("Ellipsis formatting", isOn: $preferences.checkEllipsis)
-                                .help("Suggest using the proper ellipsis character (…) instead of three periods")
+                            Toggle("省略号", isOn: $preferences.checkEllipsis)
+                                .help("三个句点换成省略号（…）")
 
-                            Toggle("Unclosed quotes", isOn: $preferences.checkUnclosedQuotes)
-                                .help("Flag quotation marks that are opened but never closed")
+                            Toggle("引号没配对", isOn: $preferences.checkUnclosedQuotes)
+                                .help("引号开了没关")
 
-                            Toggle("Dash usage", isOn: $preferences.checkDashes)
-                                .help("Check for correct usage of em-dashes, en-dashes, and hyphens")
+                            Toggle("横线用法", isOn: $preferences.checkDashes)
+                                .help("em dash、en dash 和连字符用得对不对")
                         }
                         .padding(.leading, 20)
                         .font(.callout)
                     }
                 }
 
-                Toggle("Capitalization", isOn: categoryBinding("Capitalization"))
-                    .help("Check proper capitalization of words and sentences")
+                Toggle("大小写", isOn: categoryBinding("Capitalization"))
+                    .help("句首和专有名词的大写")
             } header: {
-                Text("Core Checks")
+                Text("基础")
                     .font(.headline)
             }
 
             // Writing Style
             Section {
-                Toggle("Style", isOn: categoryBinding("Style"))
-                    .help("Check cases where multiple options are correct but one is preferred")
+                Toggle("风格", isOn: categoryBinding("Style"))
+                    .help("几种说法都对，但有一种更常用")
 
                 // Note: Harper's "Readability" category is disabled - we use our own
                 // ReadabilityCalculator with Flesch Reading Ease and AI simplification
 
-                Toggle("Enhancement", isOn: categoryBinding("Enhancement"))
-                    .help("Suggest improvements that enhance clarity or impact without fixing errors")
+                Toggle("说得更好", isOn: categoryBinding("Enhancement"))
+                    .help("不是错，但能说得更清楚")
 
-                Toggle("Redundancy", isOn: categoryBinding("Redundancy"))
-                    .help("Detect cases where words duplicate meaning that's already expressed")
+                Toggle("意思重复", isOn: categoryBinding("Redundancy"))
+                    .help("比如 return back")
 
-                Toggle("Repetition", isOn: categoryBinding("Repetition"))
-                    .help("Detect repeated words or phrases in nearby sentences")
+                Toggle("用词重复", isOn: categoryBinding("Repetition"))
+                    .help("挨着的句子里用了同一个词")
             } header: {
-                Text("Style & Clarity")
+                Text("风格和清楚")
                     .font(.headline)
             }
 
             // Word Usage
             Section {
-                Toggle("Word Choice", isOn: categoryBinding("WordChoice"))
-                    .help("Suggest choosing between different words or phrases in a given context")
+                Toggle("选词", isOn: categoryBinding("WordChoice"))
+                    .help("这个场合换一个词更合适")
 
-                Toggle("Usage", isOn: categoryBinding("Usage"))
-                    .help("Check conventional word usage and standard collocations")
+                Toggle("惯用法", isOn: categoryBinding("Usage"))
+                    .help("常见搭配和习惯说法")
 
-                Toggle("Eggcorns", isOn: categoryBinding("Eggcorn"))
-                    .help("Detect cases where a word or phrase is misused for a similar-sounding word or phrase (e.g., 'for all intensive purposes' → 'for all intents and purposes')")
+                Toggle("近音误用（短语）", isOn: categoryBinding("Eggcorn"))
+                    .help("比如 for all intensive purposes → for all intents and purposes")
 
-                Toggle("Malapropisms", isOn: categoryBinding("Malapropism"))
-                    .help("Detect cases where a word is mistakenly used for a similar-sounding word with a different meaning (e.g., 'escape goat' → 'scapegoat')")
+                Toggle("近音误用（单词）", isOn: categoryBinding("Malapropism"))
+                    .help("比如 escape goat → scapegoat")
             } header: {
-                Text("Word Usage")
+                Text("用词")
                     .font(.headline)
             }
 
             // Advanced
             Section {
-                Toggle("Formatting", isOn: categoryBinding("Formatting"))
-                    .help("Check text formatting issues such as spacing and special characters")
+                Toggle("格式", isOn: categoryBinding("Formatting"))
+                    .help("空格和特殊字符")
 
-                Toggle("Boundary Errors", isOn: categoryBinding("BoundaryError"))
-                    .help("Detect errors where words are joined or split at the wrong boundaries (e.g., 'each and everyone' → 'each and every one')")
+                Toggle("分写和连写", isOn: categoryBinding("BoundaryError"))
+                    .help("比如 each and everyone → each and every one")
 
-                Toggle("Regionalism", isOn: categoryBinding("Regionalism"))
-                    .help("Detect variations that are standard in some regions or dialects but not others")
+                Toggle("地区说法", isOn: categoryBinding("Regionalism"))
+                    .help("只在某些地区这么说")
 
-                Toggle("Nonstandard", isOn: categoryBinding("Nonstandard"))
-                    .help("Detect non-standard language usage that may be informal or colloquial")
+                Toggle("不规范用法", isOn: categoryBinding("Nonstandard"))
+                    .help("口语或不规范的说法")
 
-                Toggle("Miscellaneous", isOn: categoryBinding("Miscellaneous"))
-                    .help("Check for any other grammar issues that don't fit neatly into other categories")
+                Toggle("其他", isOn: categoryBinding("Miscellaneous"))
+                    .help("不属于上面几类的问题")
             } header: {
-                Text("Advanced")
+                Text("更多")
                     .font(.headline)
             }
-
-            Section {
-                if preferences.ignoredRules.isEmpty {
-                    HStack {
-                        Image(systemName: "checkmark.circle")
-                            .foregroundColor(.green)
-                        Text("No ignored rules")
-                            .foregroundColor(.secondary)
-                    }
-                } else {
-                    ForEach(Array(preferences.ignoredRules).sorted(), id: \.self) { ruleId in
-                        HStack {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(formatRuleName(ruleId))
-                                    .font(.subheadline)
-                                Text(ruleId)
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                            Spacer()
-                            Button("Re-enable") {
-                                preferences.enableRule(ruleId)
-                            }
-                            .buttonStyle(.borderless)
-                            .help("Allow this rule to show grammar suggestions again")
-                        }
-                        .padding(.vertical, 4)
-                    }
-
-                    Divider()
-
-                    HStack {
-                        Spacer()
-                        Button("Clear All") {
-                            preferences.ignoredRules = []
-                        }
-                        .buttonStyle(.bordered)
-                        .help("Re-enable all ignored grammar rules")
-                    }
-                }
-            } header: {
-                HStack {
-                    Text("Ignored Rules")
-                        .font(.headline)
-                    Spacer()
-                    if !preferences.ignoredRules.isEmpty {
-                        Text("\(preferences.ignoredRules.count)")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-            }
         }
-    }
-
-    private func formatRuleName(_ ruleId: String) -> String {
-        let components = ruleId.split(separator: ":", maxSplits: 1)
-        var nameToFormat = components.count > 1 ? String(components[1]) : ruleId
-        nameToFormat = nameToFormat.trimmingCharacters(in: CharacterSet(charactersIn: ":"))
-
-        let words = nameToFormat.split(separator: "_")
-        if !words.isEmpty {
-            return words.map { word in
-                word.prefix(1).uppercased() + word.dropFirst().lowercased()
-            }.joined(separator: " ")
-        }
-
-        var result = ""
-        for (index, char) in nameToFormat.enumerated() {
-            if index > 0, char.isUppercase {
-                result += " "
-            }
-            result.append(char)
-        }
-        return result.isEmpty ? ruleId : result
     }
 }
 
-// MARK: - Custom Vocabulary Content (extracted from CustomVocabularyView)
+// MARK: - Dictionary
 
 private struct CustomVocabularyContent: View {
     @ObservedObject var vocabulary: CustomVocabulary
@@ -413,9 +334,7 @@ private struct CustomVocabularyContent: View {
     @Binding var newWord: String
     @Binding var searchText: String
     @Binding var errorMessage: String?
-    @State private var ignoredSearchText: String = ""
     @State private var showClearDictionaryAlert: Bool = false
-    @State private var showClearIgnoredAlert: Bool = false
 
     private var filteredWords: [String] {
         let allWords = Array(vocabulary.words).sorted()
@@ -425,97 +344,41 @@ private struct CustomVocabularyContent: View {
         return allWords.filter { $0.localizedCaseInsensitiveContains(searchText) }
     }
 
-    private var filteredIgnoredTexts: [String] {
-        let allTexts = Array(preferences.ignoredErrorTexts).sorted()
-        if ignoredSearchText.isEmpty {
-            return allTexts
-        }
-        return allTexts.filter { $0.localizedCaseInsensitiveContains(ignoredSearchText) }
-    }
-
     var body: some View {
         Group {
             // MARK: - Predefined Wordlists Section
 
             Section {
-                VStack(alignment: .leading, spacing: 4) {
-                    Toggle("Internet Abbreviations", isOn: $preferences.enableInternetAbbreviations)
-                        .help("Accept common abbreviations like BTW, FYI, LOL, ASAP, etc.")
-
-                    Text("3,200+ abbreviations (BTW, FYI, LOL, ASAP, AFAICT, etc.) • Case-insensitive")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                        .padding(.leading, 20)
-                }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Toggle("Gen Z Slang", isOn: $preferences.enableGenZSlang)
-                        .help("Accept modern slang words like ghosting, sus, slay, etc.")
-
-                    Text("270+ modern terms (ghosting, sus, slay, vibe, etc.) • Case-insensitive")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                        .padding(.leading, 20)
-                }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Toggle("IT & Tech Terminology", isOn: $preferences.enableITTerminology)
-                        .help("Accept technical terms like kubernetes, docker, API, JSON, localhost, etc.")
-
-                    Text("10,000+ technical terms (kubernetes, docker, nginx, API, JSON, etc.) • Case-insensitive")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                        .padding(.leading, 20)
-                }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Toggle("Brand & Company Names", isOn: $preferences.enableBrandNames)
-                        .help("Accept brand names like Apple, Microsoft, Google, Amazon, etc.")
-
-                    Text("2,400+ brand/company names (Fortune 500, Forbes 2000, global brands) • Case-insensitive")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                        .padding(.leading, 20)
-                }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Toggle("Person Names (First Names)", isOn: $preferences.enablePersonNames)
-                        .help("Accept common first names like James, Maria, Chen, Fatima, etc.")
-
-                    Text("100,000+ international first names (US SSA + worldwide sources) • Case-insensitive")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                        .padding(.leading, 20)
-                }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Toggle("Surnames (Last Names)", isOn: $preferences.enableLastNames)
-                        .help("Accept common surnames like Smith, Garcia, Johnson, etc.")
-
-                    Text("150,000+ surnames from US Census data • Case-insensitive")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                        .padding(.leading, 20)
-                }
-
+                wordlist("网络缩写", $preferences.enableInternetAbbreviations,
+                         "3,200 多个缩写（BTW、FYI、LOL、ASAP、AFAICT 等），不分大小写")
+                wordlist("新潮说法", $preferences.enableGenZSlang,
+                         "270 多个新词（ghosting、sus、slay、vibe 等），不分大小写")
+                wordlist("IT 和技术词", $preferences.enableITTerminology,
+                         "1 万多个技术词（kubernetes、docker、nginx、API、JSON 等），不分大小写")
+                wordlist("品牌和公司名", $preferences.enableBrandNames,
+                         "2,400 多个品牌和公司名（财富 500 强、福布斯 2000 强等），不分大小写")
+                wordlist("人名（名）", $preferences.enablePersonNames,
+                         "10 万多个各国常见的名，不分大小写")
+                wordlist("人名（姓）", $preferences.enableLastNames,
+                         "15 万多个姓（来自美国人口普查），不分大小写")
             } header: {
-                Text("Predefined Wordlists")
+                Text("内置词表")
                     .font(.headline)
             }
 
             // MARK: - Language Detection Section
 
             Section {
-                Toggle("Ignore selected languages", isOn: $preferences.enableLanguageDetection)
-                    .help("Skip English grammar checks in confidently detected passages")
+                Toggle("跳过选中的语言", isOn: $preferences.enableLanguageDetection)
+                    .help("认出是这些语言的段落，就不按英文查")
 
-                Text("Skip English grammar checks in documents and passages confidently detected as a selected language.")
+                Text("一段话能确定是下面选的语言时，不按英文查拼写和语法。")
                     .font(.caption)
                     .foregroundColor(.secondary)
 
                 if preferences.enableLanguageDetection {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Languages to ignore")
+                        Text("要跳过的语言")
                             .font(.caption)
                             .foregroundColor(.secondary)
                             .padding(.top, 4)
@@ -524,21 +387,21 @@ private struct CustomVocabularyContent: View {
                     }
                 }
             } header: {
-                Text("Language Detection")
+                Text("别的语言")
                     .font(.headline)
             }
 
             // MARK: - System Dictionary Section
 
             Section {
-                Toggle("Import macOS learned words", isOn: $preferences.enableMacOSDictionary)
-                    .help("Respect words you've added via 'Learn Spelling' in other macOS apps")
+                Toggle("用 macOS「学习拼写」学过的词", isOn: $preferences.enableMacOSDictionary)
+                    .help("在别的 App 里点过「学习拼写」的词，这里也不算错")
 
-                Text("Respects words learned via 'Learn Spelling' in Safari, Mail, Pages, etc.")
+                Text("在 Safari、邮件、Pages 等 App 里学过的词，这里也不算拼错。")
                     .font(.caption)
                     .foregroundColor(.secondary)
             } header: {
-                Text("System Dictionary")
+                Text("系统词典")
                     .font(.headline)
             }
 
@@ -547,7 +410,7 @@ private struct CustomVocabularyContent: View {
             Section {
                 // Add word input row
                 HStack(spacing: 8) {
-                    Text("Add new word:")
+                    Text("加一个词：")
                         .foregroundColor(.secondary)
 
                     LeftAlignedTextField(
@@ -557,35 +420,35 @@ private struct CustomVocabularyContent: View {
                     )
                     .frame(minHeight: 22, maxHeight: 22)
 
-                    Button("Add") {
+                    Button("加入") {
                         addWord()
                     }
                     .buttonStyle(.bordered)
                     .disabled(newWord.isEmpty)
-                    .help("Add word to dictionary")
+                    .help("加进词典")
 
                     // Error message inline
                     if let errorMessage {
                         Label(errorMessage, systemImage: "exclamationmark.circle.fill")
                             .font(.caption)
-                            .foregroundColor(.red)
+                            .foregroundColor(.orange)
                     }
                 }
 
                 // Search field (only show when there are words)
                 if !vocabulary.words.isEmpty {
-                    SearchField(text: $searchText, placeholder: "Search \(vocabulary.words.count) words...")
+                    SearchField(text: $searchText, placeholder: "在 \(vocabulary.words.count) 个词里找…")
                         .frame(height: 22)
                 }
 
                 // Word list
                 if vocabulary.words.isEmpty {
-                    Text("No words added yet")
+                    Text("还没有加词")
                         .foregroundColor(.secondary)
                         .font(.subheadline)
                         .padding(.vertical, 8)
                 } else if filteredWords.isEmpty, !searchText.isEmpty {
-                    Text("No matching words")
+                    Text("没找到")
                         .foregroundColor(.secondary)
                         .font(.subheadline)
                         .padding(.vertical, 8)
@@ -602,16 +465,16 @@ private struct CustomVocabularyContent: View {
                                     .foregroundColor(.secondary)
                             }
                             .buttonStyle(.plain)
-                            .help("Remove from dictionary")
+                            .help("从词典里删掉")
                         }
                     }
                 }
             } header: {
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Custom Dictionary")
+                        Text("自定义词典")
                             .font(.headline)
-                        Text("Words added here won't be flagged as spelling errors")
+                        Text("加进来的词不再算拼错，大小写要一致")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -620,7 +483,7 @@ private struct CustomVocabularyContent: View {
                         Button {
                             showClearDictionaryAlert = true
                         } label: {
-                            Label("Clear list", systemImage: "trash")
+                            Label("清空", systemImage: "trash")
                                 .font(.caption)
                         }
                         .buttonStyle(.plain)
@@ -628,668 +491,24 @@ private struct CustomVocabularyContent: View {
                     }
                 }
             }
-            .alert("Clear Custom Dictionary?", isPresented: $showClearDictionaryAlert) {
-                Button("Cancel", role: .cancel) {}
-                Button("Clear All", role: .destructive) {
+            .alert("清空自定义词典？", isPresented: $showClearDictionaryAlert) {
+                Button("取消", role: .cancel) {}
+                Button("清空", role: .destructive) {
                     clearAll()
                 }
             } message: {
-                Text("This will remove all \(vocabulary.words.count) words from your custom dictionary. This action cannot be undone.")
-            }
-
-            // MARK: - Ignored Words Section
-
-            Section {
-                // Search field (only show when there are ignored words)
-                if !preferences.ignoredErrorTexts.isEmpty {
-                    SearchField(text: $ignoredSearchText, placeholder: "Search \(preferences.ignoredErrorTexts.count) words...")
-                        .frame(height: 22)
-                }
-
-                // Word list
-                if preferences.ignoredErrorTexts.isEmpty {
-                    Text("No ignored words")
-                        .foregroundColor(.secondary)
-                        .font(.subheadline)
-                        .padding(.vertical, 8)
-                } else if filteredIgnoredTexts.isEmpty, !ignoredSearchText.isEmpty {
-                    Text("No matching words")
-                        .foregroundColor(.secondary)
-                        .font(.subheadline)
-                        .padding(.vertical, 8)
-                } else {
-                    ForEach(filteredIgnoredTexts, id: \.self) { ignoredText in
-                        HStack {
-                            Text(ignoredText)
-                                .lineLimit(1)
-                            Spacer()
-
-                            // Move to dictionary button
-                            Button {
-                                moveToCustomDictionary(ignoredText)
-                            } label: {
-                                Image(systemName: "plus.circle")
-                                    .foregroundColor(.accentColor)
-                            }
-                            .buttonStyle(.plain)
-                            .help("Add to Custom Dictionary")
-
-                            // Remove button
-                            Button {
-                                preferences.ignoredErrorTexts.remove(ignoredText)
-                            } label: {
-                                Image(systemName: "xmark.circle.fill")
-                                    .foregroundColor(.secondary)
-                            }
-                            .buttonStyle(.plain)
-                            .help("Stop ignoring (will be checked again)")
-                        }
-                    }
-                }
-            } header: {
-                HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Ignored Words")
-                            .font(.headline)
-                        Text("Errors you've dismissed. Click + to add to dictionary instead.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    Spacer()
-                    if !preferences.ignoredErrorTexts.isEmpty {
-                        Button {
-                            showClearIgnoredAlert = true
-                        } label: {
-                            Label("Clear list", systemImage: "trash")
-                                .font(.caption)
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundColor(.accentColor)
-                    }
-                }
-            }
-            .alert("Clear Ignored Words?", isPresented: $showClearIgnoredAlert) {
-                Button("Cancel", role: .cancel) {}
-                Button("Clear All", role: .destructive) {
-                    preferences.ignoredErrorTexts.removeAll()
-                }
-            } message: {
-                Text("This will remove all \(preferences.ignoredErrorTexts.count) ignored words. These errors will be flagged again. This action cannot be undone.")
+                Text("会删掉词典里的全部 \(vocabulary.words.count) 个词，删了找不回来。")
             }
         }
     }
 
-    private func addWord() {
-        guard !newWord.isEmpty else { return }
-
-        do {
-            try vocabulary.addWord(newWord)
-            newWord = ""
-            errorMessage = nil
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-    }
-
-    private func removeWord(_ word: String) {
-        do {
-            try vocabulary.removeWord(word)
-            errorMessage = nil
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-    }
-
-    private func clearAll() {
-        do {
-            try vocabulary.clearAll()
-            errorMessage = nil
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-    }
-
-    /// Move an ignored word to the Custom Dictionary
-    /// This adds it as a valid word and removes it from ignored list
-    private func moveToCustomDictionary(_ text: String) {
-        do {
-            try vocabulary.addWord(text)
-            preferences.ignoredErrorTexts.remove(text)
-            errorMessage = nil
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-    }
-}
-
-// MARK: - Category Preferences
-
-struct FilteringPreferencesView: View {
-    @ObservedObject var preferences: UserPreferences
-
-    /// Helper to create toggle binding for a category
-    private func categoryBinding(_ category: String) -> Binding<Bool> {
-        Binding(
-            get: { preferences.enabledCategories.contains(category) },
-            set: { enabled in
-                var categories = preferences.enabledCategories
-                if enabled {
-                    categories.insert(category)
-                } else {
-                    categories.remove(category)
-                }
-                preferences.enabledCategories = categories
-            }
-        )
-    }
-
-    var body: some View {
-        Form {
-            // Quick Actions
-            Section {
-                HStack {
-                    Button("Enable All") {
-                        preferences.enabledCategories = UserPreferences.allCategories
-                    }
-                    .buttonStyle(.bordered)
-
-                    Spacer()
-
-                    Button("Disable All") {
-                        preferences.enabledCategories = []
-                    }
-                    .buttonStyle(.bordered)
-                }
-            } header: {
-                Text("Quick Actions")
-                    .font(.headline)
-            }
-
-            // Core Grammar Checks
-            Section {
-                Toggle("Spelling", isOn: categoryBinding("Spelling"))
-                    .help("When your brain doesn't know the right spelling")
-
-                Toggle("Typos", isOn: categoryBinding("Typo"))
-                    .help("When your brain knows the right spelling but your fingers made a mistake")
-
-                Toggle("Grammar", isOn: categoryBinding("Grammar"))
-                    .help("Detect grammatical errors and incorrect sentence structure")
-
-                Toggle("Agreement", isOn: categoryBinding("Agreement"))
-                    .help("Check subject-verb and pronoun agreement (e.g., 'he go' → 'he goes')")
-
-                VStack(alignment: .leading, spacing: 8) {
-                    Toggle("Punctuation", isOn: categoryBinding("Punctuation"))
-                        .help("Check punctuation usage, including hyphenation in compound adjectives")
-
-                    if preferences.enabledCategories.contains("Punctuation") {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Toggle("Oxford comma", isOn: $preferences.enforceOxfordComma)
-                                .help("Flag lists that are missing the serial comma")
-
-                            Toggle("Ellipsis formatting", isOn: $preferences.checkEllipsis)
-                                .help("Suggest using the proper ellipsis character (…) instead of three periods")
-
-                            Toggle("Unclosed quotes", isOn: $preferences.checkUnclosedQuotes)
-                                .help("Flag quotation marks that are opened but never closed")
-
-                            Toggle("Dash usage", isOn: $preferences.checkDashes)
-                                .help("Check for correct usage of em-dashes, en-dashes, and hyphens")
-                        }
-                        .padding(.leading, 20)
-                        .font(.callout)
-                    }
-                }
-
-                Toggle("Capitalization", isOn: categoryBinding("Capitalization"))
-                    .help("Check proper capitalization of words and sentences")
-            } header: {
-                Text("Core Checks")
-                    .font(.headline)
-            }
-
-            // Writing Style
-            Section {
-                Toggle("Style", isOn: categoryBinding("Style"))
-                    .help("Check cases where multiple options are correct but one is preferred")
-
-                // Note: Harper's "Readability" category is disabled - we use our own
-                // ReadabilityCalculator with Flesch Reading Ease and AI simplification
-
-                Toggle("Enhancement", isOn: categoryBinding("Enhancement"))
-                    .help("Suggest improvements that enhance clarity or impact without fixing errors")
-
-                Toggle("Redundancy", isOn: categoryBinding("Redundancy"))
-                    .help("Detect cases where words duplicate meaning that's already expressed")
-
-                Toggle("Repetition", isOn: categoryBinding("Repetition"))
-                    .help("Detect repeated words or phrases in nearby sentences")
-            } header: {
-                Text("Style & Clarity")
-                    .font(.headline)
-            }
-
-            // Word Usage
-            Section {
-                Toggle("Word Choice", isOn: categoryBinding("WordChoice"))
-                    .help("Suggest choosing between different words or phrases in a given context")
-
-                Toggle("Usage", isOn: categoryBinding("Usage"))
-                    .help("Check conventional word usage and standard collocations")
-
-                Toggle("Eggcorns", isOn: categoryBinding("Eggcorn"))
-                    .help("Detect cases where a word or phrase is misused for a similar-sounding word or phrase (e.g., 'for all intensive purposes' → 'for all intents and purposes')")
-
-                Toggle("Malapropisms", isOn: categoryBinding("Malapropism"))
-                    .help("Detect cases where a word is mistakenly used for a similar-sounding word with a different meaning (e.g., 'escape goat' → 'scapegoat')")
-            } header: {
-                Text("Word Usage")
-                    .font(.headline)
-            }
-
-            // Advanced
-            Section {
-                Toggle("Formatting", isOn: categoryBinding("Formatting"))
-                    .help("Check text formatting issues such as spacing and special characters")
-
-                Toggle("Boundary Errors", isOn: categoryBinding("BoundaryError"))
-                    .help("Detect errors where words are joined or split at the wrong boundaries (e.g., 'each and everyone' → 'each and every one')")
-
-                Toggle("Regionalism", isOn: categoryBinding("Regionalism"))
-                    .help("Detect variations that are standard in some regions or dialects but not others")
-
-                Toggle("Nonstandard", isOn: categoryBinding("Nonstandard"))
-                    .help("Detect non-standard language usage that may be informal or colloquial")
-
-                Toggle("Miscellaneous", isOn: categoryBinding("Miscellaneous"))
-                    .help("Check for any other grammar issues that don't fit neatly into other categories")
-            } header: {
-                Text("Advanced")
-                    .font(.headline)
-            }
-
-            Section {
-                if preferences.ignoredRules.isEmpty {
-                    HStack {
-                        Image(systemName: "checkmark.circle")
-                            .foregroundColor(.green)
-                        Text("No ignored rules")
-                            .foregroundColor(.secondary)
-                    }
-                } else {
-                    ForEach(Array(preferences.ignoredRules).sorted(), id: \.self) { ruleId in
-                        HStack {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(formatRuleName(ruleId))
-                                    .font(.subheadline)
-                                Text(ruleId)
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                            Spacer()
-                            Button("Re-enable") {
-                                preferences.enableRule(ruleId)
-                            }
-                            .buttonStyle(.borderless)
-                            .help("Allow this rule to show grammar suggestions again")
-                        }
-                        .padding(.vertical, 4)
-                    }
-
-                    Divider()
-
-                    HStack {
-                        Spacer()
-                        Button("Clear All") {
-                            preferences.ignoredRules = []
-                        }
-                        .buttonStyle(.bordered)
-                        .help("Re-enable all ignored grammar rules")
-                    }
-                }
-            } header: {
-                HStack {
-                    Text("Ignored Rules")
-                        .font(.headline)
-                    Spacer()
-                    if !preferences.ignoredRules.isEmpty {
-                        Text("\(preferences.ignoredRules.count)")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-            }
-        }
-        .formStyle(.grouped)
-        .padding()
-    }
-
-    /// Format rule ID from PascalCase/camelCase to readable text
-    /// Examples: "SubjectVerbDisagreement" -> "Subject Verb Disagreement"
-    ///           "Formatting::horizontal_ellipsis_must_have_3_dots" -> "Horizontal Ellipsis Must Have 3 Dots"
-    private func formatRuleName(_ ruleId: String) -> String {
-        // Handle new format with category prefix (e.g., "Formatting::rule_name")
-        let components = ruleId.split(separator: ":", maxSplits: 1)
-        var nameToFormat = components.count > 1 ? String(components[1]) : ruleId
-        nameToFormat = nameToFormat.trimmingCharacters(in: CharacterSet(charactersIn: ":"))
-
-        // Replace underscores with spaces and capitalize each word
-        let words = nameToFormat.split(separator: "_")
-        if !words.isEmpty {
-            return words.map { word in
-                word.prefix(1).uppercased() + word.dropFirst().lowercased()
-            }.joined(separator: " ")
-        }
-
-        // Fallback: Insert spaces before uppercase letters (for PascalCase/camelCase)
-        var result = ""
-        for (index, char) in nameToFormat.enumerated() {
-            if index > 0, char.isUppercase {
-                result += " "
-            }
-            result.append(char)
-        }
-        return result.isEmpty ? ruleId : result
-    }
-}
-
-// MARK: - Custom Vocabulary View
-
-struct CustomVocabularyView: View {
-    @ObservedObject private var vocabulary = CustomVocabulary.shared
-    @ObservedObject private var preferences = UserPreferences.shared
-    @State private var newWord = ""
-    @State private var searchText = ""
-    @State private var errorMessage: String?
-
-    /// Filtered words based on search text
-    private var filteredWords: [String] {
-        let allWords = Array(vocabulary.words).sorted()
-        if searchText.isEmpty {
-            return allWords
-        }
-        return allWords.filter { $0.localizedCaseInsensitiveContains(searchText) }
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            // Predefined Wordlists section
-            GroupBox {
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        Image(systemName: "list.bullet.rectangle")
-                            .font(.title2)
-                            .foregroundColor(.accentColor)
-                        Text("Predefined Wordlists")
-                            .font(.headline)
-                    }
-
-                    Text("Enable recognition of specialized vocabulary and informal language")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .padding(.bottom, 4)
-
-                    Divider()
-
-                    // Internet Abbreviations
-                    VStack(alignment: .leading, spacing: 4) {
-                        Toggle("Internet Abbreviations", isOn: $preferences.enableInternetAbbreviations)
-                            .help("Accept common abbreviations like BTW, FYI, LOL, ASAP, etc.")
-
-                        Text("3,200+ abbreviations (BTW, FYI, LOL, ASAP, AFAICT, etc.) • Case-insensitive")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                            .padding(.leading, 20)
-                    }
-
-                    Divider()
-
-                    // Gen Z Slang
-                    VStack(alignment: .leading, spacing: 4) {
-                        Toggle("Gen Z Slang", isOn: $preferences.enableGenZSlang)
-                            .help("Accept modern slang words like ghosting, sus, slay, etc.")
-
-                        Text("270+ modern terms (ghosting, sus, slay, vibe, etc.) • Case-insensitive")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                            .padding(.leading, 20)
-                    }
-
-                    Divider()
-
-                    // IT Terminology
-                    VStack(alignment: .leading, spacing: 4) {
-                        Toggle("IT & Tech Terminology", isOn: $preferences.enableITTerminology)
-                            .help("Accept technical terms like kubernetes, docker, API, JSON, localhost, etc.")
-
-                        Text("10,000+ technical terms (kubernetes, docker, nginx, API, JSON, etc.) • Case-insensitive")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                            .padding(.leading, 20)
-                    }
-
-                    // Brand Names
-                    VStack(alignment: .leading, spacing: 4) {
-                        Toggle("Brand & Company Names", isOn: $preferences.enableBrandNames)
-                            .help("Accept brand names like Apple, Microsoft, Google, Amazon, etc.")
-
-                        Text("2,400+ brand/company names (Fortune 500, Forbes 2000, global brands) • Case-insensitive")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                            .padding(.leading, 20)
-                    }
-
-                    // Person Names
-                    VStack(alignment: .leading, spacing: 4) {
-                        Toggle("Person Names (First Names)", isOn: $preferences.enablePersonNames)
-                            .help("Accept common first names like James, Maria, Chen, Fatima, etc.")
-
-                        Text("100,000+ international first names (US SSA + worldwide sources) • Case-insensitive")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                            .padding(.leading, 20)
-                    }
-
-                    // Surnames
-                    VStack(alignment: .leading, spacing: 4) {
-                        Toggle("Surnames (Last Names)", isOn: $preferences.enableLastNames)
-                            .help("Accept common surnames like Smith, Garcia, Johnson, etc.")
-
-                        Text("150,000+ surnames from US Census data • Case-insensitive")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                            .padding(.leading, 20)
-                    }
-                }
-                .padding(.vertical, 4)
-            }
-            .padding()
-
-            Divider()
-
-            // Language Detection section
-            HStack {
-                Image(systemName: "globe")
-                    .font(.title2)
-                    .foregroundColor(.accentColor)
-                Text("Language Detection")
-                    .font(.headline)
-            }
-            .padding(.horizontal)
-            .padding(.top, 16)
-            .padding(.bottom, 8)
-
-            VStack(alignment: .leading, spacing: 8) {
-                Toggle("Ignore selected languages", isOn: $preferences.enableLanguageDetection)
-                    .help("Skip English grammar checks in confidently detected passages")
-
-                Text("Skip English grammar checks in documents and passages confidently detected as a selected language.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-
-                if preferences.enableLanguageDetection {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Languages to ignore")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                            .padding(.top, 8)
-
-                        LanguageSelectorView(selectedLanguageCodes: $preferences.excludedLanguages)
-                    }
-                }
-            }
-            .padding(.vertical, 4)
-            .padding(.horizontal)
-
-            Divider()
-
-            // Custom Dictionary header
-            HStack {
-                Image(systemName: "plus.circle")
-                    .font(.title2)
-                    .foregroundColor(.accentColor)
-                Text("Custom Dictionary")
-                    .font(.headline)
-            }
-            .padding(.horizontal)
-            .padding(.top, 16)
-            .padding(.bottom, 8)
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            GroupBox {
-                HStack(spacing: 12) {
-                    TextField("Add word...", text: $newWord)
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit {
-                            addWord()
-                        }
-
-                    Button("Add") {
-                        addWord()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(newWord.isEmpty)
-                    .controlSize(.large)
-                }
-            }
-            .padding()
-
-            // Info section
-            HStack {
-                Label("\(vocabulary.words.count) of 1,000 words", systemImage: "list.number")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-
-                Spacer()
-
-                if vocabulary.words.count >= 1000 {
-                    Label("Limit reached", systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption)
-                        .foregroundColor(.orange)
-                }
-            }
-            .padding(.horizontal)
-            .padding(.bottom, 8)
-
-            // Error message
-            if let errorMessage {
-                HStack {
-                    Image(systemName: "exclamationmark.circle.fill")
-                        .foregroundColor(.red)
-                    Text(errorMessage)
-                        .font(.caption)
-                        .foregroundColor(.red)
-                }
-                .padding(.horizontal)
-                .padding(.bottom, 8)
-            }
-
-            Divider()
-
-            // Search field - inline, modern style (only show if there are words)
-            if !vocabulary.words.isEmpty {
-                HStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundColor(.secondary)
-                        .font(.body)
-
-                    TextField("Search words", text: $searchText)
-                        .textFieldStyle(.plain)
-
-                    if !searchText.isEmpty {
-                        Button {
-                            searchText = ""
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .foregroundColor(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(
-                    RoundedRectangle(cornerRadius: 6)
-                        .fill(Color(nsColor: .controlBackgroundColor))
-                )
-                .padding(.horizontal)
-                .padding(.top, 12)
-                .padding(.bottom, 8)
-            }
-
-            // Word list
-            if vocabulary.words.isEmpty {
-                ContentUnavailableView {
-                    Label("No Custom Words", systemImage: "text.book.closed")
-                } description: {
-                    Text("Add words to ignore during grammar checking")
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if filteredWords.isEmpty {
-                ContentUnavailableView.search(text: searchText)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                List {
-                    ForEach(filteredWords, id: \.self) { word in
-                        HStack(spacing: 12) {
-                            Text(word)
-                                .font(.body)
-
-                            Spacer()
-
-                            Button {
-                                removeWord(word)
-                            } label: {
-                                Image(systemName: "minus.circle.fill")
-                                    .foregroundColor(.red)
-                            }
-                            .buttonStyle(.plain)
-                            .help("Remove \"\(word)\" from dictionary")
-                        }
-                        .padding(.vertical, 2)
-                    }
-                }
-                .listStyle(.inset(alternatesRowBackgrounds: true))
-            }
-
-            // Clear all button - only show if there are words
-            if !vocabulary.words.isEmpty {
-                Divider()
-
-                HStack {
-                    Spacer()
-
-                    Button(role: .destructive) {
-                        clearAll()
-                    } label: {
-                        Label("Clear All", systemImage: "trash")
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.large)
-                }
-                .padding()
-            }
+    private func wordlist(_ title: String, _ isOn: Binding<Bool>, _ note: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle(title, isOn: isOn)
+            Text(note)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .padding(.leading, 20)
         }
     }
 

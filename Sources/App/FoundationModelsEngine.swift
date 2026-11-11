@@ -24,15 +24,15 @@ enum StyleEngineStatus: Equatable {
     var userMessage: String {
         switch self {
         case .available:
-            "Ready"
+            "可以用"
         case .appleIntelligenceNotEnabled:
-            "Enable Apple Intelligence in System Settings → Apple Intelligence & Siri"
+            "先在「系统设置 › Apple 智能与 Siri」里打开 Apple 智能"
         case .deviceNotEligible:
-            "Style suggestions require a Mac with Apple Silicon"
+            "这台 Mac 用不了 Apple 智能：要 Apple 芯片和 macOS 26"
         case .modelNotReady:
-            "Apple Intelligence is preparing the language model. TextWarden will check automatically."
+            "Apple 智能还在准备模型，准备好后 TypeRight 会自己发现。"
         case let .unknown(reason):
-            "Style suggestions unavailable: \(reason)"
+            "Apple 智能现在用不了：\(reason)"
         }
     }
 
@@ -689,17 +689,17 @@ enum FoundationModelsError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case let .notAvailable(status):
-            "Foundation Models not available: \(status.userMessage)"
+            "Apple 智能用不了：\(status.userMessage)"
         case let .generationFailed(message):
-            "Generation failed: \(message)"
+            "没生成出来：\(message)"
         case let .analysisError(message):
-            "Analysis error: \(message)"
+            "分析出错：\(message)"
         case .selectionTooLong:
-            "Select a shorter passage. The selection was not shortened or changed."
+            "选短一点的一段。选中的文字没有动。"
         case .uncertainRewriteLanguage:
-            "Language unclear · select more text"
+            "看不出是哪种语言 · 多选一些文字"
         case .rewriteLanguageChanged:
-            "Language changed · text unchanged"
+            "改写换了语言 · 原文没动"
         }
     }
 }
@@ -791,21 +791,21 @@ extension FoundationModelsError {
 
     /// Shared by all AI features; framework descriptions can include private prompts or outputs.
     static func safeMessage(for error: Error) -> String {
-        if error is CancellationError { return "Request cancelled" }
+        if error is CancellationError { return "已取消" }
         if let error = error as? FoundationModelsError { return error.localizedDescription }
         #if canImport(FoundationModels)
             if #available(macOS 26.0, *), let error = error as? LanguageModelSession.GenerationError {
                 switch error {
-                case .guardrailViolation, .refusal: return "Apple Intelligence could not process this request."
-                case .exceededContextWindowSize: return "The model ran out of space while processing the text or generating its response. Try again, or use a shorter passage or instruction."
-                case .unsupportedLanguageOrLocale: return "Apple Intelligence does not support this language."
-                case .assetsUnavailable: return "Apple Intelligence is unavailable. Please try again later."
-                case .rateLimited, .concurrentRequests: return "Apple Intelligence is busy. Please try again."
+                case .guardrailViolation, .refusal: return "Apple 智能处理不了这段文字。"
+                case .exceededContextWindowSize: return "文字太长，模型处理不完。换短一点的一段再试。"
+                case .unsupportedLanguageOrLocale: return "Apple 智能不支持这种语言。"
+                case .assetsUnavailable: return "Apple 智能现在用不了，过一会儿再试。"
+                case .rateLimited, .concurrentRequests: return "Apple 智能正忙，再试一次。"
                 default: break
                 }
             }
         #endif
-        return "Apple Intelligence could not complete this request. Please try again."
+        return "Apple 智能这次没做完，再试一次。"
     }
 }
 
@@ -847,9 +847,9 @@ enum StyleTemperaturePreset: String, CaseIterable, Identifiable {
     /// Display name for UI
     var label: String {
         switch self {
-        case .consistent: "Consistent"
-        case .balanced: "Balanced"
-        case .creative: "Creative"
+        case .consistent: "稳定"
+        case .balanced: "适中"
+        case .creative: "多变"
         }
     }
 
@@ -857,11 +857,11 @@ enum StyleTemperaturePreset: String, CaseIterable, Identifiable {
     var description: String {
         switch self {
         case .consistent:
-            "Minimal variation"
+            "每次改出来几乎一样"
         case .balanced:
-            "Some variation"
+            "每次略有不同"
         case .creative:
-            "More variation"
+            "每次变化更多"
         }
     }
 

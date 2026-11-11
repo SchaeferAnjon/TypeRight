@@ -58,11 +58,10 @@ struct TextWardenApp: App {
         .defaultSize(width: 0, height: 0)
         .windowResizability(.contentSize)
         .commands {
-            // App menu customizations
             CommandGroup(replacing: .appInfo) {
                 Button("关于 TypeRight") {
                     PreferencesWindowController.shared.selectTab(.about)
-                    NSApp.sendAction(#selector(AppDelegate.openSettingsWindow(selectedTab:)), to: nil, from: nil)
+                    TRSettingsWindowController.shared.show(.advanced)
                 }
             }
 
@@ -72,102 +71,44 @@ struct TextWardenApp: App {
                 }
             }
 
-            CommandGroup(after: .help) {
-                Button("Replay Tutorial") {
-                    NSApp.sendAction(#selector(AppDelegate.openTutorialWindow), to: nil, from: nil)
-                }
-            }
-
             CommandGroup(replacing: .appSettings) {
                 Button("设置…") {
-                    PreferencesWindowController.shared.selectTab(.general)
-                    NSApp.sendAction(#selector(AppDelegate.openSettingsWindow(selectedTab:)), to: nil, from: nil)
+                    TRSettingsWindowController.shared.show()
                 }
                 .keyboardShortcut(",", modifiers: .command)
             }
 
-            // Replace default New Window with New Sketch
+            // The placeholder scene must not offer "New Window" (its window is empty). File keeps
+            // one item: ⌘W closes the main window or settings, as in any Mac app.
             CommandGroup(replacing: .newItem) {
-                Button("New Sketch") {
-                    // Show Sketch Pad window if not visible
-                    SketchPadWindowController.shared.showWindow()
-                    // Create new sketch
-                    SketchPadViewModel.shared.newDocument()
+                Button("关闭") {
+                    NSApp.keyWindow?.performClose(nil)
                 }
-                .keyboardShortcut("n", modifiers: .command)
+                .keyboardShortcut("w", modifiers: .command)
             }
-
-            // Add Save command
-            CommandGroup(replacing: .saveItem) {
-                Button("Save") {
-                    Task {
-                        await SketchPadViewModel.shared.saveCurrentDocument()
-                    }
-                }
-                .keyboardShortcut("s", modifiers: .command)
-            }
+            CommandGroup(replacing: .saveItem) {}
 
             // Standard Edit menu commands (Undo, Redo, Cut, Copy, Paste, Select All)
             TextEditingCommands()
 
-            // Format menu for Sketch Pad text formatting
-            CommandMenu("Format") {
-                Button("Bold") {
-                    SketchPadViewModel.shared.toggleBold()
+            // The first release ships without a help book: Help opens the guide on the website.
+            CommandGroup(replacing: .help) {
+                Button(Self.guideTitle) {
+                    NSWorkspace.shared.open(Self.guideURL)
                 }
-                .keyboardShortcut("b", modifiers: .command)
-
-                Button("Italic") {
-                    SketchPadViewModel.shared.toggleItalic()
-                }
-                .keyboardShortcut("i", modifiers: .command)
-
-                Button("Underline") {
-                    SketchPadViewModel.shared.toggleUnderline()
-                }
-                .keyboardShortcut("u", modifiers: .command)
-
-                Button("Strikethrough") {
-                    SketchPadViewModel.shared.toggleStrikethrough()
-                }
-                .keyboardShortcut("x", modifiers: [.command, .shift])
-
-                Divider()
-
-                Button("Heading 1") {
-                    SketchPadViewModel.shared.toggleHeading(level: 1)
-                }
-                .keyboardShortcut("1", modifiers: .command)
-
-                Button("Heading 2") {
-                    SketchPadViewModel.shared.toggleHeading(level: 2)
-                }
-                .keyboardShortcut("2", modifiers: .command)
-
-                Button("Heading 3") {
-                    SketchPadViewModel.shared.toggleHeading(level: 3)
-                }
-                .keyboardShortcut("3", modifiers: .command)
-
-                Divider()
-
-                Button("Clear Formatting") {
-                    SketchPadViewModel.shared.clearFormatting()
-                }
-                .keyboardShortcut("\\", modifiers: .command)
             }
         }
     }
+
+    static let guideTitle = "TypeRight 上手指南"
+    static let guideURL = URL(string: "https://typeright.us-cloud.uk/#page=guide")!
 }
 
 /// AppDelegate handles menu bar controller initialization
 class AppDelegate: NSObject, NSApplicationDelegate {
     var menuBarController: MenuBarController?
     var analysisCoordinator: AnalysisCoordinator?
-    var settingsWindow: NSWindow? // Keep strong reference to settings window
     var onboardingWindow: NSWindow? // Keep strong reference to onboarding window
-    var tutorialWindow: NSWindow? // Replayable interactive tutorial
-    var sketchPadWindow: NSWindow? // Keep strong reference to sketch pad window (managed by SketchPadWindowController)
 
     /// Shared updater view model for Sparkle auto-updates
     /// Uses singleton to ensure only ONE SPUStandardUpdaterController exists
@@ -233,6 +174,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
 
         Logger.info("Set as menu bar app (no dock icon)", category: Logger.lifecycle)
+
+        // Applies the 外观 setting (设置 › 高级 › 通用) from launch on, not only once settings open.
+        _ = PreferencesWindowController.shared
 
         // CRITICAL: LSUIElement apps don't receive activation events, so the main run loop
         // doesn't fully "spin" until something creates a Cocoa event. This causes timers,
@@ -330,27 +274,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     self?.openSettingsWindow()
                 }
             }
-
-            // Check for pending milestones on startup (e.g., after system restart)
-            // Delay to ensure menu bar is fully initialized
-            DispatchQueue.main.asyncAfter(deadline: .now() + TimingConstants.startupMilestoneCheckDelay) { [weak self] in
-                Task { @MainActor in
-                    self?.checkForStartupMilestone()
-                }
-            }
         }
-    }
-
-    /// Check for and show any pending milestone on app startup
-    @MainActor
-    private func checkForStartupMilestone() {
-        guard let milestone = MilestoneManager.shared.checkForMilestones() else {
-            Logger.debug("No pending milestones on startup", category: Logger.ui)
-            return
-        }
-
-        Logger.info("Found pending milestone on startup: \(milestone.id)", category: Logger.ui)
-        menuBarController?.showMilestone(milestone)
     }
 
     @MainActor
@@ -434,48 +358,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         onboardingWindow?.close()
     }
 
-    /// Opens the existing interactive tutorial without changing onboarding completion state.
-    @objc func openTutorialWindow() {
-        if let tutorialWindow {
-            NSApp.setActivationPolicy(.regular)
-            tutorialWindow.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            return
-        }
-
-        let closeTutorial: () -> Void = { [weak self] in
-            self?.tutorialWindow?.close()
-        }
-        let tutorial = GettingStartedTutorialView(
-            onSkip: closeTutorial,
-            onComplete: closeTutorial,
-            onBackToOnboarding: nil
-        )
-        let window = NSWindow(contentViewController: NSHostingController(rootView: tutorial))
-        window.title = "TextWarden Tutorial"
-        window.styleMask = [.titled, .closable, .miniaturizable]
-        window.isReleasedWhenClosed = false
-        window.setContentSize(NSSize(width: 640, height: 760))
-        window.minSize = NSSize(width: 640, height: 660)
-        window.center()
-        tutorialWindow = window
-
-        NotificationCenter.default.addObserver(
-            forName: NSWindow.willCloseNotification,
-            object: window,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.tutorialWindow = nil
-                MenuBarOnlyMode.restoreIfNoWindowOpen()
-            }
-        }
-
-        NSApp.setActivationPolicy(.regular)
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-    }
-
     /// Prevent app from quitting when all windows close (menu bar app)
     func applicationShouldTerminateAfterLastWindowClosed(_: NSApplication) -> Bool {
         false
@@ -483,9 +365,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_: Notification) {
         Logger.info("Application will terminate - cleaning up", category: Logger.lifecycle)
-
-        // Save Sketch Pad document synchronously before termination
-        SketchPadViewModel.shared.saveImmediately()
 
         // Stop crash recovery heartbeat for clean shutdown detection
         CrashRecoveryManager.shared.stopHeartbeat()
@@ -506,101 +385,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         Logger.info("Cleanup complete", category: Logger.lifecycle)
     }
 
-    /// Open or bring forward the settings window
-    /// Creates window manually for reliable reopening behavior
-    /// Tab selection is controlled by PreferencesWindowController.shared
+    /// Opens TypeRight's settings window (TextWarden's settings live on under 设置 › 高级).
     @objc func openSettingsWindow(selectedTab _: Int = 0) {
-        // TypeRight: its own settings window; TextWarden's lives on under 设置 › 高级.
         MainActor.assumeIsolated { TRSettingsWindowController.shared.show() }
-        return
-
-        Logger.debug("openSettingsWindow called - ActivationPolicy: \(NSApp.activationPolicy().rawValue)", category: Logger.ui)
-
-        // If window exists, just show it (tab is already set by PreferencesWindowController)
-        if let window = settingsWindow {
-            Logger.debug("Reusing existing settings window", category: Logger.ui)
-
-            Logger.debug("Switching to .regular mode to show settings", category: Logger.ui)
-
-            // Temporarily switch to regular mode to show window
-            NSApp.setActivationPolicy(.regular)
-
-            Logger.debug("setActivationPolicy(.regular) completed - ActivationPolicy: \(NSApp.activationPolicy().rawValue)", category: Logger.ui)
-
-            // Force window to front
-            window.orderFrontRegardless()
-            window.makeKeyAndOrderFront(nil)
-
-            // Activate app
-            NSApp.activate(ignoringOtherApps: true)
-
-            Logger.info("Settings window shown", category: Logger.ui)
-            return
-        }
-
-        Logger.debug("Creating new settings window", category: Logger.ui)
-
-        let preferencesView = PreferencesView()
-        let hostingController = NSHostingController(rootView: preferencesView)
-
-        let window = NSWindow(contentViewController: hostingController)
-        window.title = "TextWarden Settings"
-        window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-        window.isReleasedWhenClosed = false // CRITICAL: Keep window alive when closed
-        window.setContentSize(NSSize(width: 850, height: 1000))
-        window.minSize = NSSize(width: 750, height: 800)
-        window.center()
-        window.delegate = self
-        window.level = .normal
-
-        // Keep the native titled-window shape; an empty toolbar opts into the larger toolbar radius.
-        window.titlebarAppearsTransparent = true
-        window.titleVisibility = .hidden
-
-        // Store window
-        settingsWindow = window
-
-        Logger.debug("Window created, switching to regular mode", category: Logger.ui)
-
-        // Temporarily switch to regular mode to show window
-        NSApp.setActivationPolicy(.regular)
-
-        Logger.debug("setActivationPolicy(.regular) completed - ActivationPolicy: \(NSApp.activationPolicy().rawValue)", category: Logger.ui)
-
-        window.orderFrontRegardless()
-        window.makeKeyAndOrderFront(nil)
-
-        // Activate app
-        NSApp.activate(ignoringOtherApps: true)
-
-        Logger.info("Settings window displayed", category: Logger.ui)
     }
 }
 
-// MARK: - Window Delegate
+// MARK: - Keyboard Shortcuts
 
-extension AppDelegate: NSWindowDelegate {
-    func windowWillClose(_ notification: Notification) {
-        // When settings window closes, check if we should return to menu bar only mode
-        if let window = notification.object as? NSWindow, window == settingsWindow {
-            Logger.debug("Settings windowWillClose - ActivationPolicy: \(NSApp.activationPolicy().rawValue)", category: Logger.ui)
-
-            // Only return to accessory mode if Sketch Pad is not visible
-            let sketchPadVisible = SketchPadWindowController.shared.isVisible
-            if !sketchPadVisible {
-                NSApp.setActivationPolicy(.accessory)
-                Logger.debug("setActivationPolicy(.accessory) completed - no other windows visible", category: Logger.ui)
-            } else {
-                Logger.debug("Sketch Pad still visible, staying in regular mode", category: Logger.ui)
-            }
-        }
-    }
-
-    // MARK: - Keyboard Shortcuts
-
+extension AppDelegate {
     /// Setup global keyboard shortcuts using KeyboardShortcuts package
     private func setupKeyboardShortcuts() {
-        // Toggle TextWarden (Option+Control+T by default)
+        // Pause / resume everywhere (no default key; set in 设置 › 快捷键)
         KeyboardShortcuts.onKeyUp(for: .toggleTextWarden) {
             Task { @MainActor in
                 let preferences = UserPreferences.shared
@@ -631,26 +427,7 @@ extension AppDelegate: NSWindowDelegate {
             }
         }
 
-        // Run style check on current text (Option+Control+S by default)
-        KeyboardShortcuts.onKeyUp(for: .runStyleCheck) {
-            Task { @MainActor in
-                let preferences = UserPreferences.shared
-                guard preferences.keyboardShortcutsEnabled else { return }
-
-                Logger.debug("Keyboard shortcut: Run style check", category: Logger.ui)
-
-                // Check if Sketch Pad is the key window
-                if SketchPadWindowController.shared.isKeyWindow {
-                    // Trigger style analysis in Sketch Pad
-                    SketchPadViewModel.shared.triggerStyleAnalysis()
-                } else {
-                    // Trigger manual style check via AnalysisCoordinator for other apps
-                    AnalysisCoordinator.shared.runManualStyleCheck()
-                }
-            }
-        }
-
-        // Fix all obvious errors (Option+Control+A by default - "A" for Apply All)
+        // Fix all obvious errors (no default key; set in 设置 › 高级 › 通用)
         // Applies all single-suggestion fixes at once
         KeyboardShortcuts.onKeyUp(for: .fixAllObvious) {
             Task { @MainActor in
@@ -666,90 +443,11 @@ extension AppDelegate: NSWindowDelegate {
             }
         }
 
-        // Show grammar suggestions popover (Option+Control+G by default)
-        KeyboardShortcuts.onKeyUp(for: .showGrammarSuggestions) {
-            Task { @MainActor in
-                let preferences = UserPreferences.shared
-                guard preferences.keyboardShortcutsEnabled else { return }
-
-                // Toggle: hide if visible, show if hidden
-                if SuggestionPopover.shared.isVisible {
-                    Logger.debug("Keyboard shortcut: Hide grammar popover (toggle)", category: Logger.ui)
-                    SuggestionPopover.shared.hide()
-                } else {
-                    Logger.debug("Keyboard shortcut: Show grammar suggestions", category: Logger.ui)
-                    FloatingErrorIndicator.shared.showGrammarPopoverFromKeyboard()
-                }
-            }
-        }
-
-        // Show style suggestions popover (Option+Control+Y by default)
-        KeyboardShortcuts.onKeyUp(for: .showStyleSuggestions) {
-            Task { @MainActor in
-                let preferences = UserPreferences.shared
-                guard preferences.keyboardShortcutsEnabled else { return }
-
-                // Toggle: hide if visible, show if hidden
-                if SuggestionPopover.shared.isVisible {
-                    Logger.debug("Keyboard shortcut: Hide style popover (toggle)", category: Logger.ui)
-                    SuggestionPopover.shared.hide()
-                } else {
-                    Logger.debug("Keyboard shortcut: Show style suggestions", category: Logger.ui)
-                    FloatingErrorIndicator.shared.showStylePopoverFromKeyboard()
-                }
-            }
-        }
-
         // Rewrite selection directly, independently of indicator visibility.
         KeyboardShortcuts.onKeyUp(for: .quickRewrite) {
             Task { @MainActor in
                 guard UserPreferences.shared.keyboardShortcutsEnabled else { return }
                 AnalysisCoordinator.shared.quickRewriteSelection()
-            }
-        }
-
-        // Show AI Compose popover (Option+Control+W by default)
-        KeyboardShortcuts.onKeyUp(for: .showAICompose) {
-            Task { @MainActor in
-                let preferences = UserPreferences.shared
-                guard preferences.keyboardShortcutsEnabled else { return }
-
-                // Toggle: hide if visible, show if hidden
-                if TextGenerationPopover.shared.isVisible {
-                    Logger.debug("Keyboard shortcut: Hide AI Compose (toggle)", category: Logger.ui)
-                    TextGenerationPopover.shared.hide()
-                } else {
-                    Logger.debug("Keyboard shortcut: Show AI Compose", category: Logger.ui)
-                    FloatingErrorIndicator.shared.showAIComposeFromKeyboard()
-                }
-            }
-        }
-
-        // Show Readability popover (Option+Control+R by default)
-        KeyboardShortcuts.onKeyUp(for: .showReadability) {
-            Task { @MainActor in
-                let preferences = UserPreferences.shared
-                guard preferences.keyboardShortcutsEnabled else { return }
-
-                // Toggle: hide if visible, show if hidden
-                if ReadabilityPopover.shared.isVisible {
-                    Logger.debug("Keyboard shortcut: Hide Readability (toggle)", category: Logger.ui)
-                    ReadabilityPopover.shared.hide()
-                } else {
-                    Logger.debug("Keyboard shortcut: Show Readability", category: Logger.ui)
-                    FloatingErrorIndicator.shared.showReadabilityFromKeyboard()
-                }
-            }
-        }
-
-        // Toggle Sketch Pad window (Option+Control+N by default)
-        KeyboardShortcuts.onKeyUp(for: .toggleSketchPad) {
-            Task { @MainActor in
-                let preferences = UserPreferences.shared
-                guard preferences.keyboardShortcutsEnabled else { return }
-
-                Logger.debug("Keyboard shortcut: Toggle Sketch Pad", category: Logger.ui)
-                SketchPadWindowController.shared.toggleWindow()
             }
         }
 

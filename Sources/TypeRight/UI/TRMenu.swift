@@ -9,38 +9,98 @@
 import AppKit
 import SwiftUI
 
+/// The "AI" line near the bottom of the menu.
+enum TRMenuAILine: Equatable {
+    case ready(CoachProvider)
+    /// The provider answered 401 / 403 to the saved key.
+    case keyRejected(CoachProvider)
+    case notSet
+
+    static func current() -> TRMenuAILine {
+        guard CoachSettings.isAIReady else { return .notSet }
+        let provider = CoachSettings.provider
+        return CoachKeyStore.shared.isRejected(provider) ? .keyRejected(provider) : .ready(provider)
+    }
+
+    var title: String {
+        switch self {
+        case let .ready(provider): "AI：\(provider.displayName)"
+        case let .keyRejected(provider): "AI：\(provider.displayName) 的 Key 失效了"
+        case .notSet: "AI：还没选，只查拼写"
+        }
+    }
+
+    /// Status dot (DESIGN.md: ok usable, warn one step left, danger key rejected).
+    var dotColor: NSColor {
+        switch self {
+        case .ready: TR.fixNS
+        case .keyRejected: TR.dangerNS
+        case .notSet: TR.markNS
+        }
+    }
+
+    /// Clicking the line opens 设置 › AI 服务商 whenever there is something to fix.
+    var opensSettings: Bool {
+        if case .ready = self { return false }
+        return true
+    }
+}
+
+/// What the menu shows, read from the app (or made up for screenshots).
+struct TRMenuState {
+    struct App: Equatable {
+        var id: String
+        var name: String
+        var paused: Bool
+    }
+
+    var app: App?
+    var allPaused: Bool
+    var ai: TRMenuAILine
+    var needsAccess: Bool
+
+    @MainActor
+    static func current(frontmost: NSRunningApplication?) -> TRMenuState {
+        let prefs = UserPreferences.shared
+        var app: App?
+        if let running = frontmost, let id = running.bundleIdentifier, id != Bundle.main.bundleIdentifier {
+            app = App(id: id, name: running.localizedName ?? id, paused: prefs.getPauseDuration(for: id) != .active)
+        }
+        return TRMenuState(app: app, allPaused: !prefs.isEnabled, ai: .current(),
+                           needsAccess: !PermissionManager.shared.isPermissionGranted)
+    }
+}
+
 @MainActor
 final class TypeRightMenu: NSObject {
     static let shared = TypeRightMenu()
 
-    private var frontmost: NSRunningApplication?
-
     func build(frontmost: NSRunningApplication?) -> NSMenu {
-        self.frontmost = frontmost
+        build(state: .current(frontmost: frontmost), notebook: .shared)
+    }
+
+    func build(state: TRMenuState, notebook: CoachNotebook) -> NSMenu {
         let menu = NSMenu()
-        let prefs = UserPreferences.shared
 
         let header = NSMenuItem()
-        let host = NSHostingView(rootView: TRMenuHeader(notebook: CoachNotebook.shared))
+        let host = NSHostingView(rootView: TRMenuHeader(notebook: notebook))
         host.sizingOptions = []
         host.frame = NSRect(x: 0, y: 0, width: 300, height: 104)
         header.view = host
         menu.addItem(header)
         menu.addItem(.separator())
 
-        if let app = frontmost, let id = app.bundleIdentifier, id != Bundle.main.bundleIdentifier {
-            let name = app.localizedName ?? id
-            let paused = prefs.getPauseDuration(for: id) != .active
-            let item = NSMenuItem(title: paused ? "在「\(name)」里继续" : "在「\(name)」里暂停",
+        if let app = state.app {
+            let item = NSMenuItem(title: app.paused ? "在「\(app.name)」里继续" : "在「\(app.name)」里暂停",
                                   action: #selector(toggleApp(_:)), keyEquivalent: "")
-            item.representedObject = id
+            item.representedObject = app.id
             item.target = self
             menu.addItem(item)
         }
-        if prefs.isEnabled {
-            menu.addItem(item("全部暂停 1 小时", #selector(pauseHour)))
-        } else {
+        if state.allPaused {
             menu.addItem(item("全部继续", #selector(resumeAll)))
+        } else {
+            menu.addItem(item("全部暂停 1 小时", #selector(pauseHour)))
         }
         menu.addItem(.separator())
         menu.addItem(item("打开 TypeRight", #selector(openMain)))
@@ -49,14 +109,13 @@ final class TypeRightMenu: NSObject {
         menu.addItem(settings)
         menu.addItem(.separator())
 
-        let ai = NSMenuItem(title: CoachSettings.isAIReady ? "AI：\(CoachSettings.provider.displayName)" : "AI：还没选，只查拼写",
-                            action: CoachSettings.isAIReady ? nil : #selector(openAI), keyEquivalent: "")
+        let ai = NSMenuItem(title: state.ai.title, action: state.ai.opensSettings ? #selector(openAI) : nil, keyEquivalent: "")
         ai.target = self
         ai.image = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: nil)?
             .withSymbolConfiguration(.init(pointSize: 6, weight: .regular)
-                .applying(.init(paletteColors: [CoachSettings.isAIReady ? NSColor.systemGreen : NSColor.systemOrange])))
+                .applying(.init(paletteColors: [state.ai.dotColor])))
         menu.addItem(ai)
-        if !PermissionManager.shared.isPermissionGranted {
+        if state.needsAccess {
             menu.addItem(item("还没给辅助功能权限…", #selector(openAccess)))
         }
         let quit = NSMenuItem(title: "退出 TypeRight", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")

@@ -54,7 +54,6 @@ Tests/
 └── Unit/               Focused Swift unit tests
 
 Scripts/                Build, release, signing, and documentation tooling
-Resources/              Help Book resources and packaged assets
 ```
 
 ## Runtime Data Flow
@@ -318,4 +317,4 @@ make ci-check  # Format checks, lint, Rust tests, Swift tests, and release build
 
 `make test` includes the Rust suite plus selected Swift unit, contract, and integration test classes. The performance benchmarks under `Tests/Performance/` are not part of that default Swift invocation.
 
-`make build` builds the Rust static library for Intel and Apple Silicon, combines it into a universal library, rebuilds the Help Book with Pandoc, and then builds the Xcode target. See [BUILD.md](BUILD.md) for prerequisites and [CONTRIBUTING.md](CONTRIBUTING.md) for branch, commit, and pull-request rules.
+`make build` builds the Rust static library for Intel and Apple Silicon, combines it into a universal library, and then builds the Xcode target. See [BUILD.md](BUILD.md) for prerequisites and [CONTRIBUTING.md](CONTRIBUTING.md) for branch, commit, and pull-request rules.

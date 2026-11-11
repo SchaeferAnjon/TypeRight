@@ -100,7 +100,8 @@ enum CoachProvider: String, CaseIterable, Identifiable {
 // MARK: - Settings
 
 enum CoachSettings {
-    private static var defaults: UserDefaults { .standard }
+    /// Screenshots point this at a throwaway suite, so they never show the user's own settings.
+    static var defaults: UserDefaults = .standard
 
     static var provider: CoachProvider {
         get { CoachProvider(rawValue: defaults.string(forKey: "typeright.provider") ?? "") ?? .deepseek }
@@ -110,6 +111,11 @@ enum CoachSettings {
     static func model(for provider: CoachProvider) -> String {
         let custom = defaults.string(forKey: "typeright.model.\(provider.rawValue)") ?? ""
         return custom.isEmpty ? provider.defaultModel : custom
+    }
+
+    /// The model name typed in settings; empty means the provider's default.
+    static func typedModel(for provider: CoachProvider) -> String {
+        defaults.string(forKey: "typeright.model.\(provider.rawValue)") ?? ""
     }
 
     static func setModel(_ model: String, for provider: CoachProvider) {
@@ -242,7 +248,8 @@ enum CoachKeychain {
 /// so pauses and the provider list never wait on the keychain. A key the provider turned down
 /// (HTTP 401 / 403) stays marked until a new one is saved; the AI cards stop until then.
 final class CoachKeyStore: @unchecked Sendable {
-    static let shared = CoachKeyStore(read: { CoachKeychain.read(account: $0) },
+    /// Screenshots swap in a store with a made-up key, so they never read the user's keychain.
+    static var shared = CoachKeyStore(read: { CoachKeychain.read(account: $0) },
                                       write: { CoachKeychain.setString($0, account: $1) })
 
     private let readItem: (String) -> CoachKeyRead

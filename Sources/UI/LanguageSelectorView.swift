@@ -32,7 +32,7 @@ struct LanguageSelectorView: View {
 
     private var displayedAvailableLanguages: [SupportedLanguage] {
         guard hasSearchQuery else { return availableLanguages }
-        return availableLanguages.filter { $0.matches(searchText) }
+        return availableLanguages.filter { $0.matches(searchText) || Self.chineseName($0).contains(searchText.trimmingCharacters(in: .whitespaces)) }
     }
 
     private var selectedListMaximumHeight: CGFloat {
@@ -42,21 +42,21 @@ struct LanguageSelectorView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             languageList(
-                title: "Selected languages",
+                title: "已选的语言",
                 languages: selectedLanguages,
                 totalCount: selectedLanguages.count,
                 maximumHeight: selectedListMaximumHeight,
-                emptyTitle: "No languages selected yet",
-                emptyDescription: "Choose a language below to add it here.",
+                emptyTitle: "还没选",
+                emptyDescription: "在下面勾一种语言，它就到这里来。",
                 isSelectedList: true
             )
 
-            SearchField(text: $searchText, placeholder: "Search available languages by name or code")
+            SearchField(text: $searchText, placeholder: "按名字或代码找语言")
                 .frame(maxWidth: .infinity, minHeight: 22, maxHeight: 22)
-                .accessibilityLabel("Search available languages")
+                .accessibilityLabel("找语言")
 
             languageList(
-                title: "Available languages",
+                title: "可选的语言",
                 languages: displayedAvailableLanguages,
                 totalCount: availableLanguages.count,
                 maximumHeight: maxHeight,
@@ -70,16 +70,16 @@ struct LanguageSelectorView: View {
 
     private var availableListEmptyTitle: String {
         if availableLanguages.isEmpty {
-            return "All languages are selected"
+            return "全都选了"
         }
-        return "No languages found"
+        return "没找到"
     }
 
     private var availableListEmptyDescription: String {
         if availableLanguages.isEmpty {
-            return "Uncheck a language above to make it available again."
+            return "在上面取消勾选，语言就回到这里。"
         }
-        return "Try a different language name or code."
+        return "换个名字或代码试试。"
     }
 
     private func languageList(
@@ -112,7 +112,7 @@ struct LanguageSelectorView: View {
                     Divider()
                         .frame(height: 12)
 
-                    Label("Scroll to browse", systemImage: "arrow.up.arrow.down")
+                    Label("可以滚动", systemImage: "arrow.up.arrow.down")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -121,12 +121,12 @@ struct LanguageSelectorView: View {
                     Divider()
                         .frame(height: 12)
 
-                    Button("Clear") {
+                    Button("清空") {
                         selectedLanguageCodes.removeAll()
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(.tint)
-                    .help("Deselect all languages")
+                    .help("全部取消勾选")
                 }
             }
             .padding(.horizontal, 10)
@@ -183,9 +183,9 @@ struct LanguageSelectorView: View {
         isSelectedList: Bool
     ) -> String {
         if !isSelectedList, hasSearchQuery, visibleCount != totalCount {
-            return "\(visibleCount) of \(totalCount)"
+            return "\(visibleCount) / \(totalCount)"
         }
-        return isSelectedList ? "\(totalCount) selected" : "\(totalCount) available"
+        return isSelectedList ? "已选 \(totalCount) 种" : "共 \(totalCount) 种"
     }
 
     private func emptyListState(
@@ -223,14 +223,12 @@ struct LanguageSelectorView: View {
         Toggle(isOn: selectionBinding(for: language.code)) {
             HStack(spacing: 10) {
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(language.englishName)
+                    Text(Self.chineseName(language))
                         .font(.body)
 
-                    if let secondaryName = language.secondaryName {
-                        Text(secondaryName)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+                    Text(language.nativeName)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 Spacer(minLength: 12)
@@ -245,7 +243,7 @@ struct LanguageSelectorView: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .accessibilityLabel(accessibilityLabel(for: language))
-        .accessibilityHint(isSelectedList ? "Move to available languages" : "Move to selected languages")
+        .accessibilityHint(isSelectedList ? "移回可选的语言" : "移到已选的语言")
     }
 
     private func selectionBinding(for code: String) -> Binding<Bool> {
@@ -262,9 +260,11 @@ struct LanguageSelectorView: View {
     }
 
     private func accessibilityLabel(for language: SupportedLanguage) -> String {
-        if let secondaryName = language.secondaryName {
-            return "\(language.englishName), \(secondaryName), \(language.code.uppercased())"
-        }
-        return "\(language.englishName), \(language.code.uppercased())"
+        "\(Self.chineseName(language))，\(language.nativeName)，\(language.code.uppercased())"
+    }
+
+    /// The settings are in Chinese: languages are named in Chinese, with their own name below.
+    static func chineseName(_ language: SupportedLanguage) -> String {
+        Locale(identifier: "zh_CN").localizedString(forLanguageCode: language.code) ?? language.englishName
     }
 }

@@ -54,9 +54,6 @@ jobs:
         with:
           workspaces: GrammarEngine
 
-      - name: Install Help Book tools
-        run: brew install pandoc
-
       - name: Install SwiftFormat
         run: |
           brew update
@@ -111,9 +108,6 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v7
-
-      - name: Install Help Book tools
-        run: brew install pandoc
 
       - name: Select Xcode 16.2
         run: sudo xcode-select --switch /Applications/Xcode_16.2.app

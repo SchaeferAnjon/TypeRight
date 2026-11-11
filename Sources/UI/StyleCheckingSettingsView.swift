@@ -2,7 +2,7 @@
 //  StyleCheckingSettingsView.swift
 //  TextWarden
 //
-//  Settings view for LLM-powered style checking
+//  Settings for rewriting selected text with Apple Intelligence (Quick Rewrite).
 //
 
 import SwiftUI
@@ -12,90 +12,13 @@ import SwiftUI
 #endif
 
 struct StyleCheckingSettingsView: View {
-    @ObservedObject private var preferences = UserPreferences.shared
+    @ObservedObject var preferences: UserPreferences
 
     /// Foundation Models engine status - wrapped for availability
     @State private var fmStatus: StyleEngineStatus = .unknown("")
 
     var body: some View {
         Form {
-            // MARK: - Readability Section (always visible)
-
-            Section {
-                Toggle(isOn: $preferences.readabilityEnabled) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Enable Readability Analysis")
-                        Text("Show readability score and analyze sentence complexity")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-                .toggleStyle(.switch)
-
-                if preferences.readabilityEnabled {
-                    // Target audience segmented control
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Target Audience")
-                            .font(.headline)
-
-                        HStack(spacing: 0) {
-                            ForEach(UserPreferences.targetAudienceOptions, id: \.self) { audience in
-                                Button {
-                                    preferences.selectedTargetAudience = audience
-                                } label: {
-                                    Text(audience)
-                                        .font(.system(size: 12, weight: preferences.selectedTargetAudience == audience ? .semibold : .regular))
-                                        .foregroundColor(preferences.selectedTargetAudience == audience ? .white : .primary)
-                                        .frame(maxWidth: .infinity)
-                                        .padding(.vertical, 6)
-                                        .background(
-                                            preferences.selectedTargetAudience == audience
-                                                ? Color.accentColor
-                                                : Color.clear
-                                        )
-                                }
-                                .buttonStyle(.plain)
-                                .help(audienceDescription(for: audience))
-                                .accessibilityAddTraits(preferences.selectedTargetAudience == audience ? .isSelected : [])
-                            }
-                        }
-                        .background(Color(.separatorColor).opacity(0.2))
-                        .cornerRadius(6)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 6)
-                                .stroke(Color(.separatorColor), lineWidth: 0.5)
-                        )
-                    }
-
-                    Toggle(isOn: $preferences.showReadabilityUnderlines) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Show Complexity Underlines")
-                            Text("Violet dashed underlines under complex sentences")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                    .toggleStyle(.switch)
-                }
-            } header: {
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "text.book.closed")
-                            .font(.title2)
-                            .foregroundColor(.purple)
-                        Text("Readability")
-                            .font(.title3)
-                            .fontWeight(.semibold)
-                    }
-
-                    Text("Analyze text complexity based on your target audience. Works independently of Apple Intelligence.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-            }
-
-            // MARK: - AI Style Suggestions Section
-
             // Availability status (small section with the header)
             Section {
                 HStack(spacing: 12) {
@@ -104,12 +27,12 @@ struct StyleCheckingSettingsView: View {
                         .foregroundColor(fmStatus.isAvailable ? .green : .orange)
 
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(fmStatus.isAvailable ? "Ready" : "Not Available")
+                        Text(fmStatus.isAvailable ? "可以用" : "用不了")
                             .font(.system(size: 12, weight: .medium))
 
                         if !fmStatus.isAvailable {
                             Text(fmStatus.userMessage)
-                                .font(.caption2)
+                                .font(.caption)
                                 .foregroundColor(.secondary)
                         }
                     }
@@ -117,7 +40,7 @@ struct StyleCheckingSettingsView: View {
                     Spacer()
 
                     if fmStatus == .appleIntelligenceNotEnabled {
-                        Button("Open Settings") {
+                        Button("打开系统设置") {
                             if let url = URL(string: "x-apple.systempreferences:com.apple.preference.appleintelli") {
                                 NSWorkspace.shared.open(url)
                             }
@@ -125,7 +48,7 @@ struct StyleCheckingSettingsView: View {
                         .buttonStyle(.borderedProminent)
                         .controlSize(.mini)
                     } else if fmStatus.canRetry {
-                        Button("Check Again") {
+                        Button("再看一次") {
                             checkFMAvailability()
                         }
                         .buttonStyle(.bordered)
@@ -138,14 +61,15 @@ struct StyleCheckingSettingsView: View {
                         Image(systemName: "sparkles")
                             .font(.title2)
                             .foregroundColor(.purple)
-                        Text("AI Style Suggestions")
+                        Text("用 Apple 智能改写")
                             .font(.title3)
                             .fontWeight(.semibold)
                     }
 
-                    Text("AI-powered suggestions to improve your writing. Includes AI Compose for generating text from instructions. All processing happens on your device.")
+                    Text("选中一段英文，按「通用」里设的「改写选中的文字」键，按下面的风格改写一遍，你看过再决定用不用。在这台 Mac 上处理，不发给任何服务商；要 macOS 26 和 Apple 智能。")
                         .font(.caption)
                         .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .onAppear {
@@ -162,8 +86,8 @@ struct StyleCheckingSettingsView: View {
             Section {
                 Toggle(isOn: $preferences.enableStyleChecking) {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Enable AI Style Suggestions")
-                        Text("Get suggestions for clarity, tone, and conciseness")
+                        Text("打开改写")
+                        Text("关着的时候，改写键不响")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -174,7 +98,7 @@ struct StyleCheckingSettingsView: View {
                 if preferences.enableStyleChecking {
                     // Writing Style segmented control
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Writing Style")
+                        Text("改成什么风格")
                             .font(.headline)
 
                         HStack(spacing: 0) {
@@ -182,7 +106,7 @@ struct StyleCheckingSettingsView: View {
                                 Button {
                                     preferences.selectedWritingStyle = style
                                 } label: {
-                                    Text(style)
+                                    Text(styleLabel(for: style))
                                         .font(.system(size: 12, weight: preferences.selectedWritingStyle == style ? .semibold : .regular))
                                         .foregroundColor(preferences.selectedWritingStyle == style ? .white : .primary)
                                         .frame(maxWidth: .infinity)
@@ -208,7 +132,7 @@ struct StyleCheckingSettingsView: View {
 
                     // Creativity segmented control
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Creativity")
+                        Text("变化多少")
                             .font(.headline)
 
                         HStack(spacing: 0) {
@@ -255,41 +179,31 @@ struct StyleCheckingSettingsView: View {
         .padding()
     }
 
-    // MARK: - Audience Descriptions
+    // MARK: - Style Labels
 
-    private func audienceDescription(for audience: String) -> String {
-        switch audience {
-        case "Accessible":
-            "Text should be easy for everyone to understand. Flags sentences that may be too complex for casual readers."
-        case "General":
-            "Text should be clear for the average adult reader. Good balance for most writing."
-        case "Professional":
-            "Text can be moderately complex. Suitable for business and professional contexts."
-        case "Technical":
-            "Text can use specialized language. Appropriate for technical documentation and formal writing."
-        case "Academic":
-            "Text can be highly complex. Suitable for academic papers and graduate-level content."
-        default:
-            "Text should be clear for the average adult reader."
+    /// The stored value stays the English name; the settings show Chinese.
+    private func styleLabel(for style: String) -> String {
+        switch style {
+        case "Concise": "简洁"
+        case "Formal": "正式"
+        case "Casual": "随意"
+        case "Business": "商务"
+        default: "默认"
         }
     }
 
-    // MARK: - Style Descriptions
-
     private func styleDescription(for style: String) -> String {
         switch style {
-        case "Default":
-            "Balanced style improvements that work for most situations. Suggests clarity and readability enhancements without changing your tone."
         case "Concise":
-            "Brief and to the point. Removes filler words, redundant phrases, and unnecessary verbosity."
+            "简短直接，去掉多余的词和重复的说法。"
         case "Formal":
-            "Professional tone with complete sentences. Ideal for business emails, reports, and official documents."
+            "正式的语气、完整的句子，适合工作邮件、报告和正式文件。"
         case "Casual":
-            "Friendly and conversational. Great for personal messages, social media, and informal communication."
+            "轻松口语，适合私人消息和社交平台。"
         case "Business":
-            "Clear, action-oriented communication. Perfect for professional correspondence and presentations."
+            "清楚、讲行动，适合工作往来和演示。"
         default:
-            "Balanced style improvements that work for most situations."
+            "不改你的语气，只让句子更清楚好读。"
         }
     }
 
@@ -337,8 +251,3 @@ struct StyleCheckingSettingsView: View {
         }
     }
 #endif
-
-#Preview {
-    StyleCheckingSettingsView()
-        .frame(width: 700, height: 700)
-}

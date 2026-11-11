@@ -92,7 +92,7 @@ final class QuickRewriteStatus: ObservableObject {
                     }
                 }
                 NSAccessibility.post(element: panel, notification: .announcementRequested,
-                                     userInfo: [.announcement: "Review rewrite. Enter applies, Escape cancels, Space keeps this review open.", .priority: NSAccessibilityPriorityLevel.high.rawValue])
+                                     userInfo: [.announcement: "看一下改写。回车用改写，Esc 取消，空格让这个框一直开着。", .priority: NSAccessibilityPriorityLevel.high.rawValue])
             }
         } onCancel: {
             Task { @MainActor in
@@ -124,7 +124,7 @@ final class QuickRewriteStatus: ObservableObject {
     /// Never display the framework's debug description: it can contain source text.
     static func failureMessage(for error: Error, cancelled: Bool) -> String {
         if cancelled || error is CancellationError {
-            return "Rewrite cancelled"
+            return "改写取消了"
         }
         if let error = error as? FoundationModelsError {
             switch error {
@@ -138,19 +138,19 @@ final class QuickRewriteStatus: ObservableObject {
             if #available(macOS 26.0, *), let error = error as? LanguageModelSession.GenerationError {
                 switch error {
                 case .guardrailViolation, .refusal:
-                    return "Apple Intelligence could not process this selection · text left unchanged"
+                    return "Apple 智能处理不了选中的文字 · 原文没动"
                 case .exceededContextWindowSize:
-                    return "Select a shorter passage · text left unchanged"
+                    return "选短一点的一段 · 原文没动"
                 case .unsupportedLanguageOrLocale:
-                    return "Apple Intelligence does not support this language · text left unchanged"
+                    return "Apple 智能不支持这种语言 · 原文没动"
                 case .assetsUnavailable:
-                    return "Apple Intelligence is unavailable · text left unchanged"
+                    return "Apple 智能现在用不了 · 原文没动"
                 default:
                     break
                 }
             }
         #endif
-        return "Could not rewrite. Please try again · text left unchanged"
+        return "没改写成，再试一次 · 原文没动"
     }
 
     func show(_ message: String, busy: Bool = false, completion: Completion? = nil) {
@@ -244,9 +244,9 @@ struct QuickRewritePreviewContent: View {
         case .standard:
             nil
         case .transformation:
-            "Generated using transformation mode after a blocked attempt. Check the meaning."
+            "第一次被拦下了，这是换了一种方式生成的，看看意思有没有变。"
         case .quotationExtraction:
-            "This rewrite omits text around a quotation. Check the meaning."
+            "这次改写漏掉了引号前后的文字，看看意思有没有变。"
         }
     }
 
@@ -271,13 +271,13 @@ struct QuickRewritePreviewContent: View {
                 Spacer()
                 Button { onDecision(false) } label: {
                     HStack(spacing: 6) {
-                        Text("Cancel")
+                        Text("取消")
                         if !status.reviewIsKeptOpen {
                             HStack(spacing: 3) {
                                 Image(systemName: "pause.fill")
                                     .font(.system(size: 8))
                                     .opacity(status.reviewIsHovered ? 1 : 0)
-                                Text("\(status.reviewSecondsRemaining)s").monospacedDigit()
+                                Text("\(status.reviewSecondsRemaining) 秒").monospacedDigit()
                                     .frame(minWidth: 24, alignment: .trailing)
                             }
                             .foregroundStyle(.secondary)
@@ -286,20 +286,20 @@ struct QuickRewritePreviewContent: View {
                     }
                 }
                 .keyboardShortcut(.cancelAction)
-                .accessibilityLabel("Cancel rewrite")
-                .accessibilityValue(status.reviewIsKeptOpen ? "No time limit" : "\(status.reviewIsHovered ? "Timer paused at" : "Cancels without applying in") \(status.reviewSecondsRemaining) seconds")
-                .help("Cancel (Escape). Hover to pause the countdown; press Space to keep this review open.")
+                .accessibilityLabel("取消改写")
+                .accessibilityValue(status.reviewIsKeptOpen ? "不限时" : "\(status.reviewIsHovered ? "倒计时停在" : "不用改写，倒计时") \(status.reviewSecondsRemaining) 秒")
+                .help("取消（Esc）。鼠标放上来倒计时会停；按空格让这个框一直开着。")
                 Button { onDecision(true) } label: {
                     HStack(spacing: 8) {
-                        Text("Apply")
+                        Text("用改写")
                         Image(systemName: "return").font(.system(size: 11, weight: .medium))
                             .frame(width: 14, height: 14).accessibilityHidden(true)
                     }
                 }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
-                .accessibilityLabel("Apply rewrite")
-                .help("Replace the original selection (Return)")
+                .accessibilityLabel("用改写")
+                .help("用改写替换选中的文字（回车）")
             }
             .controlSize(.small)
         }
@@ -308,14 +308,14 @@ struct QuickRewritePreviewContent: View {
         .colorScheme(scheme)
         .onHover { status.reviewIsHovered = $0 }
         .background(Button("") { onDecision(false) }.keyboardShortcut(.escape, modifiers: .option).hidden())
-        .background(Button("Keep review open") { status.keepReviewOpen() }.keyboardShortcut(.space, modifiers: []).hidden())
+        .background(Button("让这个框一直开着") { status.keepReviewOpen() }.keyboardShortcut(.space, modifiers: []).hidden())
     }
 
     private func comparison(colors: AppColors, size: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Original").font(.system(size: size * 0.9, weight: .semibold)).foregroundStyle(colors.textSecondary)
+            Text("原文").font(.system(size: size * 0.9, weight: .semibold)).foregroundStyle(colors.textSecondary)
             Text(original).foregroundStyle(colors.textPrimary)
-            Text("Rewrite").font(.system(size: size * 0.9, weight: .semibold)).foregroundStyle(.blue).padding(.top, 4)
+            Text("改写").font(.system(size: size * 0.9, weight: .semibold)).foregroundStyle(.blue).padding(.top, 4)
             Text(proposed).foregroundStyle(colors.textPrimary)
         }
         .font(.system(size: size))

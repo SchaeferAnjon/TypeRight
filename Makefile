@@ -7,7 +7,7 @@
         ci-check fmt fmt-rust fmt-swift lint lint-rust lint-swift \
         logs kill status reset reset-onboarding xcode version \
         release release-alpha release-beta release-rc release-upload \
-        help-book cpu-benchmark cpu-check
+        cpu-benchmark cpu-check
 
 # Default target
 .DEFAULT_GOAL := help
@@ -277,29 +277,3 @@ release-upload: ## Upload prepared release to GitHub
 release-notes: ## Generate release notes from git commits
 	@./Scripts/release.sh notes
 
-##@ Documentation
-
-HELP_DIR := Resources/TextWarden.help/Contents/Resources/en.lproj
-HELP_TEMPLATE := Scripts/help-template.html
-
-help-book: ## Build Help Book from markdown documentation
-	@echo "$(BLUE)📚 Building Help Book...$(NC)"
-	@command -v pandoc >/dev/null 2>&1 || { echo "$(RED)❌ pandoc not found. Install: brew install pandoc$(NC)"; exit 1; }
-	@echo "  Converting CONFIGURATION.md..."
-	@pandoc CONFIGURATION.md \
-		--from=gfm \
-		--to=html5 \
-		--template=$(HELP_TEMPLATE) \
-		--metadata title="Configuration Guide" \
-		--output=$(HELP_DIR)/configuration.html
-	@echo "  Converting TROUBLESHOOTING.md..."
-	@pandoc TROUBLESHOOTING.md \
-		--from=gfm \
-		--to=html5 \
-		--template=$(HELP_TEMPLATE) \
-		--metadata title="Troubleshooting" \
-		--output=$(HELP_DIR)/troubleshooting.html
-	@echo "  Building help index..."
-	@hiutil -Caf $(HELP_DIR)/../TextWarden.helpindex $(HELP_DIR) 2>/dev/null || \
-		echo "$(YELLOW)⚠ hiutil not available, skipping index$(NC)"
-	@echo "$(GREEN)✅ Help Book built$(NC)"

@@ -10,8 +10,12 @@ import AppKit
 import SwiftUI
 
 enum TR {
+    private static func dynamicNS(_ light: NSColor, _ dark: NSColor) -> NSColor {
+        NSColor(name: nil) { $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light }
+    }
+
     private static func dynamic(_ light: NSColor, _ dark: NSColor) -> Color {
-        Color(nsColor: NSColor(name: nil) { $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light })
+        Color(nsColor: dynamicNS(light, dark))
     }
 
     private static func hex(_ value: UInt32, _ alpha: CGFloat = 1) -> NSColor {
@@ -29,11 +33,14 @@ enum TR {
     static let line2 = dynamic(hex(0x000000, 0.14), hex(0xFFFFFF, 0.16))
     static let fill = dynamic(hex(0x000000, 0.04), hex(0xFFFFFF, 0.06))
     static let sel = dynamic(hex(0x000000, 0.07), hex(0xFFFFFF, 0.10))
-    static let fix = dynamic(hex(0x13804B), hex(0x52C690))
+    static let fixNS = dynamicNS(hex(0x13804B), hex(0x52C690))
+    static let fix = Color(nsColor: fixNS)
     static let fixSoft = dynamic(hex(0x13804B, 0.11), hex(0x52C690, 0.15))
-    static let mark = dynamic(hex(0xC98A12), hex(0xE2A84A))
+    static let markNS = dynamicNS(hex(0xC98A12), hex(0xE2A84A))
+    static let mark = Color(nsColor: markNS)
     static let markSoft = dynamic(hex(0xE8AA28, 0.17), hex(0xE2A84A, 0.18))
-    static let danger = dynamic(hex(0xC0362C), hex(0xFF6B5E))
+    static let dangerNS = dynamicNS(hex(0xC0362C), hex(0xFF6B5E))
+    static let danger = Color(nsColor: dangerNS)
     static let ok = fix
     static let warn = mark
 }
@@ -96,10 +103,13 @@ struct TRRow<Trailing: View>: View {
                         Text(note).font(.system(size: 12)).foregroundStyle(TR.text2).fixedSize(horizontal: false, vertical: true)
                     }
                 }
+                // A long note takes the row's width before it wraps, instead of sharing it with the spacer.
+                .layoutPriority(1)
                 Spacer(minLength: 12)
                 trailing
             }
             .padding(.horizontal, 14)
+            .padding(.vertical, 8)
             .frame(minHeight: 48)
             if !last { Rectangle().fill(TR.line).frame(height: 0.5).padding(.leading, 14) }
         }

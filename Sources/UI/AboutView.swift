@@ -11,11 +11,13 @@ import SwiftUI
 
 /// Static URLs for external links - centralized for easy review
 /// Force unwraps are safe here as these are hardcoded, syntactically valid URLs
-private enum AppURLs {
-    static let github = URL(string: "https://github.com/philipschmid/textwarden")!
-    static let license = URL(string: "https://github.com/philipschmid/textwarden/blob/main/LICENSE")!
-    static let issues = URL(string: "https://github.com/philipschmid/textwarden/issues")!
-    static let buyMeACoffee = URL(string: "https://buymeacoffee.com/textwarden")!
+enum AppURLs {
+    static let github = URL(string: "https://github.com/SchaeferAnjon/TypeRight")!
+    static let license = URL(string: "https://github.com/SchaeferAnjon/TypeRight/blob/main/LICENSE")!
+    static let issues = URL(string: "https://github.com/SchaeferAnjon/TypeRight/issues")!
+    static let guide = URL(string: "https://typeright.us-cloud.uk/#page=guide")!
+    /// TypeRight is based on TextWarden; its name and logo belong to its author.
+    static let upstream = URL(string: "https://github.com/PhilipSchmid/textwarden")!
 }
 
 // MARK: - About View
@@ -40,7 +42,7 @@ struct AboutView: View {
 
     var body: some View {
         Form {
-            // MARK: - About TextWarden
+            // MARK: - About TypeRight
 
             Section {
                 HStack(spacing: 16) {
@@ -50,9 +52,9 @@ struct AboutView: View {
                         .frame(width: 88, height: 88)
 
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("TextWarden")
+                        Text("TypeRight")
                             .font(.system(size: 26, weight: .bold))
-                        Text("Grammar and Style Checking for macOS")
+                        Text("Mac 上的英文打字助手")
                             .font(.title3)
                             .foregroundColor(.secondary)
                     }
@@ -66,7 +68,7 @@ struct AboutView: View {
             Section {
                 // Version with copy button
                 HStack {
-                    Text("Version")
+                    Text("版本")
                     Spacer()
                     Button(action: copyVersionToClipboard) {
                         HStack(spacing: 6) {
@@ -78,13 +80,13 @@ struct AboutView: View {
                         }
                     }
                     .buttonStyle(.plain)
-                    .help("Copy version to clipboard")
+                    .help("复制版本号")
                 }
 
-                Toggle("Automatically check for updates on launch", isOn: $updaterViewModel.automaticallyChecksForUpdates)
+                Toggle("打开时自动检查更新", isOn: $updaterViewModel.automaticallyChecksForUpdates)
 
-                Toggle("Include experimental releases", isOn: $updaterViewModel.includeExperimentalUpdates)
-                    .help("Opt-in to receive experimental pre-release versions with new features")
+                Toggle("也接收试验版", isOn: $updaterViewModel.includeExperimentalUpdates)
+                    .help("提前收到带新功能的测试版本")
 
                 HStack(spacing: 12) {
                     Button {
@@ -98,7 +100,7 @@ struct AboutView: View {
                             } else {
                                 Image(systemName: "arrow.triangle.2.circlepath")
                             }
-                            Text("Check for Updates")
+                            Text("检查更新")
                         }
                     }
                     .buttonStyle(.borderedProminent)
@@ -121,7 +123,7 @@ struct AboutView: View {
                                 .font(.caption)
                         case .error:
                             Image(systemName: "xmark.circle.fill")
-                                .foregroundColor(.red)
+                                .foregroundColor(.orange)
                                 .font(.caption)
                         }
 
@@ -134,111 +136,74 @@ struct AboutView: View {
                                 case .success:
                                     .primary
                                 case .error:
-                                    .red
+                                    .orange
                                 }
                             }())
                     }
                 }
             } header: {
-                Text("Updates")
+                Text("更新")
                     .font(.headline)
             }
 
             // MARK: - Help and Resources
 
             Section {
-                Button {
-                    NSApp.sendAction(#selector(AppDelegate.openTutorialWindow), to: nil, from: nil)
-                } label: {
-                    HStack(spacing: 12) {
-                        Image(systemName: "play.rectangle.fill")
-                            .font(.title3)
-                            .foregroundColor(.accentColor)
-                            .frame(width: 28)
-
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text("Replay Tutorial")
-                                .font(.headline)
-                                .foregroundColor(.primary)
-                            Text("Review the writing control, suggestions, and quick actions")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-
-                        Spacer()
-
-                        Image(systemName: "chevron.right")
-                            .font(.caption.weight(.semibold))
-                            .foregroundColor(.secondary)
-                    }
-                    .contentShape(Rectangle())
-                    .padding(.vertical, 4)
-                }
-                .buttonStyle(.plain)
-
-                Link(destination: AppURLs.github) {
-                    HStack {
-                        Label("View on GitHub", systemImage: "chevron.left.forwardslash.chevron.right")
-                        Spacer()
-                        Image(systemName: "arrow.up.forward")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-
+                link("上手指南", "book", AppURLs.guide)
+                link("源码（GitHub）", "chevron.left.forwardslash.chevron.right", AppURLs.github)
                 Link(destination: AppURLs.license) {
                     HStack {
-                        Label("View License", systemImage: "doc.text")
+                        Label("许可证", systemImage: "doc.text")
                         Spacer()
-                        Text("Apache 2.0")
+                        Text("GPL-3.0")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
                 }
-
-                Link(destination: AppURLs.issues) {
-                    HStack {
-                        Label("Report an Issue", systemImage: "exclamationmark.bubble")
-                        Spacer()
-                        Image(systemName: "arrow.up.forward")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
+                link("反馈问题", "exclamationmark.bubble", AppURLs.issues)
             } header: {
                 HStack(spacing: 8) {
                     Image(systemName: "questionmark.circle.fill")
                         .foregroundColor(.accentColor)
-                    Text("Help & Resources")
+                    Text("帮助")
                         .font(.headline)
                 }
             }
 
-            // Support subsection
-            Section {
-                HStack(spacing: 16) {
-                    Text("TextWarden is free and open source. Your support helps its development.")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+            // MARK: - Attribution
 
-                    Link(destination: AppURLs.buyMeACoffee) {
-                        Image("BuyMeACoffeeButton")
-                            .resizable()
-                            .scaledToFit()
-                            .frame(height: 32)
+            Section {
+                Link(destination: AppURLs.upstream) {
+                    HStack {
+                        Label("基于 TextWarden（Apache-2.0）", systemImage: "arrow.triangle.branch")
+                        Spacer()
+                        Image(systemName: "arrow.up.forward")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
                     }
                 }
+                Text("TextWarden 的名字和标志属于它的作者 Philip Schmid；TypeRight 不是 TextWarden 项目的一部分，也没有得到它的认可。")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             } header: {
-                Text("Support")
+                Text("致谢")
                     .font(.headline)
             }
         }
         .formStyle(.grouped)
         .padding()
     }
-}
 
-#Preview {
-    PreferencesView()
+    private func link(_ title: String, _ icon: String, _ url: URL) -> some View {
+        Link(destination: url) {
+            HStack {
+                Label(title, systemImage: icon)
+                Spacer()
+                Image(systemName: "arrow.up.forward")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
 }

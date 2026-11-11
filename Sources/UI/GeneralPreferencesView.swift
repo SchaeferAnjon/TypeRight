@@ -7,55 +7,53 @@
 
 import AppKit
 import KeyboardShortcuts
-import LaunchAtLogin
 import SwiftUI
 
 // MARK: - General Preferences
 
 struct GeneralPreferencesView: View {
     @ObservedObject var preferences: UserPreferences
+    /// Screenshots pass names nobody has set, so they never show the user's own keys.
+    var fixAllName: KeyboardShortcuts.Name = .fixAllObvious
+    var rewriteName: KeyboardShortcuts.Name = .quickRewrite
     @ObservedObject private var permissionManager = PermissionManager.shared
     @State private var showingPermissionDialog = false
 
     var body: some View {
         Form {
-            // MARK: Application Settings Group
+            // MARK: Checking
 
             Section {
                 VStack(alignment: .leading, spacing: 8) {
-                    Picker("Grammar checking:", selection: $preferences.pauseDuration) {
+                    Picker("所有 App：", selection: $preferences.pauseDuration) {
                         ForEach(PauseDuration.allCases, id: \.self) { duration in
-                            Text(duration.rawValue).tag(duration)
+                            Text(duration.label).tag(duration)
                         }
                     }
-                    .help("Pause grammar checking temporarily or indefinitely")
+                    .help("在所有 App 里暂停一会儿，或者一直暂停")
 
-                    if preferences.pauseDuration == .oneHour, let until = preferences.pausedUntil {
-                        Text("Will resume at \(until.formatted(date: .omitted, time: .shortened))")
+                    if preferences.pauseDuration == .oneHour || preferences.pauseDuration == .twentyFourHours,
+                       let until = preferences.pausedUntil
+                    {
+                        Text("\(until.formatted(date: .omitted, time: .shortened)) 自动恢复")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
                 }
-
-                LaunchAtLogin.Toggle()
             } header: {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack(spacing: 8) {
                         Image(systemName: "slider.horizontal.3")
                             .font(.title2)
                             .foregroundColor(.accentColor)
-                        Text("Application Settings")
+                        Text("检查")
                             .font(.title3)
                             .fontWeight(.semibold)
                     }
 
-                    Text("Configure core application behavior and system permissions")
+                    Text("暂停的时候不弹框，也不读输入框。")
                         .font(.caption)
                         .foregroundColor(.secondary)
-
-                    Text("General")
-                        .font(.headline)
-                        .padding(.top, 8)
                 }
             }
 
@@ -63,24 +61,24 @@ struct GeneralPreferencesView: View {
             Section {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
-                        Image(systemName: permissionManager.isPermissionGranted ? "checkmark.circle.fill" : "xmark.circle.fill")
+                        Image(systemName: permissionManager.isPermissionGranted ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
                             .font(.title2)
-                            .foregroundColor(permissionManager.isPermissionGranted ? .green : .red)
+                            .foregroundColor(permissionManager.isPermissionGranted ? .green : .orange)
 
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("Accessibility Permission")
+                            Text("辅助功能权限")
                                 .font(.headline)
-                            Text(permissionManager.isPermissionGranted ? "Granted" : "Not Granted")
+                            Text(permissionManager.isPermissionGranted ? "已允许" : "还没允许")
                                 .font(.subheadline)
-                                .foregroundColor(permissionManager.isPermissionGranted ? .green : .red)
+                                .foregroundColor(permissionManager.isPermissionGranted ? .green : .orange)
                         }
 
                         Spacer()
                     }
 
                     Text(permissionManager.isPermissionGranted ?
-                        "TextWarden has the necessary permissions to monitor your text and provide grammar checking." :
-                        "TextWarden needs Accessibility permissions to monitor your text.")
+                        "TypeRight 能读到你正在打的那一句，也能把改法写回去。" :
+                        "没有这个权限，TypeRight 看不到你在打什么。")
                         .font(.caption)
                         .foregroundColor(.secondary)
 
@@ -92,7 +90,7 @@ struct GeneralPreferencesView: View {
                             } label: {
                                 HStack {
                                     Image(systemName: "lock.open")
-                                    Text("Request Permission")
+                                    Text("请求权限")
                                 }
                             }
                             .buttonStyle(.borderedProminent)
@@ -102,7 +100,7 @@ struct GeneralPreferencesView: View {
                             } label: {
                                 HStack {
                                     Image(systemName: "gearshape")
-                                    Text("Open System Settings")
+                                    Text("打开系统设置")
                                 }
                             }
                             .buttonStyle(.bordered)
@@ -110,180 +108,39 @@ struct GeneralPreferencesView: View {
                     }
                 }
             } header: {
-                Text("Permissions")
+                Text("权限")
                     .font(.headline)
             }
 
-            // MARK: Appearance Settings Group
+            // MARK: Appearance
 
             Section {
-                Picker("Position:", selection: $preferences.suggestionPosition) {
-                    ForEach(UserPreferences.suggestionPositions, id: \.self) { position in
-                        Text(position).tag(position)
+                Picker("窗口外观：", selection: $preferences.appTheme) {
+                    ForEach(UserPreferences.themeOptions, id: \.self) { theme in
+                        Text(UserPreferences.themeLabel(theme)).tag(theme)
                     }
                 }
-                .help("Choose where suggestion popovers appear relative to text")
-
-                Toggle("Show on hover", isOn: $preferences.enableHoverPopover)
-                    .help("Automatically show suggestions when hovering over underlines or the error indicator")
-
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("Text size:")
-                        Spacer()
-                        Text(String(format: "%.0fpt", preferences.suggestionTextSize))
-                            .foregroundColor(.secondary)
-                    }
-                    Slider(value: $preferences.suggestionTextSize, in: 10.0 ... 20.0, step: 1.0)
-                }
-
-                Text("Position: Where the popover appears (Auto adjusts based on screen space). Show on hover: When disabled, click underlines or the indicator to show suggestions.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                .help("TypeRight 的窗口和弹框用浅色还是深色")
             } header: {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack(spacing: 8) {
                         Image(systemName: "paintbrush.fill")
                             .font(.title2)
                             .foregroundColor(.accentColor)
-                        Text("Appearance Settings")
+                        Text("外观")
                             .font(.title3)
                             .fontWeight(.semibold)
                     }
-
-                    Text("Customize the visual appearance of grammar suggestions and indicators")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-
-                    Text("Popover")
-                        .font(.headline)
-                        .padding(.top, 8)
                 }
             }
 
-            Section {
-                Picker("Theme:", selection: $preferences.appTheme) {
-                    ForEach(UserPreferences.themeOptions, id: \.self) { theme in
-                        Text(theme).tag(theme)
-                    }
-                }
-                .help("Color scheme for the TextWarden application UI")
-
-                Picker("Overlay Theme:", selection: $preferences.overlayTheme) {
-                    ForEach(UserPreferences.themeOptions, id: \.self) { theme in
-                        Text(theme).tag(theme)
-                    }
-                }
-                .help("Color scheme for popovers and error/style indicators")
-
-                Text("Theme: Controls the TextWarden settings window appearance\nOverlay Theme: Controls popovers and indicators shown over other apps")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            } header: {
-                Text("Color Scheme")
-                    .font(.headline)
-            }
+            // MARK: Keyboard Shortcuts
 
             Section {
-                Toggle("Show error underlines", isOn: $preferences.showUnderlines)
-                    .help("Show wavy underlines beneath spelling and grammar errors")
+                Toggle("启用快捷键", isOn: $preferences.keyboardShortcutsEnabled)
+                    .help("打开或关掉下面的键和「暂停 / 继续」键")
 
-                if preferences.showUnderlines {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Text("Thickness:")
-                            Spacer()
-                            Text(String(format: "%.1fpt", preferences.underlineThickness))
-                                .foregroundColor(.secondary)
-                        }
-                        Slider(value: $preferences.underlineThickness, in: 1.0 ... 5.0, step: 0.5)
-                    }
-                    .padding(.top, 4)
-
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Text("Hide when errors exceed:")
-                            Spacer()
-                            Text("\(preferences.maxErrorsForUnderlines)")
-                                .foregroundColor(.secondary)
-                        }
-                        Slider(
-                            value: Binding(
-                                get: { Double(preferences.maxErrorsForUnderlines) },
-                                set: { preferences.maxErrorsForUnderlines = Int($0) }
-                            ),
-                            in: 1 ... 20,
-                            step: 1
-                        )
-                    }
-                    .padding(.top, 4)
-                }
-
-                Text("Underlines appear where TypeRight can locate text accurately. When the error count exceeds the threshold above, underlines are hidden to reduce visual clutter.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            } header: {
-                Text("Underlines")
-                    .font(.headline)
-            }
-
-            Section {
-                VStack(alignment: .leading, spacing: 8) {
-                    Picker("Default position:", selection: $preferences.indicatorPosition) {
-                        ForEach(UserPreferences.indicatorPositions, id: \.self) { position in
-                            Text(position).tag(position)
-                        }
-                    }
-                    .help("Choose the default position for new applications. Drag the indicator to customize per-app positions.")
-
-                    Text("Default position for the floating indicator. You can drag it to any position along the window border, and positions are remembered per application.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-
-                Toggle(isOn: $preferences.alwaysShowCapsule) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Always show indicator")
-                        Text("Show even when there are no issues, displaying a green checkmark as confirmation")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-                .toggleStyle(.switch)
-
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text("Hover delay:")
-                        Spacer()
-                        Text("\(preferences.popoverHoverDelayMs) ms")
-                            .monospacedDigit()
-                            .foregroundColor(.secondary)
-                    }
-                    Slider(
-                        value: Binding(
-                            get: { Double(preferences.popoverHoverDelayMs) },
-                            set: { preferences.popoverHoverDelayMs = Int($0) }
-                        ),
-                        in: 0 ... 1000,
-                        step: 50
-                    )
-                    Text("Delay before showing the suggestion popover when hovering over the indicator. Set to 0 for instant display.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                .help("Time to wait before showing the suggestion popover when hovering over the indicator. 0 = instant.")
-            } header: {
-                Text("Indicator")
-                    .font(.headline)
-            }
-
-            // MARK: Keyboard Shortcuts Group
-
-            Section {
-                Toggle("Enable keyboard shortcuts", isOn: $preferences.keyboardShortcutsEnabled)
-                    .help("Enable or disable all keyboard shortcuts")
-
-                Text("Click a shortcut to change it, especially if another app uses the same keys. Disabling shortcuts turns off all actions below.")
+                Text("关掉后，下面两个键和「快捷键」页的「暂停 / 继续」都不响；「整句翻译」不受影响。")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .padding(.top, 4)
@@ -293,88 +150,39 @@ struct GeneralPreferencesView: View {
                         Image(systemName: "keyboard.fill")
                             .font(.title2)
                             .foregroundColor(.accentColor)
-                        Text("Keyboard Shortcuts")
+                        Text("快捷键")
                             .font(.title3)
                             .fontWeight(.semibold)
                     }
 
-                    Text("Configure global and context-specific keyboard shortcuts")
+                    Text("「整句翻译」和「暂停 / 继续」在设置的「快捷键」页里选。")
                         .font(.caption)
                         .foregroundColor(.secondary)
-
-                    Text("General")
-                        .font(.headline)
-                        .padding(.top, 8)
                 }
             }
 
             Section {
-                KeyboardShortcuts.Recorder("Toggle TextWarden:", name: .toggleTextWarden)
-                KeyboardShortcuts.Recorder("Fix All Grammar Errors:", name: .fixAllObvious)
+                KeyboardShortcuts.Recorder("一键改掉明显的错：", name: fixAllName)
+                KeyboardShortcuts.Recorder("改写选中的文字：", name: rewriteName)
 
-                Text("Works system-wide, even when TextWarden isn't the active app")
+                Text("两个键默认都没设，在任何 App 里都能用。「一键改掉明显的错」把只有一种改法的错一次改完，不记进错题本；「改写选中的文字」要用 Apple 智能，先在「改写」里打开。")
                     .font(.caption)
                     .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                     .padding(.top, 4)
             } header: {
-                Text("Global Shortcuts")
-                    .font(.headline)
-            }
-
-            Section {
-                KeyboardShortcuts.Recorder("Show Grammar Suggestions:", name: .showGrammarSuggestions)
-                KeyboardShortcuts.Recorder("Show Style Suggestions:", name: .showStyleSuggestions)
-                KeyboardShortcuts.Recorder("Show AI Compose:", name: .showAICompose)
-                KeyboardShortcuts.Recorder("Show Readability:", name: .showReadability)
-                KeyboardShortcuts.Recorder("Run Style Check:", name: .runStyleCheck)
-                KeyboardShortcuts.Recorder("Quick Rewrite Selected Text:", name: .quickRewrite)
-
-                Text("Open writing tools for your current text. Quick Rewrite uses your style from Style settings; review the result, then press Return to apply or Escape to cancel.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .padding(.top, 4)
-            } header: {
-                Text("Feature Shortcuts")
-                    .font(.headline)
-            }
-
-            Section {
-                KeyboardShortcuts.Recorder("Accept Suggestion:", name: .acceptSuggestion)
-                KeyboardShortcuts.Recorder("Dismiss Popover:", name: .dismissSuggestion)
-                KeyboardShortcuts.Recorder("Previous Suggestion:", name: .previousSuggestion)
-                KeyboardShortcuts.Recorder("Next Suggestion:", name: .nextSuggestion)
-
-                Text("These shortcuts work when the suggestion popover is visible")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .padding(.top, 4)
-            } header: {
-                Text("Suggestion Popover")
-                    .font(.headline)
-            }
-
-            Section {
-                KeyboardShortcuts.Recorder("Apply 1st Suggestion:", name: .applySuggestion1)
-                KeyboardShortcuts.Recorder("Apply 2nd Suggestion:", name: .applySuggestion2)
-                KeyboardShortcuts.Recorder("Apply 3rd Suggestion:", name: .applySuggestion3)
-
-                Text("Quickly apply suggestions by number from the popover")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .padding(.top, 4)
-            } header: {
-                Text("Quick Apply")
+                Text("更多快捷键")
                     .font(.headline)
             }
         }
         .formStyle(.grouped)
         .padding()
-        .alert("Permission Requested", isPresented: $showingPermissionDialog) {
-            Button("OK") {
+        .alert("已请求权限", isPresented: $showingPermissionDialog) {
+            Button("好") {
                 showingPermissionDialog = false
             }
         } message: {
-            Text("Please check System Settings to grant Accessibility permission to TextWarden.")
+            Text("请在系统设置里给 TypeRight 打开辅助功能权限。")
         }
     }
 }

@@ -14,14 +14,13 @@ final class QuickRewriteTests: XCTestCase {
     @MainActor
     func testStatusFitsWrappedMessages() throws {
         let status = QuickRewriteStatus()
-        status.show("Text rewritten", completion: .applied)
+        status.show("改好了", completion: .applied)
         let panel = try XCTUnwrap(status.panel)
         defer { panel.orderOut(nil) }
         let shortHeight = panel.frame.height
         XCTAssertGreaterThanOrEqual(shortHeight, 36)
         for message in [
-            "Enable TextWarden and Style checking in this app to rewrite",
-            "Apple Intelligence could not process this selection · text left unchanged",
+            "先在这个 App 里让 TypeRight 继续，并在 设置 › 高级 › 改写 里打开改写",
         ] {
             status.show(message)
             XCTAssertLessThanOrEqual(panel.frame.width, 360)
@@ -238,7 +237,7 @@ final class QuickRewriteTests: XCTestCase {
         let status = QuickRewriteStatus()
         defer { status.finishPreview(accepted: false) }
         let text = "We are currently in the process of reviewing 17 reports. We will send the summary tomorrow."
-        status.show("Rewriting · Default", busy: true)
+        status.show("正在改写 · 默认", busy: true)
         let task = Task { @MainActor in
             await status.confirmReplacement(original: text, proposed: text, reason: .standard)
         }
@@ -339,7 +338,7 @@ final class QuickRewriteTests: XCTestCase {
         let screen = try XCTUnwrap(NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main)
         let existingWindows = Set(NSApplication.shared.windows.map(ObjectIdentifier.init))
         let status = QuickRewriteStatus()
-        status.show("Rewriting · Default", busy: true)
+        status.show("正在改写 · 默认", busy: true)
         let panel = try XCTUnwrap(NSApplication.shared.windows.first { !existingWindows.contains(ObjectIdentifier($0)) && $0 is NSPanel })
         defer { panel.orderOut(nil) }
         let directory = ProcessInfo.processInfo.environment["TEXTWARDEN_REWRITE_SCREENSHOTS"].map { URL(fileURLWithPath: $0, isDirectory: true) }
@@ -350,7 +349,7 @@ final class QuickRewriteTests: XCTestCase {
         let compactHeight = panel.frame.height
         XCTAssertEqual(compactHeight, 36, accuracy: 1, "The icon and feedback need ten points of vertical padding on each side")
         XCTAssertLessThan(panel.frame.width, 240, "Short feedback should fit its content, not fill a fixed-width box")
-        for (index, message) in ["No rewrite suggested", "Apple Intelligence could not process this selection · text left unchanged"].enumerated() {
+        for (index, message) in ["不用改", "Apple 智能处理不了选中的文字 · 原文没动"].enumerated() {
             status.show(message)
             try await Task.sleep(for: .milliseconds(200))
             try captureReviewView(XCTUnwrap(panel.contentView), name: "status-message-\(index)", directory: directory)
@@ -362,16 +361,16 @@ final class QuickRewriteTests: XCTestCase {
             XCTAssertFalse(panel.isKeyWindow, "Feedback must not steal focus from the editor")
         }
         try await Task.sleep(for: .seconds(3.08))
-        status.show("Rewriting · Default", busy: true)
+        status.show("正在改写 · 默认", busy: true)
         try await Task.sleep(for: .seconds(0.3))
         XCTAssertTrue(panel.isVisible, "An old fade-out must not dismiss new feedback")
         XCTAssertEqual(panel.alphaValue, 1, accuracy: 0.01)
-        status.show("Rewrite cancelled", completion: .cancelled)
+        status.show("改写取消了", completion: .cancelled)
         try await Task.sleep(for: .milliseconds(200))
         try captureReviewView(XCTUnwrap(panel.contentView), name: "status-cancelled", directory: directory)
         XCTAssertEqual(panel.frame.height, compactHeight, accuracy: 1)
         XCTAssertLessThan(panel.frame.width, 240)
-        status.show("Text rewritten", completion: .applied)
+        status.show("改好了", completion: .applied)
         try await Task.sleep(for: .milliseconds(200))
         try captureReviewView(XCTUnwrap(panel.contentView), name: "status-applied", directory: directory)
         try await Task.sleep(for: .seconds(3.4))
@@ -422,25 +421,25 @@ final class QuickRewriteTests: XCTestCase {
 
     @MainActor
     func testRewriteFailureMessagesExplainCauseWithoutExposingText() {
-        let cancelled = "Rewrite cancelled"
-        let generic = "Could not rewrite. Please try again · text left unchanged"
+        let cancelled = "改写取消了"
+        let generic = "没改写成，再试一次 · 原文没动"
         let privateText = "private synthetic marker"
         let error = NSError(domain: "Synthetic", code: 1, userInfo: [NSLocalizedDescriptionKey: privateText])
         XCTAssertEqual(QuickRewriteStatus.failureMessage(for: error, cancelled: false), generic)
         XCTAssertEqual(QuickRewriteStatus.failureMessage(for: error, cancelled: true), cancelled)
         XCTAssertEqual(QuickRewriteStatus.failureMessage(for: CancellationError(), cancelled: false), cancelled)
-        XCTAssertEqual(QuickRewriteStatus.failureMessage(for: FoundationModelsError.uncertainRewriteLanguage, cancelled: false), "Language unclear · select more text")
-        XCTAssertEqual(QuickRewriteStatus.failureMessage(for: FoundationModelsError.rewriteLanguageChanged, cancelled: false), "Language changed · text unchanged")
+        XCTAssertEqual(QuickRewriteStatus.failureMessage(for: FoundationModelsError.uncertainRewriteLanguage, cancelled: false), "看不出是哪种语言 · 多选一些文字")
+        XCTAssertEqual(QuickRewriteStatus.failureMessage(for: FoundationModelsError.rewriteLanguageChanged, cancelled: false), "改写换了语言 · 原文没动")
         #if canImport(FoundationModels)
             guard #available(macOS 26.0, *) else { return }
             let context = LanguageModelSession.GenerationError.Context(debugDescription: privateText)
-            let blocked = "Apple Intelligence could not process this selection · text left unchanged"
+            let blocked = "Apple 智能处理不了选中的文字 · 原文没动"
             let examples: [(LanguageModelSession.GenerationError, String)] = [
                 (.guardrailViolation(context), blocked),
                 (.refusal(.init(transcriptEntries: []), context), blocked),
-                (.exceededContextWindowSize(context), "Select a shorter passage · text left unchanged"),
-                (.unsupportedLanguageOrLocale(context), "Apple Intelligence does not support this language · text left unchanged"),
-                (.assetsUnavailable(context), "Apple Intelligence is unavailable · text left unchanged"),
+                (.exceededContextWindowSize(context), "选短一点的一段 · 原文没动"),
+                (.unsupportedLanguageOrLocale(context), "Apple 智能不支持这种语言 · 原文没动"),
+                (.assetsUnavailable(context), "Apple 智能现在用不了 · 原文没动"),
                 (.rateLimited(context), generic),
             ]
             for (error, message) in examples {

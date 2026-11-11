@@ -17,11 +17,11 @@ struct ResourceMonitoringView: View {
     @State private var selectedMemoryDate: Date?
 
     enum ResourceTimeRange: String, CaseIterable {
-        case fifteenMin = "15m"
-        case oneHour = "1h"
-        case oneDay = "1d"
-        case sevenDays = "7d"
-        case thirtyDays = "30d"
+        case fifteenMin = "15 分钟"
+        case oneHour = "1 小时"
+        case oneDay = "1 天"
+        case sevenDays = "7 天"
+        case thirtyDays = "30 天"
 
         var minutes: Int {
             switch self {
@@ -43,7 +43,7 @@ struct ResourceMonitoringView: View {
                         Image(systemName: "chart.xyaxis.line")
                             .font(.title2)
                             .foregroundColor(.blue)
-                        Text("System Resource Usage")
+                        Text("CPU 和内存")
                             .font(.headline)
                         Spacer()
                         Picker("", selection: $selectedTimeRange) {
@@ -55,7 +55,7 @@ struct ResourceMonitoringView: View {
                         .labelsHidden()
                     }
 
-                    Text("Monitor CPU and memory usage of the TextWarden process")
+                    Text("TypeRight 自己用了多少 CPU 和内存")
                         .font(.caption)
                         .foregroundColor(.secondary)
 
@@ -63,7 +63,7 @@ struct ResourceMonitoringView: View {
                         Image(systemName: "info.circle")
                             .font(.caption)
                             .foregroundColor(.blue)
-                        Text("CPU load shows active threads. A load of 1.0 means one CPU core is fully utilized. On a \(ProcessInfo.processInfo.activeProcessorCount)-core system, full utilization would be \(ProcessInfo.processInfo.activeProcessorCount).0.")
+                        Text("CPU 负载 1.0 表示占满一个核；这台 Mac 有 \(ProcessInfo.processInfo.activeProcessorCount) 个核，全部占满是 \(ProcessInfo.processInfo.activeProcessorCount).0。")
                             .font(.caption2)
                             .foregroundColor(.secondary)
                     }
@@ -93,10 +93,10 @@ struct ResourceMonitoringView: View {
                         Image(systemName: "chart.bar.xaxis")
                             .font(.largeTitle)
                             .foregroundColor(.secondary)
-                        Text("No data available for selected time range")
+                        Text("这段时间还没有数据")
                             .font(.subheadline)
                             .foregroundColor(.secondary)
-                        Text("Resource monitoring started when the app launched.")
+                        Text("TypeRight 启动时开始记录。")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -105,7 +105,7 @@ struct ResourceMonitoringView: View {
                 }
             }
         } header: {
-            Text("Resource Monitoring")
+            Text("资源占用")
                 .font(.headline)
         }
     }
@@ -117,7 +117,7 @@ struct ResourceMonitoringView: View {
             HStack {
                 Image(systemName: "cpu")
                     .foregroundColor(.orange)
-                Text("CPU Load Over Time")
+                Text("CPU 负载")
                     .font(.subheadline)
                     .fontWeight(.semibold)
                 Spacer()
@@ -154,7 +154,7 @@ struct ResourceMonitoringView: View {
                     .foregroundStyle(.red.opacity(0.5))
                     .lineStyle(StrokeStyle(lineWidth: 2, dash: [5, 5]))
                     .annotation(position: .top, alignment: .trailing) {
-                        Text("Peak: \(String(format: "%.2f", peakLoad))")
+                        Text("最高：\(String(format: "%.2f", peakLoad))")
                             .font(.caption2)
                             .foregroundColor(.red)
                             .padding(.horizontal, 4)
@@ -186,12 +186,12 @@ struct ResourceMonitoringView: View {
                                     Text(selectedSample.timestamp, format: .dateTime.hour().minute().second())
                                         .font(.caption2)
                                         .foregroundColor(.secondary)
-                                    Text("Load: \(String(format: "%.2f", selectedSample.processLoad))")
+                                    Text("负载：\(String(format: "%.2f", selectedSample.processLoad))")
                                         .font(.callout)
                                         .fontWeight(.bold)
                                         .foregroundColor(.orange)
                                     if let sys1m = selectedSample.systemLoad1m {
-                                        Text("System: \(String(format: "%.2f", sys1m))")
+                                        Text("系统：\(String(format: "%.2f", sys1m))")
                                             .font(.caption2)
                                             .foregroundColor(.secondary)
                                     }
@@ -225,7 +225,7 @@ struct ResourceMonitoringView: View {
             let medianLoad = median(loadValues)
             HStack(spacing: 16) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Min")
+                    Text("最低")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                     Text(String(format: "%.2f", loadValues.min() ?? 0))
@@ -235,7 +235,7 @@ struct ResourceMonitoringView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Max")
+                    Text("最高")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                     Text(String(format: "%.2f", loadValues.max() ?? 0))
@@ -245,7 +245,7 @@ struct ResourceMonitoringView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Avg")
+                    Text("平均")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                     Text(String(format: "%.2f", avgLoad))
@@ -255,7 +255,7 @@ struct ResourceMonitoringView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Median")
+                    Text("中位")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                     Text(String(format: "%.2f", medianLoad))
@@ -266,7 +266,7 @@ struct ResourceMonitoringView: View {
 
                 Spacer()
 
-                Text("\(samples.count) samples")
+                Text("\(samples.count) 个采样点")
                     .font(.caption2)
                     .foregroundColor(.secondary)
             }
@@ -277,7 +277,7 @@ struct ResourceMonitoringView: View {
                     Circle()
                         .fill(.gray)
                         .frame(width: 8, height: 8)
-                    Text("Gray dots indicate app restarts")
+                    Text("灰点是 TypeRight 重启的时刻")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 }
@@ -292,7 +292,7 @@ struct ResourceMonitoringView: View {
             HStack {
                 Image(systemName: "memorychip")
                     .foregroundColor(.blue)
-                Text("Memory Usage Over Time")
+                Text("内存")
                     .font(.subheadline)
                     .fontWeight(.semibold)
                 Spacer()
@@ -329,7 +329,7 @@ struct ResourceMonitoringView: View {
                     .foregroundStyle(.red.opacity(0.5))
                     .lineStyle(StrokeStyle(lineWidth: 2, dash: [5, 5]))
                     .annotation(position: .top, alignment: .trailing) {
-                        Text("Peak: \(Int(maxMemoryMB)) MB")
+                        Text("最高：\(Int(maxMemoryMB)) MB")
                             .font(.caption2)
                             .foregroundColor(.red)
                             .padding(.horizontal, 4)
@@ -395,7 +395,7 @@ struct ResourceMonitoringView: View {
             let medianBytes = medianUInt64(memoryValues)
             HStack(spacing: 16) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Min")
+                    Text("最低")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                     Text(ByteCountFormatter.string(fromByteCount: Int64(memoryValues.min() ?? 0), countStyle: .memory))
@@ -405,7 +405,7 @@ struct ResourceMonitoringView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Max")
+                    Text("最高")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                     Text(ByteCountFormatter.string(fromByteCount: Int64(memoryValues.max() ?? 0), countStyle: .memory))
@@ -415,7 +415,7 @@ struct ResourceMonitoringView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Avg")
+                    Text("平均")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                     Text(ByteCountFormatter.string(fromByteCount: Int64(avgBytes), countStyle: .memory))
@@ -425,7 +425,7 @@ struct ResourceMonitoringView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Median")
+                    Text("中位")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                     Text(ByteCountFormatter.string(fromByteCount: Int64(medianBytes), countStyle: .memory))
@@ -436,7 +436,7 @@ struct ResourceMonitoringView: View {
 
                 Spacer()
 
-                Text("\(samples.count) samples")
+                Text("\(samples.count) 个采样点")
                     .font(.caption2)
                     .foregroundColor(.secondary)
             }
@@ -447,7 +447,7 @@ struct ResourceMonitoringView: View {
                     Circle()
                         .fill(.gray)
                         .frame(width: 8, height: 8)
-                    Text("Gray dots indicate app restarts")
+                    Text("灰点是 TypeRight 重启的时刻")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 }
@@ -467,14 +467,14 @@ struct ResourceMonitoringView: View {
             HStack {
                 Image(systemName: "doc.text.magnifyingglass")
                     .foregroundColor(.purple)
-                Text("Log Volume")
+                Text("日志条数")
                     .font(.subheadline)
                     .fontWeight(.semibold)
                 Spacer()
             }
 
             if totalLogs == 0 {
-                Text("No log data yet")
+                Text("还没有日志")
                     .foregroundColor(.secondary)
                     .font(.subheadline)
                     .padding(.vertical, 8)
@@ -493,38 +493,38 @@ struct ResourceMonitoringView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     // Only show levels at or above the minimum configured level
                     if minLevel <= .critical {
-                        LogVolumeRow(label: "Critical", count: counts.critical, maxCount: maxCount, color: .red)
-                            .help("Unrecoverable errors requiring immediate attention")
+                        LogVolumeRow(label: "严重", count: counts.critical, maxCount: maxCount, color: .red)
+                            .help("没法恢复、要马上处理的错误")
                     }
 
                     if minLevel <= .error {
-                        LogVolumeRow(label: "Error", count: counts.error, maxCount: maxCount, color: .orange)
-                            .help("Failures that affect functionality")
+                        LogVolumeRow(label: "错误", count: counts.error, maxCount: maxCount, color: .orange)
+                            .help("影响功能的失败")
                     }
 
                     if minLevel <= .warning {
-                        LogVolumeRow(label: "Warning", count: counts.warning, maxCount: maxCount, color: .yellow)
-                            .help("Recoverable issues like API fallbacks or timeouts")
+                        LogVolumeRow(label: "警告", count: counts.warning, maxCount: maxCount, color: .yellow)
+                            .help("能恢复的问题，比如换了备用接口或超时")
                     }
 
                     if minLevel <= .info {
-                        LogVolumeRow(label: "Info", count: counts.info, maxCount: maxCount, color: .blue)
-                            .help("Significant milestones like app launch or analysis completion")
+                        LogVolumeRow(label: "信息", count: counts.info, maxCount: maxCount, color: .blue)
+                            .help("重要的节点，比如启动、查完一段")
                     }
 
                     if minLevel <= .debug {
-                        LogVolumeRow(label: "Debug", count: counts.debug, maxCount: maxCount, color: .gray)
-                            .help("Routine operations useful for debugging")
+                        LogVolumeRow(label: "调试", count: counts.debug, maxCount: maxCount, color: .gray)
+                            .help("排查问题用的日常记录")
                     }
 
                     if minLevel <= .trace {
-                        LogVolumeRow(label: "Trace", count: counts.trace, maxCount: maxCount, color: Color.gray.opacity(0.5))
-                            .help("High-frequency events like mouse movement")
+                        LogVolumeRow(label: "追踪", count: counts.trace, maxCount: maxCount, color: Color.gray.opacity(0.5))
+                            .help("鼠标移动这类很频繁的事件")
                     }
                 }
                 .padding(.vertical, 4)
 
-                Text("Total logs: \(totalLogs)")
+                Text("一共 \(totalLogs) 条")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .padding(.top, 4)
@@ -708,6 +708,6 @@ private struct LogVolumeRow: View {
             .frame(height: 20)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(label): \(count) logs")
+        .accessibilityLabel("\(label)：\(count) 条")
     }
 }

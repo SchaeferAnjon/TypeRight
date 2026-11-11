@@ -12,6 +12,9 @@ import UniformTypeIdentifiers
 
 struct DiagnosticsView: View {
     @ObservedObject var preferences: UserPreferences
+    let vocabulary: CustomVocabulary
+    /// Screenshots show a made-up status instead of the app in front right now.
+    var sampleHealth: RuntimeHealthSnapshot?
     @ObservedObject private var permissionManager = PermissionManager.shared
     @ObservedObject private var runtimeHealth = RuntimeHealthStore.shared
     @State private var isExporting: Bool = false
@@ -20,11 +23,12 @@ struct DiagnosticsView: View {
     @State private var exportedFilePath: String = ""
     @State private var exportedFileSize: String = ""
     @State private var pendingResetAction: ResetAction?
+    @State private var resetError: String?
 
     var body: some View {
         Form {
             Section {
-                let snapshot = runtimeHealth.snapshot
+                let snapshot = sampleHealth ?? runtimeHealth.snapshot
                 HStack(alignment: .top, spacing: 12) {
                     Image(systemName: statusIcon(for: snapshot.state))
                         .font(.system(size: 15, weight: .semibold))
@@ -37,12 +41,12 @@ struct DiagnosticsView: View {
 
                     VStack(alignment: .leading, spacing: 7) {
                         HStack(alignment: .firstTextBaseline) {
-                            Text(snapshot.applicationName ?? "TextWarden")
+                            Text(snapshot.applicationName ?? "TypeRight")
                                 .font(.headline)
 
                             Spacer()
 
-                            Text(snapshot.state.displayName)
+                            Text(Self.stateLabel(snapshot.state))
                                 .font(.caption.weight(.semibold))
                                 .foregroundColor(statusColor(for: snapshot.state))
                                 .padding(.horizontal, 8)
@@ -53,13 +57,13 @@ struct DiagnosticsView: View {
                                 )
                         }
 
-                        Text(snapshot.title)
+                        Text(Self.healthTitle(snapshot))
                             .font(.subheadline)
                             .foregroundColor(.secondary)
 
                         if let lastCheck = snapshot.lastSuccessfulCheck {
                             Label(
-                                "Last checked \(lastCheck.formatted(date: .omitted, time: .shortened))",
+                                "上次查是 \(lastCheck.formatted(date: .omitted, time: .shortened))",
                                 systemImage: "clock"
                             )
                             .font(.caption)
@@ -67,7 +71,7 @@ struct DiagnosticsView: View {
                         }
 
                         if snapshot.capabilities.rawValue != 0 {
-                            Text("Capabilities: \(snapshot.capabilities.supportLabel)")
+                            Text(Self.capabilityLabel(snapshot.capabilities))
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
@@ -92,12 +96,12 @@ struct DiagnosticsView: View {
                         Image(systemName: "waveform.path.ecg")
                             .font(.title2)
                             .foregroundColor(.accentColor)
-                        Text("Runtime Health")
+                        Text("现在的状态")
                             .font(.title3)
                             .fontWeight(.semibold)
                     }
 
-                    Text("Current TextWarden status and available recovery actions")
+                    Text("TypeRight 在当前 App 里能不能用，不能用时可以怎么办")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -108,21 +112,21 @@ struct DiagnosticsView: View {
             Section {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
-                        Text("Started:")
+                        Text("启动于：")
                             .font(.caption)
                             .foregroundColor(.secondary)
                         Spacer()
-                        Text(BuildInfo.launchTimestamp)
+                        Text(BuildInfo.launchDate.formatted(.dateTime.month().day().hour().minute().locale(Locale(identifier: "zh_CN"))))
                             .font(.caption)
                             .fontWeight(.medium)
                     }
 
                     HStack {
-                        Text("Uptime:")
+                        Text("已运行：")
                             .font(.caption)
                             .foregroundColor(.secondary)
                         Spacer()
-                        Text(BuildInfo.uptime)
+                        Text(Self.uptimeLabel(since: BuildInfo.launchDate))
                             .font(.caption)
                             .fontWeight(.medium)
                     }
@@ -133,12 +137,12 @@ struct DiagnosticsView: View {
                         Image(systemName: "clock")
                             .font(.title2)
                             .foregroundColor(.accentColor)
-                        Text("Session Information")
+                        Text("这次运行")
                             .font(.title3)
                             .fontWeight(.semibold)
                     }
 
-                    Text("How long TextWarden has been running")
+                    Text("TypeRight 这次开了多久")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -156,7 +160,7 @@ struct DiagnosticsView: View {
 
             Section {
                 VStack(alignment: .leading, spacing: 16) {
-                    Text("Export a complete diagnostic package including logs, crash reports, system information, and comprehensive performance metrics for troubleshooting")
+                    Text("出问题时，导出一个诊断包发给我们：里面有日志、崩溃记录、系统信息和性能数据。")
                         .font(.body)
                         .foregroundColor(.secondary)
                         .padding(.bottom, 8)
@@ -164,7 +168,7 @@ struct DiagnosticsView: View {
                     Button(action: exportDiagnosticsToFile) {
                         HStack {
                             Image(systemName: "square.and.arrow.up")
-                            Text("Export Diagnostics")
+                            Text("导出诊断包")
                         }
                         .font(.body)
                         .fontWeight(.medium)
@@ -178,10 +182,10 @@ struct DiagnosticsView: View {
                             ProgressView()
                                 .controlSize(.small)
                             VStack(alignment: .leading, spacing: 2) {
-                                Text("Preparing diagnostic package...")
+                                Text("正在准备诊断包…")
                                     .font(.subheadline)
                                     .fontWeight(.medium)
-                                Text("Sanitizing logs and collecting data")
+                                Text("正在清理日志里的文字、收集数据")
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                             }
@@ -195,22 +199,22 @@ struct DiagnosticsView: View {
                         .padding(.vertical, 4)
 
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("What's included in the ZIP package:")
+                        Text("ZIP 里有：")
                             .font(.subheadline)
                             .fontWeight(.medium)
                         Group {
-                            Label("diagnostic_overview.json - System info, permissions, settings", systemImage: "doc.text")
-                            Label("Performance metrics - Latency (mean, median, P90, P95, P99) by timeframe", systemImage: "chart.xyaxis.line")
-                            Label("Usage statistics - Errors, suggestions, categories by timeframe", systemImage: "chart.bar")
-                            Label("Complete log files (current + rotated logs)", systemImage: "doc.on.doc")
-                            Label("crash_reports/ - Crash logs (if any)", systemImage: "exclamationmark.triangle")
-                            Label("Application state (paused/active apps)", systemImage: "app.dashed")
+                            Label("diagnostic_overview.json：系统信息、权限、设置", systemImage: "doc.text")
+                            Label("性能数据：各时间段的耗时（平均、中位、P90、P95、P99）", systemImage: "chart.xyaxis.line")
+                            Label("使用统计：各时间段查到的错和类别", systemImage: "chart.bar")
+                            Label("全部日志文件（当前的和轮换下来的）", systemImage: "doc.on.doc")
+                            Label("crash_reports/：崩溃记录（有的话）", systemImage: "exclamationmark.triangle")
+                            Label("App 状态（哪些暂停、哪些在看）", systemImage: "app.dashed")
                         }
                         .font(.caption)
                         .foregroundColor(.secondary)
                     }
 
-                    Text("⚠️ Privacy: At default log levels, no text is included. Debug/Trace logs may contain analyzed text. Please review before sharing.")
+                    Text("隐私：默认的日志级别不记你打的字；调到「调试」或「追踪」后，日志里可能有你打的字，发出去之前先看一眼。")
                         .font(.caption)
                         .foregroundColor(.orange)
                         .padding(.top, 4)
@@ -221,85 +225,12 @@ struct DiagnosticsView: View {
                         Image(systemName: "doc.text.magnifyingglass")
                             .font(.title2)
                             .foregroundColor(.accentColor)
-                        Text("Export System Diagnostics")
+                        Text("导出诊断包")
                             .font(.title3)
                             .fontWeight(.semibold)
                     }
 
-                    Text("Generate comprehensive diagnostic reports for troubleshooting")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-            }
-
-            // MARK: - Debug Overlays
-
-            Section {
-                VStack(alignment: .leading, spacing: 16) {
-                    Text("Enable visual debug overlays to help diagnose positioning issues. When enabled, colored boxes will appear around text fields to show how TextWarden calculates positions for grammar indicators")
-                        .font(.body)
-                        .foregroundColor(.secondary)
-                        .padding(.bottom, 8)
-
-                    Toggle("Show Text Field Bounds", isOn: $preferences.showDebugBorderTextFieldBounds)
-                        .help("Display a red box showing the exact boundaries of the text field being monitored for grammar checking")
-
-                    Text("Red box showing the text field being monitored for grammar")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .padding(.leading, 20)
-                        .padding(.bottom, 8)
-
-                    Toggle("Show CGWindow Coordinates", isOn: $preferences.showDebugBorderCGWindowCoords)
-                        .help("Display a blue box showing the raw CGWindow coordinates from the system")
-
-                    Text("Blue box showing CGWindow coordinates (raw from system)")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .padding(.leading, 20)
-                        .padding(.bottom, 8)
-
-                    Toggle("Show Cocoa Coordinates", isOn: $preferences.showDebugBorderCocoaCoords)
-                        .help("Display a green box showing the Cocoa coordinate system (converted from CGWindow)")
-
-                    Text("Green box showing Cocoa coordinates (converted)")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .padding(.leading, 20)
-                        .padding(.bottom, 8)
-
-                    Toggle("Show Character Position Markers", isOn: $preferences.showDebugCharacterMarkers)
-                        .help("Display markers showing character positions for debugging text positioning")
-
-                    Text("Orange = underline start (Cyan = first char when combined with Text Field Bounds)")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .padding(.leading, 20)
-
-                    Divider()
-                        .padding(.vertical, 4)
-
-                    HStack(spacing: 8) {
-                        Image(systemName: "info.circle.fill")
-                            .foregroundColor(.blue)
-                            .font(.caption)
-                        Text("These overlays are useful for troubleshooting position-related issues in specific applications")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-            } header: {
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "viewfinder")
-                            .font(.title2)
-                            .foregroundColor(.accentColor)
-                        Text("Debug Overlays")
-                            .font(.title3)
-                            .fontWeight(.semibold)
-                    }
-
-                    Text("Visual debugging tools for positioning and coordinate issues")
+                    Text("排查问题用")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -309,107 +240,41 @@ struct DiagnosticsView: View {
 
             Section {
                 VStack(alignment: .leading, spacing: 16) {
-                    Text("Reset various aspects of TextWarden to their default state. Use these options with caution as they cannot be undone")
+                    Text("把下面的东西恢复成默认。恢复了就回不去。")
                         .font(.body)
                         .foregroundColor(.secondary)
                         .padding(.bottom, 8)
 
-                    // Arrange buttons in a 2x2 grid for better alignment
-                    VStack(spacing: 12) {
-                        HStack(spacing: 12) {
-                            Button {
-                                pendingResetAction = .allSettings
-                            } label: {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    HStack {
-                                        Image(systemName: "arrow.counterclockwise.circle.fill")
-                                        Text("Reset All Settings")
-                                    }
-                                    .font(.body)
-                                    .fontWeight(.medium)
-                                    .foregroundColor(.red)
-                                }
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                    HStack(spacing: 12) {
+                        Button {
+                            pendingResetAction = .allSettings
+                        } label: {
+                            HStack {
+                                Image(systemName: "arrow.counterclockwise.circle.fill")
+                                Text("恢复全部高级设置")
                             }
-                            .buttonStyle(.bordered)
-                            .help("Reset all preferences and restart onboarding")
-
-                            Button {
-                                pendingResetAction = .customDictionary
-                            } label: {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    HStack {
-                                        Image(systemName: "book.closed.fill")
-                                        Text("Clear Custom Dictionary")
-                                    }
-                                    .font(.body)
-                                    .fontWeight(.medium)
-                                    .foregroundColor(.red)
-                                }
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                            .buttonStyle(.bordered)
-                            .help("Remove all words from your custom dictionary")
+                            .font(.body)
+                            .fontWeight(.medium)
+                            .foregroundColor(.red)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                         }
+                        .buttonStyle(.bordered)
+                        .help("「高级」里的设置都回到默认，然后重新打开 TypeRight")
 
-                        HStack(spacing: 12) {
-                            Button {
-                                pendingResetAction = .ignoredRules
-                            } label: {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    HStack {
-                                        Image(systemName: "checklist")
-                                        Text("Clear Ignored Rules")
-                                    }
-                                    .font(.body)
-                                    .fontWeight(.medium)
-                                    .foregroundColor(.red)
-                                }
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                        Button {
+                            pendingResetAction = .customDictionary
+                        } label: {
+                            HStack {
+                                Image(systemName: "book.closed.fill")
+                                Text("清空自定义词典")
                             }
-                            .buttonStyle(.bordered)
-                            .help("Re-enable all previously ignored grammar rules")
-
-                            Button {
-                                pendingResetAction = .ignoredErrorTexts
-                            } label: {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    HStack {
-                                        Image(systemName: "text.badge.xmark")
-                                        Text("Clear Ignored Error Texts")
-                                    }
-                                    .font(.body)
-                                    .fontWeight(.medium)
-                                    .foregroundColor(.red)
-                                }
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                            .buttonStyle(.bordered)
-                            .help("Clear all error texts ignored with 'Ignore Everywhere'")
+                            .font(.body)
+                            .fontWeight(.medium)
+                            .foregroundColor(.red)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                         }
-
-                        HStack(spacing: 12) {
-                            Button {
-                                pendingResetAction = .milestones
-                            } label: {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    HStack {
-                                        Image(systemName: "gift")
-                                        Text("Reset Milestones")
-                                    }
-                                    .font(.body)
-                                    .fontWeight(.medium)
-                                    .foregroundColor(.red)
-                                }
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                            .buttonStyle(.bordered)
-                            .help("Re-enable milestone celebration prompts")
-
-                            // Empty spacer to maintain grid alignment
-                            Color.clear
-                                .frame(maxWidth: .infinity)
-                        }
+                        .buttonStyle(.bordered)
+                        .help("删掉「拼写」里自定义词典的全部词")
                     }
                 }
             } header: {
@@ -418,12 +283,12 @@ struct DiagnosticsView: View {
                         Image(systemName: "arrow.counterclockwise.circle")
                             .font(.title2)
                             .foregroundColor(.accentColor)
-                        Text("Reset Options")
+                        Text("恢复默认")
                             .font(.title3)
                             .fontWeight(.semibold)
                     }
 
-                    Text("Restore settings and data to their default values")
+                    Text("错题本、生词本和 Key 不受影响")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -438,10 +303,15 @@ struct DiagnosticsView: View {
                 isPresented: $showingExportSuccess
             )
         }
-        .alert("Export Failed", isPresented: $showingExportError) {
-            Button("OK", role: .cancel) {}
+        .alert("没导出来", isPresented: $showingExportError) {
+            Button("好", role: .cancel) {}
         } message: {
-            Text("Failed to export diagnostic package. Please check the logs for details.")
+            Text("诊断包没导出来，详情在日志里。")
+        }
+        .alert("没清空", isPresented: Binding(get: { resetError != nil }, set: { if !$0 { resetError = nil } })) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(resetError ?? "")
         }
         .alert(item: $pendingResetAction) { action in
             Alert(
@@ -459,32 +329,74 @@ struct DiagnosticsView: View {
     private func runtimeHealthAction(for snapshot: RuntimeHealthSnapshot) -> some View {
         switch snapshot.action {
         case .grantPermission:
-            Button("Open Accessibility Settings") {
+            Button("打开辅助功能设置") {
                 permissionManager.openSystemSettings()
             }
         case .resume:
             let title = snapshot.resumeScope.flatMap { scope -> String? in
                 guard case .application = scope else { return nil }
-                return snapshot.applicationName.map { "Resume TextWarden in \($0)" }
-            } ?? "Resume TextWarden"
+                return snapshot.applicationName.map { "在「\($0)」里继续" }
+            } ?? "继续"
             Button(title) {
                 if let scope = snapshot.resumeScope {
                     preferences.resume(scope)
                 }
             }
         case .trySafely:
-            Button("Try Safely") {
+            Button("开启") {
                 if let bundleID = snapshot.bundleIdentifier {
                     AnalysisCoordinator.shared.startSafeTrial(for: bundleID)
                 }
             }
         case .retry:
-            Button("Retry Now") {
+            Button("再试一次") {
                 AnalysisCoordinator.shared.retryCurrentCheck()
             }
         case .none, .enable, .resetIndicatorPosition, .openSettings, .copyDiagnostics, .reportCompatibility, .keepPaused:
             EmptyView()
         }
+    }
+
+    static func uptimeLabel(since launch: Date, now: Date = Date()) -> String {
+        let minutes = Int(now.timeIntervalSince(launch) / 60)
+        if minutes < 1 { return "不到 1 分钟" }
+        if minutes < 60 { return "\(minutes) 分钟" }
+        if minutes < 24 * 60 { return "\(minutes / 60) 小时" }
+        return "\(minutes / (24 * 60)) 天"
+    }
+
+    static func stateLabel(_ state: CheckingState) -> String {
+        switch state {
+        case .active: "正在看"
+        case .limited: "部分能用"
+        case .recovering: "正在恢复"
+        case .inactive: "没在看"
+        }
+    }
+
+    static func healthTitle(_ snapshot: RuntimeHealthSnapshot) -> String {
+        switch snapshot.state {
+        case .active: return "TypeRight 在这个 App 里正常工作。"
+        case .limited: return "TypeRight 在这个 App 里只能部分工作。"
+        case .recovering: return "这个 App 刚才没回应，正在重新连上。"
+        case .inactive: break
+        }
+        switch snapshot.reason {
+        case .permission: return "要先给辅助功能权限，TypeRight 才能看别的 App 里的字。"
+        case .globalPause, nil: return "TypeRight 暂停着。"
+        case .appPause: return "TypeRight 在这个 App 里暂停着。"
+        case .siteDisabled: return "这个网站设成了不检查。"
+        case .consentRequired: return "这个 App 默认关着，点「开启」才开始看。"
+        case .secureField: return "密码框和受保护的输入框，TypeRight 一律不读。"
+        case .unsupportedField: return "这个输入框读不到 TypeRight 需要的信息。"
+        case .unsupportedApplication: return "TypeRight 不在这个 App 里用。"
+        case .noEditableField: return "把光标放进一个能打字的输入框，就开始看。"
+        }
+    }
+
+    static func capabilityLabel(_ capabilities: CapabilitySet) -> String {
+        guard capabilities.contains(.textReading) else { return "读不到这里的字" }
+        return capabilities.contains(.safeReplacement) ? "能读这里的字，也能把改法写回去" : "能读这里的字"
     }
 
     private func statusIcon(for state: CheckingState) -> String {
@@ -514,14 +426,12 @@ struct DiagnosticsView: View {
                 Self.relaunchApp()
             }
         case .customDictionary:
-            preferences.customDictionary.removeAll()
-        case .ignoredRules:
-            preferences.ignoredRules.removeAll()
-        case .ignoredErrorTexts:
-            preferences.ignoredErrorTexts.removeAll()
-        case .milestones:
-            preferences.milestonesDisabled = false
-            preferences.shownMilestones.removeAll()
+            do {
+                try vocabulary.clearAll()
+            } catch {
+                Logger.error("Clearing the custom dictionary failed", error: error, category: Logger.general)
+                resetError = error.localizedDescription
+            }
         }
     }
 
@@ -530,9 +440,9 @@ struct DiagnosticsView: View {
 
         // Show save panel first
         let savePanel = NSSavePanel()
-        savePanel.title = "Export Diagnostics"
-        savePanel.message = "Choose a location to save the diagnostic package"
-        savePanel.nameFieldStringValue = "TextWarden-Diagnostics-\(formatDateForFilename()).zip"
+        savePanel.title = "导出诊断包"
+        savePanel.message = "选一个地方存诊断包"
+        savePanel.nameFieldStringValue = Self.exportFileName(at: Date())
         savePanel.allowedContentTypes = [.zip]
         savePanel.canCreateDirectories = true
 
@@ -568,7 +478,7 @@ struct DiagnosticsView: View {
                         formatter.countStyle = .file
                         exportedFileSize = formatter.string(fromByteCount: fileSize)
                     } else {
-                        exportedFileSize = "Unknown"
+                        exportedFileSize = "大小未知"
                     }
 
                     showingExportSuccess = true
@@ -581,10 +491,11 @@ struct DiagnosticsView: View {
         }
     }
 
-    private func formatDateForFilename() -> String {
+    static func exportFileName(at date: Date) -> String {
         let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyy-MM-dd-HHmmss"
-        return formatter.string(from: Date())
+        return "TypeRight-Diagnostics-\(formatter.string(from: date)).zip"
     }
 
     // MARK: - App Relaunch
@@ -596,7 +507,7 @@ struct DiagnosticsView: View {
             return
         }
 
-        Logger.info("Relaunching TextWarden after settings reset", category: Logger.general)
+        Logger.info("Relaunching TypeRight after settings reset", category: Logger.general)
 
         // Launch a new instance of the app
         let configuration = NSWorkspace.OpenConfiguration()
@@ -618,9 +529,6 @@ struct DiagnosticsView: View {
 private enum ResetAction: Identifiable {
     case allSettings
     case customDictionary
-    case ignoredRules
-    case ignoredErrorTexts
-    case milestones
 
     var id: String {
         title
@@ -628,31 +536,22 @@ private enum ResetAction: Identifiable {
 
     var title: String {
         switch self {
-        case .allSettings: "Reset All Settings?"
-        case .customDictionary: "Clear Custom Dictionary?"
-        case .ignoredRules: "Clear Ignored Rules?"
-        case .ignoredErrorTexts: "Clear Ignored Error Texts?"
-        case .milestones: "Reset Milestones?"
+        case .allSettings: "恢复全部高级设置？"
+        case .customDictionary: "清空自定义词典？"
         }
     }
 
     var message: String {
         switch self {
-        case .allSettings: "This restores TextWarden's settings and restarts the app."
-        case .customDictionary: "This removes every word in your custom dictionary."
-        case .ignoredRules: "This re-enables every rule you previously ignored."
-        case .ignoredErrorTexts: "This removes every text pattern ignored everywhere."
-        case .milestones: "This restores milestone prompts you have already dismissed."
+        case .allSettings: "「高级」里的设置都回到默认，TypeRight 会重新打开并再走一遍第一次设置。错题本、生词本和 Key 不动。"
+        case .customDictionary: "删掉自定义词典里的全部词，删了找不回来。"
         }
     }
 
     var confirmationTitle: String {
         switch self {
-        case .allSettings: "Reset Settings"
-        case .customDictionary: "Clear Dictionary"
-        case .ignoredRules: "Clear Rules"
-        case .ignoredErrorTexts: "Clear Ignored Texts"
-        case .milestones: "Reset Milestones"
+        case .allSettings: "恢复"
+        case .customDictionary: "清空"
         }
     }
 }
@@ -671,22 +570,22 @@ struct LoggingConfigurationView: View {
     var body: some View {
         Section {
             VStack(alignment: .leading, spacing: 16) {
-                Text("Configure log verbosity and output location for debugging")
+                Text("日志记多细、存在哪里，排查问题用")
                     .font(.body)
                     .foregroundColor(.secondary)
                     .padding(.bottom, 8)
 
                 // Log Level Picker
                 HStack {
-                    Text("Log Level:")
+                    Text("日志级别：")
                         .font(.subheadline)
                         .fontWeight(.medium)
 
                     Spacer()
 
-                    Picker("Log Level", selection: $selectedLogLevel) {
+                    Picker("日志级别", selection: $selectedLogLevel) {
                         ForEach(LogLevel.allCases, id: \.self) { level in
-                            Text(level.rawValue).tag(level)
+                            Text(level.label).tag(level)
                         }
                     }
                     .pickerStyle(.menu)
@@ -709,7 +608,7 @@ struct LoggingConfigurationView: View {
                     }
                 }
 
-                Text("Controls verbosity: Debug shows all messages, Critical shows only severe issues")
+                Text("「调试」记下所有消息，「严重」只记最严重的问题")
                     .font(.caption)
                     .foregroundColor(.secondary)
 
@@ -717,28 +616,28 @@ struct LoggingConfigurationView: View {
                     .padding(.vertical, 4)
 
                 // File Logging Toggle
-                Toggle("Enable File Logging", isOn: $fileLoggingEnabled)
+                Toggle("把日志写进文件", isOn: $fileLoggingEnabled)
                     .onChange(of: fileLoggingEnabled) { _, newValue in
                         Logger.fileLoggingEnabled = newValue
                     }
-                    .help("Write logs to a file for debugging purposes")
+                    .help("排查问题时用")
 
                 if fileLoggingEnabled {
                     VStack(alignment: .leading, spacing: 12) {
                         // Log File Path Configuration
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("Log File Location:")
+                            Text("日志文件在：")
                                 .font(.subheadline)
                                 .fontWeight(.medium)
 
                             // Path displayed in a styled text field
                             HStack {
-                                Text(logFilePath)
+                                Text((logFilePath as NSString).abbreviatingWithTildeInPath)
                                     .font(.caption.monospaced())
                                     .foregroundColor(.primary)
                                     .textSelection(.enabled)
                                     .frame(maxWidth: .infinity, alignment: .leading)
-                                    .help("Current log file path. Click 'Choose' to change location.")
+                                    .help("现在的日志文件。点「换个位置…」能换")
                                 Spacer(minLength: 0)
                             }
                             .padding(.horizontal, 12)
@@ -750,33 +649,33 @@ struct LoggingConfigurationView: View {
                                     .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
                             )
 
-                            Text("You can choose a custom location using the button below, or use the default location")
+                            Text("可以用下面的按钮换个位置，也可以用默认位置")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
 
                             HStack(spacing: 8) {
-                                Button("Choose Location...") {
+                                Button("换个位置…") {
                                     chooseLogFilePath()
                                 }
                                 .buttonStyle(.bordered)
-                                .help("Select a custom location for log files")
+                                .help("选一个地方存日志")
 
                                 if Logger.customLogFilePath != nil {
-                                    Button("Reset to Default") {
+                                    Button("用默认位置") {
                                         resetLogFilePathToDefault()
                                     }
                                     .buttonStyle(.bordered)
-                                    .help("Use default location: ~/Library/Logs/TypeRight/")
+                                    .help("默认位置：~/Library/Logs/TypeRight/")
                                 }
 
-                                Button("Open in Finder") {
+                                Button("在访达中显示") {
                                     NSWorkspace.shared.selectFile(logFilePath, inFileViewerRootedAtPath: "")
                                 }
                                 .buttonStyle(.bordered)
-                                .help("Show log file in Finder")
+                                .help("在访达里找到日志文件")
                             }
 
-                            Text("Default: ~/Library/Logs/TypeRight/typeright.log")
+                            Text("默认：~/Library/Logs/TypeRight/typeright.log")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
@@ -790,12 +689,12 @@ struct LoggingConfigurationView: View {
                     Image(systemName: "doc.text.fill")
                         .font(.title2)
                         .foregroundColor(.accentColor)
-                    Text("Logging Configuration")
+                    Text("日志")
                         .font(.title3)
                         .fontWeight(.semibold)
                 }
 
-                Text("Configure debug logging and file output settings")
+                Text("日志级别和写到哪个文件")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -820,8 +719,8 @@ struct LoggingConfigurationView: View {
 
     private func chooseLogFilePath() {
         let savePanel = NSSavePanel()
-        savePanel.title = "Choose Log File Location"
-        savePanel.message = "Select where to save log files"
+        savePanel.title = "日志存到哪里"
+        savePanel.message = "选一个地方存日志文件"
         savePanel.nameFieldStringValue = "typeright.log"
         savePanel.canCreateDirectories = true
         savePanel.showsTagField = false
@@ -874,7 +773,7 @@ struct ExportSuccessSheet: View {
                     .font(.system(size: 48))
                     .foregroundStyle(.green)
 
-                Text("Export Successful")
+                Text("导出好了")
                     .font(.title2)
                     .fontWeight(.semibold)
             }
@@ -906,11 +805,11 @@ struct ExportSuccessSheet: View {
 
                 // Path display
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Location")
+                    Text("位置")
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
-                    Text(directoryPath)
+                    Text((directoryPath as NSString).abbreviatingWithTildeInPath)
                         .font(.caption.monospaced())
                         .foregroundStyle(.primary)
                         .lineLimit(2)
@@ -935,7 +834,7 @@ struct ExportSuccessSheet: View {
                 } label: {
                     HStack(spacing: 6) {
                         Image(systemName: showCopiedFeedback ? "checkmark" : "doc.on.doc")
-                        Text(showCopiedFeedback ? "Copied!" : "Copy Path")
+                        Text(showCopiedFeedback ? "已复制" : "复制路径")
                     }
                     .frame(maxWidth: .infinity)
                 }
@@ -947,7 +846,7 @@ struct ExportSuccessSheet: View {
                 } label: {
                     HStack(spacing: 6) {
                         Image(systemName: "folder")
-                        Text("Show in Finder")
+                        Text("在访达中显示")
                     }
                     .frame(maxWidth: .infinity)
                 }
@@ -960,7 +859,7 @@ struct ExportSuccessSheet: View {
             Button {
                 isPresented = false
             } label: {
-                Text("Done")
+                Text("完成")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
@@ -999,7 +898,7 @@ struct VerboseLoggingWarningSheet: View {
                     .font(.system(size: 48))
                     .foregroundStyle(.orange)
 
-                Text("Verbose Logging Warning")
+                Text("详细日志会记下你打的字")
                     .font(.title2)
                     .fontWeight(.semibold)
             }
@@ -1008,11 +907,11 @@ struct VerboseLoggingWarningSheet: View {
 
             // Warning message
             VStack(alignment: .leading, spacing: 16) {
-                Text("Debug and Trace log levels may include analyzed text content in the log file for troubleshooting purposes.")
+                Text("「调试」和「追踪」级别为了排查问题，可能把查过的文字写进日志文件。")
                     .font(.body)
 
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Be mindful of:")
+                    Text("留意：")
                         .font(.subheadline)
                         .fontWeight(.medium)
 
@@ -1020,17 +919,17 @@ struct VerboseLoggingWarningSheet: View {
                         HStack(alignment: .top, spacing: 8) {
                             Image(systemName: "doc.text")
                                 .frame(width: 16, alignment: .center)
-                            Text("What text you analyze while verbose logging is enabled")
+                            Text("开着详细日志时你都打了什么")
                         }
                         HStack(alignment: .top, spacing: 8) {
                             Image(systemName: "person.2")
                                 .frame(width: 16, alignment: .center)
-                            Text("Who you share the log file with")
+                            Text("日志文件发给了谁")
                         }
                         HStack(alignment: .top, spacing: 8) {
                             Image(systemName: "lock.shield")
                                 .frame(width: 16, alignment: .center)
-                            Text("Sensitive information that may appear in logs")
+                            Text("日志里可能有敏感信息")
                         }
                     }
                     .font(.caption)
@@ -1048,11 +947,11 @@ struct VerboseLoggingWarningSheet: View {
                         .foregroundStyle(.secondary)
 
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Log File Location")
+                        Text("日志文件在")
                             .font(.caption)
                             .foregroundStyle(.secondary)
 
-                        Text(logFilePath)
+                        Text((logFilePath as NSString).abbreviatingWithTildeInPath)
                             .font(.caption.monospaced())
                             .foregroundStyle(.primary)
                             .lineLimit(2)
@@ -1076,7 +975,7 @@ struct VerboseLoggingWarningSheet: View {
                         HStack(spacing: 4) {
                             Image(systemName: showCopiedFeedback ? "checkmark" : "doc.on.doc")
                                 .frame(width: 12)
-                            Text(showCopiedFeedback ? "Copied!" : "Copy Path")
+                            Text(showCopiedFeedback ? "已复制" : "复制路径")
                         }
                         .font(.caption)
                         .frame(height: 16)
@@ -1091,7 +990,7 @@ struct VerboseLoggingWarningSheet: View {
                         HStack(spacing: 4) {
                             Image(systemName: "folder")
                                 .frame(width: 12)
-                            Text("Show in Finder")
+                            Text("在访达中显示")
                         }
                         .font(.caption)
                         .frame(height: 16)
@@ -1112,7 +1011,7 @@ struct VerboseLoggingWarningSheet: View {
                     isPresented = false
                     onCancel()
                 } label: {
-                    Text("Cancel")
+                    Text("取消")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
@@ -1122,7 +1021,7 @@ struct VerboseLoggingWarningSheet: View {
                     isPresented = false
                     onConfirm()
                 } label: {
-                    Text("Enable \(pendingLogLevel?.rawValue ?? "Debug") Logging")
+                    Text("改成「\((pendingLogLevel ?? .debug).label)」")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
@@ -1134,5 +1033,18 @@ struct VerboseLoggingWarningSheet: View {
         }
         .frame(width: 460)
         .background(.regularMaterial)
+    }
+}
+
+private extension LogLevel {
+    var label: String {
+        switch self {
+        case .trace: "追踪"
+        case .debug: "调试"
+        case .info: "信息"
+        case .warning: "警告"
+        case .error: "错误"
+        case .critical: "严重"
+        }
     }
 }

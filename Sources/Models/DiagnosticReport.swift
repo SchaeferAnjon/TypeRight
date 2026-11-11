@@ -599,29 +599,17 @@ struct SettingsDump: Codable {
 
         // IMPORTANT: This must be called on the main thread because
         // KeyboardShortcuts.Shortcut.description accesses input sources
-        if let shortcut = KeyboardShortcuts.getShortcut(for: .toggleTextWarden) {
-            shortcutsDict["Toggle TextWarden"] = shortcut.description
-        }
-        if let shortcut = KeyboardShortcuts.getShortcut(for: .acceptSuggestion) {
-            shortcutsDict["Accept Suggestion"] = shortcut.description
-        }
-        if let shortcut = KeyboardShortcuts.getShortcut(for: .dismissSuggestion) {
-            shortcutsDict["Dismiss Suggestion"] = shortcut.description
-        }
-        if let shortcut = KeyboardShortcuts.getShortcut(for: .previousSuggestion) {
-            shortcutsDict["Previous Suggestion"] = shortcut.description
-        }
-        if let shortcut = KeyboardShortcuts.getShortcut(for: .nextSuggestion) {
-            shortcutsDict["Next Suggestion"] = shortcut.description
-        }
-        if let shortcut = KeyboardShortcuts.getShortcut(for: .applySuggestion1) {
-            shortcutsDict["Apply Suggestion 1"] = shortcut.description
-        }
-        if let shortcut = KeyboardShortcuts.getShortcut(for: .applySuggestion2) {
-            shortcutsDict["Apply Suggestion 2"] = shortcut.description
-        }
-        if let shortcut = KeyboardShortcuts.getShortcut(for: .applySuggestion3) {
-            shortcutsDict["Apply Suggestion 3"] = shortcut.description
+        // The keys TypeRight offers: 设置 › 快捷键 and 设置 › 高级 › 通用.
+        let names: [(String, KeyboardShortcuts.Name)] = [
+            ("Translate Sentence", .typeRightTranslate),
+            ("Pause / Resume TypeRight", .toggleTextWarden),
+            ("Fix All Obvious", .fixAllObvious),
+            ("Quick Rewrite", .quickRewrite),
+        ]
+        for (label, name) in names {
+            if let shortcut = KeyboardShortcuts.getShortcut(for: name) {
+                shortcutsDict[label] = shortcut.description
+            }
         }
 
         return shortcutsDict

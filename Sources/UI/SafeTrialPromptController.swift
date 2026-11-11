@@ -2,7 +2,8 @@
 //  SafeTrialPromptController.swift
 //  TextWarden
 //
-//  A contextual consent prompt for applications TextWarden has not verified yet.
+//  Asks before TypeRight looks at an app that is off by default (terminals, launchers): turning
+//  one on in 设置 › App or the menu only resumes it, and this asks the first time it is used.
 //
 
 import AppKit
@@ -173,7 +174,7 @@ final class SafeTrialPromptController: NSObject, NSPopoverDelegate {
         startAnchorMonitoring()
 
         Logger.info(
-            "Showing safe-trial choice beside \(context.applicationName) because the TextWarden menu-bar item is hidden",
+            "Showing safe-trial choice beside \(context.applicationName) because the TypeRight menu-bar item is hidden",
             category: Logger.ui
         )
     }
@@ -329,7 +330,7 @@ final class SafeTrialPromptController: NSObject, NSPopoverDelegate {
     }
 }
 
-private struct SafeTrialPromptView: View {
+struct SafeTrialPromptView: View {
     let applicationName: String
     let applicationIcon: NSImage?
     let showsPanelBackground: Bool
@@ -341,12 +342,12 @@ private struct SafeTrialPromptView: View {
             applicationIdentity
 
             VStack(alignment: .leading, spacing: 0) {
-                Text("Try TextWarden in \(applicationName)?")
+                Text("在「\(applicationName)」里也用 TypeRight？")
                     .font(.headline)
                     .lineLimit(1)
                     .minimumScaleFactor(0.9)
 
-                Text("\(applicationName) hasn’t been verified yet.")
+                Text("这类 App 默认不看。")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .padding(.top, 3)
@@ -358,9 +359,9 @@ private struct SafeTrialPromptView: View {
                         .accessibilityHidden(true)
 
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Indicator and copy-only fixes")
+                        Text("开了以后照常弹框")
                             .foregroundStyle(.primary)
-                        Text("Underlines and direct edits stay off")
+                        Text("随时能在设置 › App 里关掉")
                             .foregroundStyle(.secondary)
                     }
                     .font(.callout)
@@ -369,10 +370,10 @@ private struct SafeTrialPromptView: View {
 
                 HStack(spacing: 8) {
                     Spacer()
-                    Button("Keep Paused", action: onKeepPaused)
+                    Button("先不用", action: onKeepPaused)
                         .buttonStyle(.borderless)
                         .foregroundStyle(.secondary)
-                    Button("Try Safely", action: onTry)
+                    Button("开启", action: onTry)
                         .buttonStyle(.borderedProminent)
                         .keyboardShortcut(.defaultAction)
                 }

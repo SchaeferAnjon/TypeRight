@@ -74,14 +74,16 @@ enum TRAppActivation {
         NSApp.setActivationPolicy(.regular)
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        returnToMenuBarWhenClosed(window)
+    }
+
+    /// Back to menu-bar only once no window of ours is left on screen. The closing window still
+    /// counts as open while it closes, so the check waits one turn of the main queue.
+    static func returnToMenuBarWhenClosed(_ window: NSWindow) {
         guard observers[ObjectIdentifier(window)] == nil else { return }
         observers[ObjectIdentifier(window)] = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { _ in
-            MainActor.assumeIsolated {
-                // Back to menu-bar only once no titled window of ours is left on screen.
-                DispatchQueue.main.async {
-                    let open = NSApp.windows.contains { $0.isVisible && $0.styleMask.contains(.titled) && $0 !== window }
-                    if !open { NSApp.setActivationPolicy(.accessory) }
-                }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { MenuBarOnlyMode.restoreIfNoWindowOpen() }
             }
         }
     }

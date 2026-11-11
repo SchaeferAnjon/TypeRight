@@ -36,6 +36,9 @@ enum TROnboardingStep: Int, CaseIterable {
 
 struct TROnboardingView: View {
     var start: TROnboardingStep = .welcome
+    /// Screenshots fix these instead of reading this Mac's permission and shortcut.
+    var accessGranted: Bool?
+    var translateKey: KeyboardShortcuts.Name = .typeRightTranslate
     let onFinish: () -> Void
 
     @State private var step: TROnboardingStep = .welcome
@@ -111,11 +114,13 @@ struct TROnboardingView: View {
         .background(TR.side)
     }
 
+    private var isAccessGranted: Bool { accessGranted ?? permission.isPermissionGranted }
+
     private func isDone(_ s: TROnboardingStep) -> Bool {
         switch s {
-        case .access: permission.isPermissionGranted
+        case .access: isAccessGranted
         case .ai: CoachSettings.isAIReady
-        case .key: KeyboardShortcuts.getShortcut(for: .typeRightTranslate) != nil
+        case .key: KeyboardShortcuts.getShortcut(for: translateKey) != nil
         default: s.rawValue < step.rawValue
         }
     }
@@ -167,7 +172,7 @@ struct TROnboardingView: View {
         VStack(alignment: .leading, spacing: 24) {
             heading("给 TypeRight 辅助功能权限",
                     "有了这个权限，TypeRight 才能看到你正在打的那一句，并在你按 Tab 时把改法写回去。密码框系统不让读，TypeRight 也不读；你关掉的 App 它完全不看。")
-            if permission.isPermissionGranted {
+            if isAccessGranted {
                 HStack(spacing: 8) {
                     Image(systemName: "checkmark.circle.fill").foregroundStyle(TR.fix)
                     Text("已经开好了。").font(.system(size: 14, weight: .medium)).foregroundStyle(TR.text)
@@ -221,7 +226,7 @@ struct TROnboardingView: View {
                     "中英混打时，中文会自己变成英文。整句都是中文时（比如和朋友聊天）不会弹；想把这句变成英文，按你选的这个键。")
             TRGroup {
                 TRRow(title: "整句翻译", note: "要带 ⌘、⌥、⌃ 或 ⇧；不设也行，以后在设置里改", last: true) {
-                    KeyboardShortcuts.Recorder("", name: .typeRightTranslate)
+                    KeyboardShortcuts.Recorder("", name: translateKey)
                 }
             }
         }
@@ -265,7 +270,7 @@ struct TROnboardingView: View {
     private var footerNote: String {
         switch step {
         case .welcome: "接下来 3 步，大约 2 分钟"
-        case .access: permission.isPermissionGranted ? "这一步好了" : "没给权限也能先往下走，弹框要等开好才出来"
+        case .access: isAccessGranted ? "这一步好了" : "没给权限也能先往下走，弹框要等开好才出来"
         case .ai: CoachSettings.isAIReady ? "AI 连上了" : "不填也行，只查拼写"
         case .key: "不设也行"
         case .done: ""

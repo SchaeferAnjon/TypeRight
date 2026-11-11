@@ -14,6 +14,16 @@ enum PauseDuration: String, CaseIterable, Codable {
     case oneHour = "Paused for 1 Hour"
     case twentyFourHours = "Paused for 24 Hours"
     case indefinite = "Paused Until Resumed"
+
+    /// What the settings show; the raw value is what is stored.
+    var label: String {
+        switch self {
+        case .active: "正在看"
+        case .oneHour: "暂停 1 小时"
+        case .twentyFourHours: "暂停 24 小时"
+        case .indefinite: "一直暂停，直到我恢复"
+        }
+    }
 }
 
 /// Identifies which pause setting a user action should change.
@@ -266,6 +276,18 @@ class UserPreferences: ObservableObject {
         "Indian",
     ]
 
+    /// What the settings show for a stored dialect.
+    static func dialectLabel(_ dialect: String) -> String {
+        switch dialect {
+        case "American": "美式英语"
+        case "British": "英式英语"
+        case "Canadian": "加拿大英语"
+        case "Australian": "澳大利亚英语"
+        case "Indian": "印度英语"
+        default: dialect
+        }
+    }
+
     // MARK: - Predefined Wordlists
 
     // Each wordlist has a Bool toggle that enables/disables it
@@ -441,6 +463,15 @@ class UserPreferences: ObservableObject {
         "Light",
         "Dark",
     ]
+
+    /// What the settings show for a stored theme option.
+    static func themeLabel(_ theme: String) -> String {
+        switch theme {
+        case "Light": "浅色"
+        case "Dark": "深色"
+        default: "跟随系统"
+        }
+    }
 
     /// Whether to show error underlines (global toggle)
     @Published var showUnderlines: Bool {

@@ -12,6 +12,8 @@ import SwiftUI
 
 struct WebsiteSettingsView: View {
     @ObservedObject var preferences: UserPreferences
+    /// Screenshots leave out the button that names the site last open in a browser.
+    var showsCurrentSite = true
     @State private var searchText = ""
     @State private var newWebsite = ""
     @State private var showingAddSheet = false
@@ -33,7 +35,7 @@ struct WebsiteSettingsView: View {
                 HStack {
                     Image(systemName: "magnifyingglass")
                         .foregroundColor(.secondary)
-                    TextField("Search websites...", text: $searchText)
+                    TextField("找网站…", text: $searchText)
                         .textFieldStyle(.plain)
                     if !searchText.isEmpty {
                         Button(action: { searchText = "" }) {
@@ -48,15 +50,15 @@ struct WebsiteSettingsView: View {
                 .cornerRadius(6)
 
                 // Current website button (if in browser)
-                if let currentDomain = AnalysisCoordinator.shared.browserDomain() {
+                if showsCurrentSite, let currentDomain = AnalysisCoordinator.shared.browserDomain() {
                     if !preferences.isWebsiteDisabled(currentDomain) {
                         Button {
                             preferences.disableWebsite(currentDomain)
                         } label: {
-                            Label("Disable \(currentDomain)", systemImage: "minus.circle")
+                            Label("在 \(currentDomain) 上关掉", systemImage: "minus.circle")
                         }
                         .buttonStyle(.bordered)
-                        .help("Disable grammar checking on the current website")
+                        .help("在刚才浏览的这个网站上不弹框")
                     }
                 }
 
@@ -66,7 +68,7 @@ struct WebsiteSettingsView: View {
                     Image(systemName: "plus")
                 }
                 .buttonStyle(.bordered)
-                .help("Add a website to disable")
+                .help("加一个不检查的网站")
             }
             .padding()
 
@@ -77,7 +79,7 @@ struct WebsiteSettingsView: View {
                         // Search returned no results
                         HStack {
                             Spacer()
-                            Text("No matching websites")
+                            Text("没找到")
                                 .foregroundColor(.secondary)
                             Spacer()
                         }
@@ -88,10 +90,10 @@ struct WebsiteSettingsView: View {
                             Image(systemName: "globe")
                                 .font(.system(size: 36))
                                 .foregroundColor(.secondary.opacity(0.5))
-                            Text("No disabled websites")
+                            Text("还没有关掉的网站")
                                 .font(.subheadline)
                                 .foregroundColor(.secondary)
-                            Text("Add websites to disable grammar checking on specific sites")
+                            Text("加进来的网站上，TypeRight 不弹框")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                                 .multilineTextAlignment(.center)
@@ -110,7 +112,7 @@ struct WebsiteSettingsView: View {
                                     Text(website)
                                         .font(.body)
                                     if website.hasPrefix("*.") {
-                                        Text("Includes all subdomains")
+                                        Text("包括所有子域名")
                                             .font(.caption)
                                             .foregroundColor(.secondary)
                                     }
@@ -119,7 +121,7 @@ struct WebsiteSettingsView: View {
                                 Spacer()
 
                                 // Status indicator
-                                Text(preferences.websitePausedUntil[website].map { "Until " + $0.formatted(date: .abbreviated, time: .shortened) } ?? "Disabled")
+                                Text(preferences.websitePausedUntil[website].map { "暂停到 " + $0.formatted(date: .abbreviated, time: .shortened) } ?? "已关掉")
                                     .font(.caption)
                                     .foregroundColor(.orange)
                                     .padding(.horizontal, 8)
@@ -135,17 +137,17 @@ struct WebsiteSettingsView: View {
                                 }
                                 .buttonStyle(.bordered)
                                 .controlSize(.small)
-                                .help("Enable grammar checking on this website")
+                                .help("在这个网站上恢复弹框")
                             }
                             .padding(.vertical, 4)
                         }
                     }
                 } header: {
                     HStack {
-                        Text("Disabled Websites")
+                        Text("不检查的网站")
                             .font(.headline)
                         Spacer()
-                        Text("\(preferences.disabledWebsites.count) \(preferences.disabledWebsites.count == 1 ? "website" : "websites")")
+                        Text("\(preferences.disabledWebsites.count) 个")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -155,7 +157,7 @@ struct WebsiteSettingsView: View {
             .listStyle(.inset)
 
             // Info text (matching Applications style)
-            Text("Disable grammar checking on specific websites. Enter exact domains like \"github.com\" or use wildcards like \"*.google.com\" to include all subdomains. When browsing, use the button above to quickly disable the current site.")
+            Text("在这些网站上 TypeRight 不弹框。可以写准确的域名，比如 github.com；写 *.google.com 就包括所有子域名。刚在浏览器里看的网站，可以用上面的按钮直接关掉。")
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
@@ -188,22 +190,22 @@ private struct AddWebsiteSheet: View {
                 Image(systemName: "globe.badge.chevron.backward")
                     .font(.system(size: 32))
                     .foregroundColor(.accentColor)
-                Text("Add Website")
+                Text("加一个网站")
                     .font(.headline)
-                Text("Disable grammar checking on a specific website")
+                Text("在这个网站上不弹框")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
 
             // Input field
             VStack(alignment: .leading, spacing: 6) {
-                Text("Domain")
+                Text("域名")
                     .font(.caption)
                     .foregroundColor(.secondary)
-                TextField("e.g., github.com or *.google.com", text: $newWebsite)
+                TextField("比如 github.com 或 *.google.com", text: $newWebsite)
                     .textFieldStyle(.roundedBorder)
                     .focused($isTextFieldFocused)
-                Text("Use a domain, host:port, or full page URL. *.example.com includes subdomains.")
+                Text("可以写域名、域名:端口或完整网址。*.example.com 包括所有子域名。")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -212,7 +214,7 @@ private struct AddWebsiteSheet: View {
 
             // Buttons
             HStack {
-                Button("Cancel") {
+                Button("取消") {
                     newWebsite = ""
                     isPresented = false
                 }
@@ -220,7 +222,7 @@ private struct AddWebsiteSheet: View {
 
                 Spacer()
 
-                Button("Add Website") {
+                Button("加入") {
                     let trimmed = newWebsite.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !trimmed.isEmpty {
                         onAdd(trimmed)

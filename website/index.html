@@ -706,8 +706,10 @@ const cmpTable=()=>{const r=CMP();return `<table class="cmpt" data-part="四种�
 const PROV=()=>[['deepseek','DeepSeek',t('便宜，中文好'),t('国内推荐')],['zhipu',t('智谱 GLM'),t('国内直连，速度快'),''],['qwen',t('通义千问'),t('阿里云百炼'),''],['kimi','Kimi',t('月之暗面'),''],['doubao',t('豆包'),t('火山方舟'),''],['openai','OpenAI',t('需要海外网络'),''],['gemini','Gemini',t('需要海外网络'),''],['claude','Claude',t('需要海外网络'),''],['openrouter','OpenRouter',t('一个 Key 用多家模型'),''],['custom',t('自定义'),t('任何 OpenAI 兼容接口'),'']];
 /* Screenshots of the app go in website/shots/. A step shows its picture once the file name is listed here;
    until then the step is text only (no drawn stand-in). */
-const SHOTS=[];
-const shot=(name,alt)=>SHOTS.includes(name)?`<img class="shot" src="shots/${name}" alt="${esc(alt)}" loading="lazy">`:'';
+// Drawn off-screen at 2x by Tests/Unit/TypeRightSnapshotTests.swift (testDrawGuideShots). Only a 2x
+// candidate, so screens of any density show them at their real size (a 1x src would double them).
+const SHOTS=['guide-access.png','guide-menu.png','guide-ai-provider.png','guide-shortcuts.png','guide-apps.png'];
+const shot=(name,alt)=>SHOTS.includes(name)?`<img class="shot" srcset="shots/${name} 2x" alt="${esc(alt)}" loading="lazy">`:'';
 function docPage(kicker,title,sub,secs,lead){
   return `<div class="wrap doc" data-part="${kicker}"><nav class="toc">${secs.map((s,i)=>`<a href="${hrefOf(ST.page)}" data-go="${ST.page}#d${i}">${s[0]}</a>`).join('')}</nav><article>
    <span class="kicker">${kicker}</span><h1>${title}</h1>${sub?`<p class="muted">${sub}</p>`:''}${lead?`<p class="lead" data-part="统计原因">${lead}</p>`:''}
