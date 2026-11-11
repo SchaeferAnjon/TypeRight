@@ -94,7 +94,10 @@ final class TypingCoach {
 
     /// Called after every analysis of the focused field.
     func analysisDidUpdate(text: String, errors: [GrammarErrorModel]) {
-        guard CoachSettings.cardsEnabled, host != nil else { return }
+        guard CoachSettings.cardsEnabled, host != nil else {
+            Logger.info("TypeRight: analysis ignored (cards \(CoachSettings.cardsEnabled), host \(host != nil))", category: Logger.ui)
+            return
+        }
         latestText = text
         latestErrors = errors
 
@@ -165,6 +168,7 @@ final class TypingCoach {
         guard let first = after.first, !CharacterSet.letters.contains(first), after.count <= 4 else { return nil }
 
         let word = String(String.UnicodeScalarView(scalars[error.start ..< error.end]))
+        Logger.info("TypeRight: finished misspelling at \(error.start)-\(error.end), caret \(caret), \(error.suggestions.count) suggestions", category: Logger.ui)
         // Chinese is handled by the translate card, never as a misspelling.
         guard !word.unicodeScalars.contains(where: ChineseText.isHan),
               word.unicodeScalars.contains(where: { ("a" ... "z").contains($0) || ("A" ... "Z").contains($0) }),
@@ -187,6 +191,7 @@ final class TypingCoach {
 
     private func userPaused() {
         guard active == nil || isThinking else { return }
+        Logger.info("TypeRight: pause check (AI \(CoachSettings.isAIReady), pinyin waiting \(waitingPinyin != nil))", category: Logger.ui)
         let text = latestText
         let scalars = Array(text.unicodeScalars)
         let caret = min(host?.coachCaret(in: text) ?? scalars.count, scalars.count)
@@ -335,13 +340,25 @@ final class TypingCoach {
     private func present(_ card: Active) {
         guard let host else { return }
         let anchorRange = card.anchorOverride ?? card.range
-        guard let anchor = host.coachAnchor(for: anchorRange, in: card.analyzedText) ?? host.coachFallbackAnchor() else {
-            Logger.debug("TypeRight: no anchor for card, not showing", category: Logger.ui)
+        let wordAnchor = host.coachAnchor(for: anchorRange, in: card.analyzedText)
+        guard let anchor = wordAnchor ?? host.coachFallbackAnchor() else {
+            Logger.info("TypeRight: no anchor for card, not showing", category: Logger.ui)
             return
         }
+        Logger.info("TypeRight: card \(Self.kind(card.content)) at \(Int(anchor.minX)),\(Int(anchor.minY)) \(wordAnchor == nil ? "(fallback)" : "(word)")", category: Logger.ui)
         active = card
         panel.show(card.content, anchor: anchor)
         if card.content.acceptText != nil || isFailure(card.content) { keyTap.turnOn() } else { keyTap.turnOff() }
+    }
+
+    private static func kind(_ content: CoachCardContent) -> String {
+        switch content {
+        case .spelling: "spelling"
+        case .translate: "translate"
+        case .sentence: "sentence"
+        case .thinking: "thinking"
+        case .failed: "failed"
+        }
     }
 
     private func isFailure(_ content: CoachCardContent) -> Bool {
