@@ -71,24 +71,22 @@ final class TypeRightSnapshotTests: XCTestCase {
             draw(TROnboardingView(start: step, accessGranted: false, translateKey: unsetName(), onFinish: {}),
                  NSSize(width: 980, height: 680), "onboarding-\(step.rawValue)-\(step.title)")
         }
-        let cards: [(String, CoachCardContent)] = [
-            ("spelling", .spelling(wrong: "tomorow", fixes: ["tomorrow", "tomorrows"])),
-            ("translate", .translate(source: "预约", result: CoachTranslation(english: "book", ipa: "/bʊk/",
-                                                                           note: "订会议室、餐厅用 book；约医生说 make an appointment。"))),
-            ("sentence", .sentence(original: "I want to book a meeting room tomorrow because I has a question.",
-                                   check: CoachSentenceCheck(ok: false,
-                                                             corrected: "I want to book a meeting room tomorrow because I have a question.",
-                                                             changes: [.init(from: "I has", to: "I have", why: "主语是 I，动词要用 have。", type: "agreement")]))),
-            ("thinking", .thinking),
-            // The words the app really shows: a key the provider turned down, and no network.
-            ("failed", .failed(try XCTUnwrap(CoachAIError.http(401).errorDescription), keyRejected: true)),
-            ("failed-offline", .failed(try XCTUnwrap(CoachAIError.offline.errorDescription))),
-        ]
+        // Cards and the menu header are sized and placed by the app's own code, as on screen.
+        let cards = try TypeRightCardSamples.cards() + [("failed-offline", .failed(try XCTUnwrap(CoachAIError.offline.errorDescription)))]
+        let word = try TypeRightCardSamples.word()
         for (name, content) in cards {
-            draw(CoachCardView(content: content, tail: CoachTailPlacement(pointsUp: true, x: 30)).padding(20).background(Color.gray.opacity(0.15)),
-                 nil, "card-\(name)")
+            for dark in [false, true] {
+                let window = CoachCardPanel().place(content, keys: .normal, anchor: word)
+                save(window, dark: dark, backdrop: NSColor(white: 0.5, alpha: 0.15), to: dir.appendingPathComponent("card-\(name)-\(dark ? "dark" : "light").png"))
+            }
         }
-        draw(TRMenuHeader(notebook: notebook), nil, "menu-header")
+        for dark in [false, true] {
+            let state = TRMenuState(app: nil, allPaused: false, ai: .ready(.deepseek), needsAccess: false)
+            let header = try XCTUnwrap(TypeRightMenu.shared.build(state: state, notebook: notebook).items.first?.view)
+            let window = NSWindow(contentRect: header.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            window.contentView = header
+            save(window, dark: dark, to: dir.appendingPathComponent("menu-header-\(dark ? "dark" : "light").png"))
+        }
         draw(KeyCapSheet().padding(20).background(TR.bg), nil, "keycaps")
     }
 
@@ -267,23 +265,52 @@ final class TypeRightSnapshotTests: XCTestCase {
         render(view, size, dark: false, to: dir.appendingPathComponent("\(name).png"))
     }
 
+    /// Views without a fixed size are measured the way the app measures its own windows.
     private func render(_ view: some View, _ size: NSSize?, dark: Bool, to file: URL) {
         let host = NSHostingView(rootView: AnyView(view))
-        let fitting = size ?? host.fittingSize
-        host.frame = NSRect(origin: .zero, size: fitting)
+        host.frame = NSRect(origin: .zero, size: size ?? TRFitting.size(of: AnyView(view)))
         let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
-        window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
         window.contentView = host
-        host.layoutSubtreeIfNeeded()
-        RunLoop.current.run(until: Date().addingTimeInterval(0.3))
-        host.layoutSubtreeIfNeeded()
-        guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else {
-            XCTFail("could not draw \(file.lastPathComponent)")
+        save(window, dark: dark, to: file)
+    }
+
+    /// Draws a window's content at the size it has. `backdrop` fills a sheet 20 wider all round
+    /// behind it (cards are see-through outside the card).
+    private func save(_ window: NSWindow, dark: Bool, backdrop: NSColor? = nil, to file: URL) {
+        window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+        guard let view = window.contentView else {
+            XCTFail("nothing to draw for \(file.lastPathComponent)")
             return
         }
-        host.cacheDisplay(in: host.bounds, to: rep)
+        view.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+        view.layoutSubtreeIfNeeded()
+        guard view.bounds.width > 0, view.bounds.height > 0, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+            XCTFail("could not draw \(file.lastPathComponent): \(view.bounds.size)")
+            return
+        }
+        view.cacheDisplay(in: view.bounds, to: rep)
+        var image = rep
+        if let backdrop {
+            let pad = Int(20 * CGFloat(rep.pixelsWide) / view.bounds.width)
+            guard let sheet = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: rep.pixelsWide + 2 * pad, pixelsHigh: rep.pixelsHigh + 2 * pad,
+                                               bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                               colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)
+            else {
+                XCTFail("could not make a sheet for \(file.lastPathComponent)")
+                return
+            }
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: sheet)
+            backdrop.setFill()
+            NSRect(x: 0, y: 0, width: sheet.pixelsWide, height: sheet.pixelsHigh).fill()
+            _ = rep.draw(in: NSRect(x: pad, y: pad, width: rep.pixelsWide, height: rep.pixelsHigh), from: .zero, operation: .sourceOver,
+                         fraction: 1, respectFlipped: false, hints: nil)
+            NSGraphicsContext.restoreGraphicsState()
+            image = sheet
+        }
         do {
-            try XCTUnwrap(rep.representation(using: .png, properties: [:])).write(to: file)
+            try XCTUnwrap(image.representation(using: .png, properties: [:])).write(to: file)
         } catch {
             XCTFail("could not save \(file.lastPathComponent): \(error)")
         }

@@ -668,8 +668,15 @@ final class TypingCoach {
             card.keys = .copy
         }
         Logger.info("TypeRight: card \(Self.kind(card.content)) at \(Int(anchor.minX)),\(Int(anchor.minY)) \(wordAnchor == nil ? "(fallback)" : "(word)")\(card.keys == .readOnly ? " read-only" : "")", category: Logger.ui)
+        guard display.show(card.content, keys: card.keys, anchor: anchor) else {
+            // A card nobody can see takes no key and holds no place, as if none had come up. The
+            // window it would have used is hidden, so the card shown before is gone as well; an AI
+            // request that card waited on goes on and may still bring a card.
+            active = nil
+            keys.set(nil)
+            return
+        }
         active = card
-        display.show(card.content, keys: card.keys, anchor: anchor)
         keys.set(policy(for: card, async: async))
         let id = card.id
         if card.isFailure || (card.keys == .readOnly && !card.isThinking) {

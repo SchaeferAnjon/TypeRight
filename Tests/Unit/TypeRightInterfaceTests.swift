@@ -5,7 +5,7 @@
 //  Rules behind what the windows show: the order of the mistake categories, one way of writing
 //  dates, names with a space between Chinese and Latin, the menu bar icon switch and how TypeRight
 //  is found again with it off, and the shortcut key cap's states. Nothing here reads or writes the
-//  user's settings or opens a window on screen.
+//  user's settings or opens a window the user can see.
 //
 
 import AppKit
@@ -91,32 +91,86 @@ final class TypeRightInterfaceTests: XCTestCase {
         XCTAssertEqual(TRMenuBarIcon.onReopen(hasVisibleWindows: true, needsSetup: false), .nothing)
     }
 
-    /// The real delegate method, with what it opens recorded instead of shown.
-    func testIconOffLaunchingAgainOpensTheMainWindow() throws {
-        let saved = CoachSettings.defaults
-        let suiteName = "TypeRightInterfaceTests.\(UUID().uuidString)"
-        let suite = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer {
-            CoachSettings.defaults = saved
-            suite.removePersistentDomain(forName: suiteName)
-        }
-        CoachSettings.defaults = suite
-        CoachSettings.menuBarIconShown = false
-        XCTAssertFalse(CoachSettings.menuBarIconShown)
-
+    /// The delegate method itself, with what it opens recorded instead of shown. AppKit's flag says
+    /// a window is open whenever SwiftUI's empty placeholder window is, so the flag must not decide.
+    func testReopenLooksForARealWindowNotAppKitsFlag() throws {
+        XCTAssertFalse(MenuBarOnlyMode.hasOpenWindow, "test host starts without windows: \(NSApp.windows)")
         let delegate = AppDelegate()
         var opened: [TRMenuBarIcon.Opens] = []
         delegate.needsSetup = { false }
         delegate.open = { opened.append($0) }
 
-        XCTAssertTrue(delegate.applicationShouldHandleReopen(NSApp, hasVisibleWindows: false))
+        let placeholder = invisibleTitledWindow(id: TextWardenApp.placeholderWindowID + "-AppWindow-99")
+        defer { placeholder.close() }
+        XCTAssertTrue(placeholder.isVisible)
+        XCTAssertFalse(MenuBarOnlyMode.hasOpenWindow, "the placeholder is no window to the user")
+        XCTAssertFalse(delegate.applicationShouldHandleReopen(NSApp, hasVisibleWindows: true),
+                       "true lets SwiftUI open one more empty placeholder window")
         XCTAssertEqual(opened, [.mainWindow])
-        XCTAssertTrue(delegate.applicationShouldHandleReopen(NSApp, hasVisibleWindows: true))
-        XCTAssertEqual(opened, [.mainWindow, .nothing], "a window already on screen just comes forward")
+
+        let main = invisibleTitledWindow(id: "TypeRightMain")
+        XCTAssertTrue(MenuBarOnlyMode.hasOpenWindow)
+        _ = delegate.applicationShouldHandleReopen(NSApp, hasVisibleWindows: true)
+        XCTAssertEqual(opened.last, .nothing, "a window already on screen just comes forward")
+        main.close()
 
         delegate.needsSetup = { true }
         _ = delegate.applicationShouldHandleReopen(NSApp, hasVisibleWindows: false)
         XCTAssertEqual(opened.last, .setup)
+    }
+
+    /// The reopen Apple Event that Finder and `open` send, sent to this process, so it goes through
+    /// AppKit and SwiftUI's own app delegate to TypeRight's, as in the running app. Twice: on
+    /// 2026-11-11 the first reopen made SwiftUI open its empty placeholder window, and every reopen
+    /// after it showed nothing.
+    func testReopenEventOpensTheMainWindowEveryTime() throws {
+        let live = try XCTUnwrap((NSApp.delegate as? NSObject)?.forwardingTarget(for: #selector(AppDelegate.openOnboardingWindow)) as? AppDelegate,
+                                 "SwiftUI hands TypeRight's delegate what it does not answer itself")
+        let savedOpen = live.open
+        let savedNeedsSetup = live.needsSetup
+        defer {
+            live.open = savedOpen
+            live.needsSetup = savedNeedsSetup
+        }
+        var opened: [TRMenuBarIcon.Opens] = []
+        live.needsSetup = { false }
+        live.open = { opened.append($0) }
+        let placeholders = { NSApp.windows.filter { MenuBarOnlyMode.isPlaceholder($0) && $0.isVisible }.count }
+        let before = placeholders()
+
+        for count in 1 ... 2 {
+            let event = NSAppleEventDescriptor(eventClass: AEEventClass(kCoreEventClass), eventID: AEEventID(kAEReopenApplication),
+                                               targetDescriptor: .currentProcess(), returnID: AEReturnID(kAutoGenerateReturnID),
+                                               transactionID: AETransactionID(kAnyTransactionID))
+            _ = try event.sendEvent(options: [.noReply], timeout: 2)
+            pumpEvents(until: { opened.count >= count })
+            // Time for SwiftUI to open a window of its own, if it is going to.
+            pumpEvents(until: { false }, seconds: 0.8)
+        }
+        XCTAssertEqual(opened, [.mainWindow, .mainWindow])
+        XCTAssertEqual(placeholders(), before, "no empty placeholder window was opened")
+    }
+
+    /// Titled and ordered in, so it counts as visible, but transparent, click-through and far off screen.
+    private func invisibleTitledWindow(id: String) -> NSWindow {
+        let window = NSWindow(contentRect: NSRect(x: -30000, y: -30000, width: 10, height: 10), styleMask: [.titled],
+                              backing: .buffered, defer: false)
+        window.identifier = NSUserInterfaceItemIdentifier(id)
+        window.isReleasedWhenClosed = false
+        window.alphaValue = 0
+        window.ignoresMouseEvents = true
+        window.orderFrontRegardless()
+        return window
+    }
+
+    /// Runs the app's event loop (Apple events are handled there) until `done` or the time is up.
+    private func pumpEvents(until done: () -> Bool, seconds: TimeInterval = 3) {
+        let deadline = Date().addingTimeInterval(seconds)
+        while !done(), Date() < deadline {
+            if let event = NSApp.nextEvent(matching: .any, until: Date().addingTimeInterval(0.05), inMode: .default, dequeue: true) {
+                NSApp.sendEvent(event)
+            }
+        }
     }
 
     func testIconSettingDefaultsToShown() throws {

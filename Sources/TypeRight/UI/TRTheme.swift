@@ -505,6 +505,17 @@ struct TRCardPreview: View {
     }
 }
 
+/// The size SwiftUI content wants, for windows and menu items that TypeRight sizes itself (the
+/// cards, the menu header). They and the tests' pictures all measure here. A hosting view reports
+/// its fitting size only with its default `sizingOptions`: one set to [] has no constraints and
+/// measures 0 × 0, which once made every card window 0 × 0.
+@MainActor
+enum TRFitting {
+    static func size(of view: some View) -> CGSize {
+        NSHostingView(rootView: view).fittingSize
+    }
+}
+
 /// Names written the way DESIGN.md asks (`text-autospace: normal`): a space between Chinese and
 /// Latin letters or digits, so the system's "Safari浏览器" reads "Safari 浏览器" everywhere.
 enum TRText {

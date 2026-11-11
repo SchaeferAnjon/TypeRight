@@ -111,9 +111,10 @@ final class TypeRightMenu: NSObject {
 
         let header = NSMenuItem()
         let host = NSHostingView(rootView: TRMenuHeader(notebook: notebook))
+        // The menu item keeps the frame given here (as tall as the header's own content: a fixed
+        // height left empty space under the bars).
         host.sizingOptions = []
-        // As tall as the header's own content: a fixed height left empty space under the bars.
-        host.frame = NSRect(x: 0, y: 0, width: TRMenuHeader.width, height: host.fittingSize.height)
+        host.frame = NSRect(x: 0, y: 0, width: TRMenuHeader.width, height: TRFitting.size(of: TRMenuHeader(notebook: notebook)).height)
         header.view = host
         menu.addItem(header)
         menu.addItem(.separator())
@@ -201,7 +202,8 @@ struct TRMenuHeader: View {
                         .frame(maxWidth: .infinity)
                 }
             }
-            .frame(height: 24)
+            // Bars stand on one baseline; centred, a day without sentences left them floating mid-air.
+            .frame(height: 24, alignment: .bottom)
             .padding(.top, 12)
         }
         .padding(.horizontal, 14)

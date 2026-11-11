@@ -59,10 +59,13 @@ final class FakeCardDisplay: CoachCardDisplay {
     var onClickOutside: (() -> Void)?
     private(set) var shown: [(content: CoachCardContent, keys: CoachCardKeys, anchor: CGRect)] = []
     private(set) var visible: CoachCardContent?
+    /// False plays a card window that never makes it onto the screen (the 0 × 0 window of 2026-11-11).
+    var reachesScreen = true
 
-    func show(_ content: CoachCardContent, keys: CoachCardKeys, anchor: CGRect) {
+    func show(_ content: CoachCardContent, keys: CoachCardKeys, anchor: CGRect) -> Bool {
         shown.append((content, keys, anchor))
-        visible = content
+        visible = reachesScreen ? content : nil
+        return reachesScreen
     }
 
     func hide() { visible = nil }
@@ -577,6 +580,49 @@ final class TypeRightTypingCoachTests: TypeRightCoachTestCase {
         XCTAssertNil(keys.policy)
         clock.advance(TypingCoach.readOnlySeconds + 0.1)
         XCTAssertNil(display.visible)
+    }
+
+    // 2026-11-11 walkthrough: every card window was 0 × 0, yet the coach took Tab and Esc for it
+    // and kept the spot, so the sentence typed next was never checked.
+
+    func testCardThatNeverReachedTheScreenTakesNoKey() async throws {
+        display.reachesScreen = false
+        let text = "I will send it tomorow "
+        type(text, errors: [try misspelling("tomorow", in: text, fixes: ["tomorrow"])])
+        XCTAssertEqual(display.shown.count, 1, "the spelling card was tried")
+        XCTAssertNil(keys.policy, "no key is taken for a card nobody can see")
+        await waitForTabGrace()
+        XCTAssertFalse(keys.press(.tab), "Tab goes to the app")
+        XCTAssertFalse(keys.press(.escape), "Esc goes to the app")
+        await coach.writeTask?.value
+        XCTAssertTrue(host.writes.isEmpty, "nothing in the field changed")
+    }
+
+    func testCardThatNeverReachedTheScreenHoldsNoPlace() async throws {
+        display.reachesScreen = false
+        let first = "I will send it tomorow "
+        type(first, errors: [try misspelling("tomorow", in: first, fixes: ["tomorrow"])])
+        display.reachesScreen = true
+        let sentence = "I will send it tomorow because I has a question."
+        type(sentence, errors: [try misspelling("tomorow", in: sentence, fixes: ["tomorrow"])])
+        await wait()
+        XCTAssertEqual(ai.checkCalls.map(\.sentence), [sentence], "the sentence is checked as if no card had come up")
+    }
+
+    func testAIRequestGoesOnWhenTheCardInFrontOfItNeverReachedTheScreen() async throws {
+        ai.hold = true
+        type("I want to 预约 tomorow")
+        clock.advance(1)
+        XCTAssertEqual(visibleKind, "thinking")
+        display.reachesScreen = false
+        let text = "I want to 预约 tomorow "
+        type(text, errors: [try misspelling("tomorow", in: text, fixes: ["tomorrow"])])
+        XCTAssertNil(keys.policy)
+        display.reachesScreen = true
+        ai.release()
+        await coach.aiTask?.value
+        XCTAssertEqual(visibleKind, "translate", "the translation still comes")
+        XCTAssertEqual(ai.translateCalls.count, 1)
     }
 
     // Item 15: the translate key.

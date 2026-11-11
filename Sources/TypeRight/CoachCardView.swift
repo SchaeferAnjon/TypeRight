@@ -102,13 +102,14 @@ struct CoachCardView: View {
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
             default:
-                VStack(alignment: .leading, spacing: 8) {
-                    main
-                    if keys != .readOnly { keysRow }
+                CardWidth(maxWidth: 440) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        main
+                        if keys != .readOnly { keysRow }
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 12)
-                .frame(maxWidth: 440, alignment: .leading)
             }
         }
         .background(
@@ -272,6 +273,23 @@ struct CoachCardView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .offset(x: max(10, x - 7))
             .zIndex(1)
+    }
+}
+
+/// As wide as the content wants, up to `maxWidth`, and as tall as the content is at that width.
+/// A `.frame(maxWidth:)` here measured a sentence that wraps as one long line, so the card window
+/// came out a line short and cut off the bottom of the card.
+private struct CardWidth: Layout {
+    let maxWidth: CGFloat
+
+    func sizeThatFits(proposal _: ProposedViewSize, subviews: Subviews, cache _: inout ()) -> CGSize {
+        guard let content = subviews.first else { return .zero }
+        let width = min(content.sizeThatFits(.unspecified).width, maxWidth)
+        return content.sizeThatFits(ProposedViewSize(width: width, height: nil))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal _: ProposedViewSize, subviews: Subviews, cache _: inout ()) {
+        subviews.first?.place(at: bounds.origin, proposal: ProposedViewSize(width: bounds.width, height: nil))
     }
 }
 

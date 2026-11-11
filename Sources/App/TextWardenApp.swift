@@ -29,8 +29,12 @@ enum StartupSetup: Equatable {
 @MainActor
 enum MenuBarOnlyMode {
     static func restoreIfNoWindowOpen() {
-        let open = NSApp.windows.contains { $0.isVisible && $0.styleMask.contains(.titled) && !isPlaceholder($0) }
-        if !open { NSApp.setActivationPolicy(.accessory) }
+        if !hasOpenWindow { NSApp.setActivationPolicy(.accessory) }
+    }
+
+    /// A TypeRight window the user can see (main window, settings, setup), the placeholder not counted.
+    static var hasOpenWindow: Bool {
+        NSApp.windows.contains { $0.isVisible && $0.styleMask.contains(.titled) && !isPlaceholder($0) }
     }
 
     /// The placeholder scene's window is zero-sized but visible and titled from launch on, so
@@ -388,10 +392,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Opening TypeRight again (Finder, Spotlight, Launchpad) while it runs. With the menu bar icon
     /// switched off this is the only way back in, so it always shows a window.
+    ///
+    /// AppKit's `hasVisibleWindows` counts SwiftUI's empty placeholder window, so TypeRight looks for
+    /// a real window itself. It answers false: on true SwiftUI goes on to open another empty
+    /// placeholder window, and from then on every reopen looked like one with a window open.
     @MainActor
-    func applicationShouldHandleReopen(_: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        open(TRMenuBarIcon.onReopen(hasVisibleWindows: flag, needsSetup: needsSetup()))
-        return true
+    func applicationShouldHandleReopen(_: NSApplication, hasVisibleWindows _: Bool) -> Bool {
+        let opens = TRMenuBarIcon.onReopen(hasVisibleWindows: MenuBarOnlyMode.hasOpenWindow, needsSetup: needsSetup())
+        Logger.info("Reopened while running: \(opens)", category: Logger.lifecycle)
+        open(opens)
+        return false
     }
 
     func applicationWillTerminate(_: Notification) {
