@@ -113,6 +113,7 @@ final class AppRegistry {
         register(.claude)
         register(.chatgpt)
         register(.perplexity)
+        register(.orca)
         register(.browsers)
         register(.notion)
         register(.mail)
@@ -246,6 +247,38 @@ extension AppConfiguration {
             supportsFormattedText: false,
             childElementTraversal: true,
             delaysAXNotifications: true, // ChatGPT batches AX notifications, needs keyboard detection
+            focusBouncesDuringPaste: false,
+            requiresFullReanalysisAfterReplacement: true, // Electron byte offsets are fragile
+            defersTextExtraction: false,
+            requiresFrameValidation: false,
+            hasTextMarkerIndexOffset: false
+        )
+    )
+
+    // MARK: - Orca (TypeRight addition)
+
+    /// Orca, an Electron app for running coding agents: TypeRight's users type their English prompts here.
+    /// Probed 2026-11-11: the composer answers AXBoundsForRange and text markers, like ChatGPT's.
+    static let orca = AppConfiguration(
+        identifier: "orca",
+        displayName: "Orca",
+        bundleIDs: ["com.stablyai.orca"],
+        category: .electron,
+        parserType: .generic,
+        fontConfig: FontConfig(
+            defaultSize: 14,
+            fontFamily: nil,
+            spacingMultiplier: 1.0
+        ),
+        horizontalPadding: 12,
+        preferredStrategies: [.rangeBounds, .textMarker, .elementTree, .lineIndex],
+        features: AppFeatures(
+            visualUnderlinesEnabled: true,
+            textReplacementMethod: .browserStyle,
+            requiresTypingPause: false,
+            supportsFormattedText: false,
+            childElementTraversal: true,
+            delaysAXNotifications: true, // Electron batches AX notifications
             focusBouncesDuringPaste: false,
             requiresFullReanalysisAfterReplacement: true, // Electron byte offsets are fragile
             defersTextExtraction: false,

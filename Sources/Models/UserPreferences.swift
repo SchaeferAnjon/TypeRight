@@ -924,7 +924,7 @@ class UserPreferences: ObservableObject {
         } else {
             overlayTheme = "System"
         }
-        showUnderlines = defaults.object(forKey: Keys.showUnderlines) as? Bool ?? true
+        showUnderlines = defaults.object(forKey: Keys.showUnderlines) as? Bool ?? false // TypeRight: cards, not red underlines
         underlineThickness = defaults.object(forKey: Keys.underlineThickness) as? Double ?? 2.0
         maxErrorsForUnderlines = defaults.object(forKey: Keys.maxErrorsForUnderlines) as? Int ?? 10
         indicatorPosition = defaults.string(forKey: Keys.indicatorPosition) ?? "Center Right"

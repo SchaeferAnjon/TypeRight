@@ -714,6 +714,12 @@ class FloatingErrorIndicator: NSPanel {
     ) {
         Logger.debug("FloatingErrorIndicator: update() called with \(errors.count) errors, \(styleSuggestions.count) style suggestions", category: Logger.ui)
 
+        // TypeRight: the word-anchored cards replace the red error-count indicator.
+        if CoachSettings.cardsEnabled {
+            hide()
+            return
+        }
+
         // Skip showing indicator when globally paused indefinitely
         if UserPreferences.shared.pauseDuration == .indefinite {
             Logger.debug("FloatingErrorIndicator: Skipping - globally paused indefinitely", category: Logger.ui)

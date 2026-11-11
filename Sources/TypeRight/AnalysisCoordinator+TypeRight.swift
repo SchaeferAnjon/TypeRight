@@ -26,13 +26,35 @@ extension AnalysisCoordinator: TypingCoachHost {
     }
 
     func coachFallbackAnchor() -> CGRect? {
-        guard let element = textMonitor.monitoredElement,
-              var frame = AccessibilityBridge.getElementFrame(element) else { return nil }
+        guard let element = textMonitor.monitoredElement else { return nil }
         let primary = NSScreen.screens.first { $0.frame.origin == .zero }
         guard let height = primary?.frame.height ?? NSScreen.main?.frame.height else { return nil }
+
+        // First choice: the caret. Some apps report a field frame far bigger than the box the user sees.
+        if let caret = Self.caretBounds(in: element), caret.width < 400, caret.height > 0, caret.height < 80 {
+            return CGRect(x: caret.minX, y: height - caret.maxY, width: max(caret.width, 2), height: caret.height)
+        }
+        guard var frame = AccessibilityBridge.getElementFrame(element) else { return nil }
         frame.origin.y = height - frame.origin.y - frame.height
-        // A small box at the field's top right, where TextWarden's indicator sits.
         return CGRect(x: frame.maxX - 40, y: frame.maxY - 30, width: 30, height: 30)
+    }
+
+    /// Bounds of the character before the caret, in AX (top-left origin) coordinates.
+    private static func caretBounds(in element: AXUIElement) -> CGRect? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &value) == .success,
+              let axValue = value, CFGetTypeID(axValue) == AXValueGetTypeID() else { return nil }
+        var range = CFRange()
+        guard AXValueGetValue(axValue as! AXValue, .cfRange, &range) else { return nil }
+        var probe = CFRange(location: max(0, range.location - 1), length: range.location > 0 ? 1 : 0)
+        guard let probeValue = AXValueCreate(.cfRange, &probe) else { return nil }
+        var bounds: CFTypeRef?
+        guard AXUIElementCopyParameterizedAttributeValue(element, kAXBoundsForRangeParameterizedAttribute as CFString,
+                                                         probeValue, &bounds) == .success,
+              let boundsValue = bounds, CFGetTypeID(boundsValue) == AXValueGetTypeID() else { return nil }
+        var rect = CGRect.zero
+        guard AXValueGetValue(boundsValue as! AXValue, .cgRect, &rect), rect != .zero else { return nil }
+        return rect
     }
 
     func coachCaret(in text: String) -> Int? {
