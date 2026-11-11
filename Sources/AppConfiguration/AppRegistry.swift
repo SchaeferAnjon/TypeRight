@@ -58,7 +58,9 @@ final class AppRegistry {
         if let override = ApplicationPolicy.defaults[bundleID] {
             return override
         }
-        return hasConfiguration(for: bundleID) ? .supported : .safeTrial
+        // TypeRight: every app with a text field is on by default; replacements still fail closed
+        // when the source text no longer matches.
+        return .supported
     }
 
     func requiresSafeTrialConsent(for bundleID: String) -> Bool {

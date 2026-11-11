@@ -188,13 +188,14 @@ final class SafeTrialPromptControllerTests: XCTestCase {
         }
     }
 
-    func testUnregisteredWritingCandidateRemainsUnknown() {
+    /// TypeRight: an app nobody configured is on by default, without a safe-trial prompt.
+    func testUnregisteredWritingCandidateIsOnByDefault() {
         let registry = AppRegistry.shared
         let bundleID = "com.example.new-editor"
 
-        XCTAssertEqual(registry.policy(for: bundleID), .safeTrial)
+        XCTAssertEqual(registry.policy(for: bundleID), .supported)
         XCTAssertFalse(registry.isIntentionallyDisabled(bundleID))
-        XCTAssertTrue(registry.requiresSafeTrialConsent(for: bundleID))
+        XCTAssertFalse(registry.requiresSafeTrialConsent(for: bundleID))
     }
 
     func testConfiguredWritingAppIsSupported() {

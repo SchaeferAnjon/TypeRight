@@ -60,7 +60,8 @@ final class ApplicationConfigurationTests: XCTestCase {
         XCTAssertEqual(BrowserContentParser(bundleIdentifier: "app.zen-browser.zen").parserName, "Zen")
     }
 
-    func testUnverifiedBrowsersRequireSafeTrialConsent() {
+    /// TypeRight: unverified apps are on by default (TextWarden asked for a safe trial first).
+    func testUnverifiedBrowsersAreOnByDefault() {
         for bundleID in [
             "com.microsoft.edgemac", "com.microsoft.edgemac.Dev", "com.microsoft.edgemac.Beta", "com.microsoft.edgemac.Canary",
             "com.operasoftware.Opera", "com.operasoftware.OperaGX",
@@ -69,8 +70,8 @@ final class ApplicationConfigurationTests: XCTestCase {
             "com.vivaldi.Vivaldi", "org.chromium.Chromium",
         ] {
             XCTAssertFalse(AppRegistry.shared.hasConfiguration(for: bundleID))
-            XCTAssertEqual(AppRegistry.shared.policy(for: bundleID), .safeTrial)
-            XCTAssertTrue(AppRegistry.shared.requiresSafeTrialConsent(for: bundleID))
+            XCTAssertEqual(AppRegistry.shared.policy(for: bundleID), .supported)
+            XCTAssertFalse(AppRegistry.shared.requiresSafeTrialConsent(for: bundleID))
             XCTAssertNil(AppBehaviorRegistry.shared.registeredBehavior(for: bundleID))
         }
     }

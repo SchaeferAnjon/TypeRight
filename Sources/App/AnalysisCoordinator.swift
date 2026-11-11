@@ -348,12 +348,12 @@ class AnalysisCoordinator: ObservableObject {
 
     func isCurrentAppInSafeTrial() -> Bool {
         guard let bundleID = monitoredContext?.bundleIdentifier else { return false }
-        return !AppRegistry.shared.hasConfiguration(for: bundleID)
+        return AppRegistry.shared.policy(for: bundleID) == .safeTrial
             && UserPreferences.shared.safeTrialApplications.contains(bundleID)
     }
 
     func capabilities(for context: ApplicationContext) -> CapabilitySet {
-        if !AppRegistry.shared.hasConfiguration(for: context.bundleIdentifier),
+        if AppRegistry.shared.policy(for: context.bundleIdentifier) == .safeTrial,
            UserPreferences.shared.safeTrialApplications.contains(context.bundleIdentifier)
         {
             return .indicatorOnly
