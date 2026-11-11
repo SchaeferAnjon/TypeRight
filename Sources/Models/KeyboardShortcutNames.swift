@@ -11,34 +11,36 @@ import KeyboardShortcuts
 extension KeyboardShortcuts.Name {
     // MARK: - Global Controls
 
-    /// Toggle TextWarden on/off globally ("T" for TextWarden)
-    static let toggleTextWarden = Self("toggleTextWarden", default: .init(.t, modifiers: [.option, .control]))
+    // TypeRight: global shortcuts start unset; the user picks keys in settings (DESIGN.md).
 
-    /// Fix all grammar errors that have exactly one suggestion (obvious fixes) - "A" for Apply All
-    static let fixAllObvious = Self("fixAllObvious", default: .init(.a, modifiers: [.option, .control]))
+    /// Pause or resume checking everywhere (TypeRight's 快捷键 › 暂停 / 继续)
+    static let toggleTextWarden = Self("toggleTextWarden")
+
+    /// Fix all grammar errors that have exactly one suggestion (obvious fixes)
+    static let fixAllObvious = Self("fixAllObvious")
 
     // MARK: - Popover Shortcuts
 
-    /// Show grammar suggestions popover - "G" for Grammar
-    static let showGrammarSuggestions = Self("showGrammarSuggestions", default: .init(.g, modifiers: [.option, .control]))
+    /// Show grammar suggestions popover
+    static let showGrammarSuggestions = Self("showGrammarSuggestions")
 
-    /// Show style suggestions popover - "Y" for stYle
-    static let showStyleSuggestions = Self("showStyleSuggestions", default: .init(.y, modifiers: [.option, .control]))
+    /// Show style suggestions popover
+    static let showStyleSuggestions = Self("showStyleSuggestions")
 
-    /// Show AI Compose popover - "W" for Write
-    static let showAICompose = Self("showAICompose", default: .init(.w, modifiers: [.option, .control]))
+    /// Show AI Compose popover
+    static let showAICompose = Self("showAICompose")
 
-    /// Show Readability popover - "R" for Readability
-    static let showReadability = Self("showReadability", default: .init(.r, modifiers: [.option, .control]))
+    /// Show Readability popover
+    static let showReadability = Self("showReadability")
 
-    /// Toggle Sketch Pad window - "N" for New/Note
-    static let toggleSketchPad = Self("toggleSketchPad", default: .init(.n, modifiers: [.option, .control]))
+    /// Toggle Sketch Pad window
+    static let toggleSketchPad = Self("toggleSketchPad")
 
-    /// Trigger style check on current text - "S" for Style check
-    static let runStyleCheck = Self("runStyleCheck", default: .init(.s, modifiers: [.option, .control]))
+    /// Trigger style check on current text
+    static let runStyleCheck = Self("runStyleCheck")
 
     /// Rewrite the current selection in place using the configured writing style.
-    static let quickRewrite = Self("quickRewrite", default: .init(.r, modifiers: [.option, .shift]))
+    static let quickRewrite = Self("quickRewrite")
 
     // MARK: - Legacy Alias (for backwards compatibility with saved shortcuts)
 

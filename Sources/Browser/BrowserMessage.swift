@@ -192,7 +192,9 @@ enum BrowserWire {
 
     static var directory: URL {
         FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/TextWarden/BrowserBridge", isDirectory: true)
+            .appendingPathComponent("Library/Application Support", isDirectory: true)
+            .appendingPathComponent(AppSupportFolder.name, isDirectory: true)
+            .appendingPathComponent("BrowserBridge", isDirectory: true)
     }
 
     static var socketPath: String {

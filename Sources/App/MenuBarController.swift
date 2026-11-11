@@ -13,7 +13,7 @@ class MenuBarController: NSObject, NSMenuDelegate {
     static var shared: MenuBarController?
 
     private var statusItem: NSStatusItem?
-    private var menu: NSMenu?
+    private(set) var menu: NSMenu?
     private var previousIconState: IconState = .active
 
     /// The app to show in the menu - captured when button is clicked (BEFORE menu opens)
@@ -51,10 +51,7 @@ class MenuBarController: NSObject, NSMenuDelegate {
         }
 
         // Set initial icon state based on whether grammar checking is enabled
-        let initialState: IconState = UserPreferences.shared.isEnabled ? .active : .inactive
-        let icon = initialState == .active ? TextWardenIcon.create() : TextWardenIcon.createPaused()
-        button.image = icon
-        button.toolTip = initialState == .active ? "TextWarden Grammar Checker" : "TextWarden (Paused)"
+        setIconState(UserPreferences.shared.isEnabled ? .active : .inactive)
 
         // IMPORTANT: Do NOT set statusItem.menu here, as it prevents button.action from firing
         // Instead, we handle the click manually and show the menu programmatically
@@ -176,33 +173,14 @@ class MenuBarController: NSObject, NSMenuDelegate {
         }
 
         setIconState(.inactive)
-        button.toolTip = "TextWarden is paused in \(context.applicationName) — click to choose"
+        button.toolTip = "TypeRight 在「\(context.applicationName)」里暂停着，点一下选择"
         SafeTrialPromptController.shared.present(for: context, relativeTo: button)
     }
 
     private func createMenu() {
         // TypeRight: its own menu (today's count, pause, open, settings, AI, quit).
+        // Shown manually in statusBarButtonClicked, not attached to statusItem.
         menu = TypeRightMenu.shared.build(frontmost: menuTargetApp)
-        return
-
-        menu = NSMenu()
-
-        // Status header
-        let headerItem = NSMenuItem(title: "TextWarden Grammar Checker", action: nil, keyEquivalent: "")
-        headerItem.isEnabled = false
-        menu?.addItem(headerItem)
-        menu?.addItem(NSMenuItem.separator())
-
-        addRuntimeHealthMenuItems()
-
-        addGlobalPauseMenuItems()
-        menu?.addItem(NSMenuItem.separator())
-
-        addAppSpecificPauseMenuItems()
-
-        addUtilityMenuItems()
-
-        // Menu is shown manually in statusBarButtonClicked, not attached to statusItem
     }
 
     /// Add a short, actionable answer to “is TextWarden working here?”
@@ -612,13 +590,13 @@ class MenuBarController: NSObject, NSMenuDelegate {
 
         switch state {
         case .active:
-            button.toolTip = "TextWarden Grammar Checker"
+            button.toolTip = "TypeRight 英文打字助手"
         case .inactive:
-            button.toolTip = "TextWarden (Paused)"
+            button.toolTip = "TypeRight 已暂停"
         case .error:
-            button.toolTip = "TextWarden (Error)"
+            button.toolTip = "TypeRight 出错了"
         case .restarting:
-            button.toolTip = "TextWarden (Restarting...)"
+            button.toolTip = "TypeRight 正在重启…"
         }
     }
 

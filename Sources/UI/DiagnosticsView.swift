@@ -766,7 +766,7 @@ struct LoggingConfigurationView: View {
                                         resetLogFilePathToDefault()
                                     }
                                     .buttonStyle(.bordered)
-                                    .help("Use default location: ~/Library/Logs/TextWarden/")
+                                    .help("Use default location: ~/Library/Logs/TypeRight/")
                                 }
 
                                 Button("Open in Finder") {
@@ -776,7 +776,7 @@ struct LoggingConfigurationView: View {
                                 .help("Show log file in Finder")
                             }
 
-                            Text("Default: ~/Library/Logs/TextWarden/textwarden.log")
+                            Text("Default: ~/Library/Logs/TypeRight/typeright.log")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
@@ -822,13 +822,13 @@ struct LoggingConfigurationView: View {
         let savePanel = NSSavePanel()
         savePanel.title = "Choose Log File Location"
         savePanel.message = "Select where to save log files"
-        savePanel.nameFieldStringValue = "textwarden.log"
+        savePanel.nameFieldStringValue = "typeright.log"
         savePanel.canCreateDirectories = true
         savePanel.showsTagField = false
 
-        // Set default directory to ~/Library/Logs/TextWarden
+        // Set default directory to ~/Library/Logs/TypeRight
         let defaultLogDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Logs/TextWarden")
+            .appendingPathComponent("Library/Logs/TypeRight")
         savePanel.directoryURL = defaultLogDir
 
         savePanel.begin { response in

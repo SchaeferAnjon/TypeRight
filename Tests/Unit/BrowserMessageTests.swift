@@ -178,7 +178,7 @@ final class BrowserMessageTests: XCTestCase {
             XCTAssertEqual(gecko["path"] as? String, helper.path)
             XCTAssertEqual(try FileManager.default.attributesOfItem(atPath: geckoManifest.path)[.posixPermissions] as? Int, 0o600)
         }
-        let identity = support.appendingPathComponent("TextWarden/BrowserBridge/extension-id")
+        let identity = support.appendingPathComponent(AppSupportFolder.name).appendingPathComponent("BrowserBridge/extension-id")
         XCTAssertEqual(try String(contentsOf: identity, encoding: .utf8), identifier + "\n")
         XCTAssertEqual(try FileManager.default.attributesOfItem(atPath: identity.path)[.posixPermissions] as? Int, 0o600)
         let modified = try FileManager.default.attributesOfItem(atPath: manifest.path)[.modificationDate] as? Date

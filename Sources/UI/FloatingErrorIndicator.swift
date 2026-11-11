@@ -702,6 +702,11 @@ class FloatingErrorIndicator: NSPanel {
 
     // MARK: - Public API
 
+    /// TypeRight never puts this red error-count indicator on screen: its word-anchored cards take
+    /// its place, and with the cards switched off nothing pops up at all. Every show path in this
+    /// class (update, style-check spinner, drag) goes through here.
+    override func orderFrontRegardless() {}
+
     /// Update indicator with errors and optional style suggestions
     func update(
         errors: [GrammarErrorModel],
@@ -714,7 +719,8 @@ class FloatingErrorIndicator: NSPanel {
     ) {
         Logger.debug("FloatingErrorIndicator: update() called with \(errors.count) errors, \(styleSuggestions.count) style suggestions", category: Logger.ui)
 
-        // TypeRight: the word-anchored cards replace the red error-count indicator.
+        // TypeRight: the word-anchored cards replace the red error-count indicator, so skip its
+        // positioning work while they are on. With them off it still never shows (orderFrontRegardless).
         if CoachSettings.cardsEnabled {
             hide()
             return

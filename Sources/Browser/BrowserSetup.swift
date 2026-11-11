@@ -38,7 +38,8 @@ enum BrowserSetup {
         let browserSettings = settings?["browser_specific_settings"] as? [String: Any]
         let gecko = browserSettings?["gecko"] as? [String: Any]
         guard gecko?["id"] as? String == BrowserWire.geckoExtensionID else { throw CocoaError(.fileReadCorruptFile) }
-        let bridge = support.appendingPathComponent("TextWarden/BrowserBridge", isDirectory: true)
+        let bridge = support.appendingPathComponent(AppSupportFolder.name, isDirectory: true)
+            .appendingPathComponent("BrowserBridge", isDirectory: true)
         let hosts = ["Google/Chrome", "BraveSoftware/Brave-Browser", "Mozilla", "zen"].map {
             support.appendingPathComponent($0 + "/NativeMessagingHosts", isDirectory: true)
         }

@@ -38,13 +38,13 @@ enum InactiveReason: String, Codable, Equatable {
     var displayMessage: String {
         switch self {
         case .permission: "Accessibility permission is needed to check writing in other apps."
-        case .globalPause: "TextWarden is paused."
-        case .appPause: "TextWarden is paused for this app."
-        case .siteDisabled: "TextWarden is disabled for this website."
-        case .consentRequired: "Choose how TextWarden works here."
-        case .secureField: "TextWarden never reads password or protected fields."
-        case .unsupportedField: "This field does not provide the information TextWarden needs."
-        case .unsupportedApplication: "TextWarden is not used in this app."
+        case .globalPause: "TypeRight is paused."
+        case .appPause: "TypeRight is paused for this app."
+        case .siteDisabled: "TypeRight is disabled for this website."
+        case .consentRequired: "Choose how TypeRight works here."
+        case .secureField: "TypeRight never reads password or protected fields."
+        case .unsupportedField: "This field does not provide the information TypeRight needs."
+        case .unsupportedApplication: "TypeRight is not used in this app."
         case .noEditableField: "Move the cursor to an editable text field to start checking."
         }
     }
@@ -56,7 +56,7 @@ enum InactiveReason: String, Codable, Equatable {
         case .globalPause: "Paused"
         case .appPause: "Paused in this app"
         case .siteDisabled: "Disabled on this website"
-        case .consentRequired: "Choose how TextWarden works here"
+        case .consentRequired: "Choose how TypeRight works here"
         case .secureField: "Protected field"
         case .unsupportedField: "Unsupported text field"
         case .unsupportedApplication: "Not used in this app"
@@ -241,7 +241,7 @@ struct RuntimeHealthSnapshot: Equatable {
         case .recovering:
             "Recovering"
         case .inactive:
-            reason?.displayMessage ?? "TextWarden is paused."
+            reason?.displayMessage ?? "TypeRight is paused."
         }
     }
 

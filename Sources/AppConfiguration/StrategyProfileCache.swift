@@ -27,7 +27,7 @@ final class StrategyProfileCache {
             Logger.critical("Application Support directory not available, using temp directory", category: Logger.general)
             baseURL = FileManager.default.temporaryDirectory
         }
-        let textWardenDir = baseURL.appendingPathComponent("TextWarden", isDirectory: true)
+        let textWardenDir = baseURL.appendingPathComponent(AppSupportFolder.name, isDirectory: true)
         return textWardenDir.appendingPathComponent(cacheFileName)
     }
 

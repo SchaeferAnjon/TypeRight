@@ -756,8 +756,10 @@ struct DiagnosticReport: Codable {
         let fileManager = FileManager.default
         if fileManager.fileExists(atPath: diagnosticReportsPath) {
             let contents = try? fileManager.contentsOfDirectory(atPath: diagnosticReportsPath)
+            // Crash reports are named after the process (TypeRight-<date>.ips).
+            let processName = ProcessInfo.processInfo.processName
             let crashFiles = contents?.filter {
-                $0.hasPrefix("TextWarden") && ($0.hasSuffix(".crash") || $0.hasSuffix(".ips"))
+                $0.hasPrefix(processName) && ($0.hasSuffix(".crash") || $0.hasSuffix(".ips"))
             } ?? []
             crashFilesToCopy = Array(crashFiles.sorted(by: >).prefix(10))
         }

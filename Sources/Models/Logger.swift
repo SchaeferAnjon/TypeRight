@@ -37,7 +37,7 @@ enum LogLevel: String, Codable, CaseIterable, Comparable {
 /// Centralized logging system for TextWarden
 enum Logger {
     private static let subsystem = "com.typeright.app"
-    private static let logFileName = "textwarden.log"
+    private static let logFileName = "typeright.log"
     private static let maxLogFileSize = 10 * 1024 * 1024 // 10MB
     private static let maxLogFiles = 5
 
@@ -85,7 +85,7 @@ enum Logger {
     /// Default log directory following macOS best practices
     private static var defaultLogDirectory: String {
         let homeDir = FileManager.default.homeDirectoryForCurrentUser.path
-        return "\(homeDir)/Library/Logs/TextWarden"
+        return "\(homeDir)/Library/Logs/TypeRight"
     }
 
     /// Default log file path

@@ -506,7 +506,8 @@ class ErrorOverlayWindow: NSPanel {
         // Check global underlines toggle first
         if !UserPreferences.shared.showUnderlines {
             lastGeometryFailureReason = "Underlines disabled globally"
-            Logger.info("ErrorOverlay: Underlines globally disabled in preferences - skipping", category: Logger.ui)
+            // TypeRight turns underlines off by default, so this runs on every analysis.
+            Logger.debug("ErrorOverlay: Underlines globally disabled in preferences - skipping", category: Logger.ui)
             hide()
             return 0
         }

@@ -12,6 +12,7 @@ for ARCH in $ARCHS; do
     /usr/bin/xcrun swiftc -O -target "${ARCH}-apple-macosx14.0" \
         "${PROJECT_DIR}/Sources/Browser/BrowserMessage.swift" \
         "${PROJECT_DIR}/Sources/Browser/BrowserSocket.swift" \
+        "${PROJECT_DIR}/Sources/Utilities/AppSupportFolder.swift" \
         "${PROJECT_DIR}/BrowserNativeHost/main.swift" \
         -o "${WORK}/${ARCH}"
 done

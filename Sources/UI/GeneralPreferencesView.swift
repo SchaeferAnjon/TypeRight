@@ -219,7 +219,7 @@ struct GeneralPreferencesView: View {
                     .padding(.top, 4)
                 }
 
-                Text("Underlines appear where TextWarden can locate text accurately. The browser extension preview adds underlines to supported web editors; set it up in Browser settings. Other browser fields and apps such as Microsoft Teams use the floating error indicator. When the error count exceeds the threshold above, underlines are hidden to reduce visual clutter.")
+                Text("Underlines appear where TypeRight can locate text accurately. When the error count exceeds the threshold above, underlines are hidden to reduce visual clutter.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             } header: {

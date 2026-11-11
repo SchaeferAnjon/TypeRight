@@ -123,12 +123,7 @@ class SketchPadWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate {
 
         // Return to accessory mode if no other windows are visible
         DispatchQueue.main.asyncAfter(deadline: .now() + TimingConstants.accessoryModeReturnDelay) {
-            // Only return to accessory if settings window is also not visible
-            let settingsVisible = NSApp.windows.contains { $0.title == "TextWarden Settings" && $0.isVisible }
-            if !settingsVisible {
-                NSApp.setActivationPolicy(.accessory)
-                Logger.debug("Returned to menu bar only mode", category: Logger.ui)
-            }
+            MainActor.assumeIsolated { MenuBarOnlyMode.restoreIfNoWindowOpen() }
         }
     }
 
@@ -144,12 +139,7 @@ class SketchPadWindowController: NSObject, NSWindowDelegate, NSToolbarDelegate {
 
         // Return to accessory mode after delay
         DispatchQueue.main.asyncAfter(deadline: .now() + TimingConstants.accessoryModeReturnDelay) {
-            // Only return to accessory if settings window is also not visible
-            let settingsVisible = NSApp.windows.contains { $0.title == "TextWarden Settings" && $0.isVisible }
-            if !settingsVisible {
-                NSApp.setActivationPolicy(.accessory)
-                Logger.debug("Returned to menu bar only mode after Sketch Pad close", category: Logger.ui)
-            }
+            MainActor.assumeIsolated { MenuBarOnlyMode.restoreIfNoWindowOpen() }
         }
     }
 

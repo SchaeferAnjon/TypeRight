@@ -8,7 +8,7 @@
 import Foundation
 
 /// Manages persistence of Sketch Pad documents
-/// Storage location: ~/Library/Application Support/TextWarden/Sketches/
+/// Storage location: ~/Library/Application Support/<AppSupportFolder.name>/Sketches/
 @MainActor
 class SketchDocumentStore {
     static let shared = SketchDocumentStore()
@@ -20,7 +20,7 @@ class SketchDocumentStore {
     /// Directory where sketches are stored
     private var sketchesDirectory: URL {
         let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let textWardenDir = appSupport.appendingPathComponent("TextWarden", isDirectory: true)
+        let textWardenDir = appSupport.appendingPathComponent(AppSupportFolder.name, isDirectory: true)
         return textWardenDir.appendingPathComponent("Sketches", isDirectory: true)
     }
 

@@ -1,5 +1,5 @@
-# Makefile for TextWarden Grammar Checker
-# macOS-native grammar checker with Rust + Swift
+# Makefile for TypeRight (based on TextWarden)
+# macOS menu bar English typing coach with Rust + Swift
 
 .PHONY: help build build-rust build-swift \
         run run-only install uninstall \
@@ -24,12 +24,13 @@ PROJECT := TextWarden.xcodeproj
 SCHEME := TextWarden
 CONFIGURATION := Release
 APP_NAME := TypeRight.app
+PROCESS_NAME := TypeRight
 RUST_DIR := GrammarEngine
 
 ##@ Help
 
 help: ## Show this help message
-	@echo "$(GREEN)TextWarden - Build Commands$(NC)"
+	@echo "$(GREEN)TypeRight - Build Commands$(NC)"
 	@echo ""
 	@awk 'BEGIN {FS = ":.*##"; printf "$(BLUE)Usage:$(NC) make $(YELLOW)<target>$(NC)\n\n"} /^[a-zA-Z_-]+:.*?##/ { printf "  $(YELLOW)%-15s$(NC) %s\n", $$1, $$2 } /^##@/ { printf "\n$(BLUE)%s$(NC)\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
 
@@ -52,23 +53,23 @@ build-swift: ## Build Swift app
 run: build install run-only ## Build, install, and run
 
 run-only: ## Run from /Applications (no build)
-	@if pgrep -x "TextWarden" > /dev/null; then \
-		killall TextWarden && sleep 1; \
+	@if pgrep -x "$(PROCESS_NAME)" > /dev/null; then \
+		killall "$(PROCESS_NAME)" && sleep 1; \
 	fi
-	@open /Applications/TypeRight.app
-	@echo "$(GREEN)✅ TextWarden launched$(NC)"
+	@open "/Applications/$(APP_NAME)"
+	@echo "$(GREEN)✅ $(PROCESS_NAME) launched$(NC)"
 
-kill: ## Stop TextWarden
-	@if pgrep -x "TextWarden" > /dev/null; then \
-		killall TextWarden; \
+kill: ## Stop TypeRight
+	@if pgrep -x "$(PROCESS_NAME)" > /dev/null; then \
+		killall "$(PROCESS_NAME)"; \
 		echo "$(GREEN)✅ Stopped$(NC)"; \
 	else \
 		echo "$(BLUE)Not running$(NC)"; \
 	fi
 
 status: ## Show app status
-	@if pgrep -x "TextWarden" > /dev/null; then \
-		echo "$(GREEN)✅ Running$(NC) (PID: $$(pgrep -x TextWarden))"; \
+	@if pgrep -x "$(PROCESS_NAME)" > /dev/null; then \
+		echo "$(GREEN)✅ Running$(NC) (PID: $$(pgrep -x "$(PROCESS_NAME)" | xargs))"; \
 	else \
 		echo "$(RED)Not running$(NC)"; \
 	fi
@@ -128,11 +129,6 @@ install: ## Install to /Applications (requires build first)
 		echo "$(RED)❌ Build first: make build$(NC)"; \
 		exit 1; \
 	fi; \
-	for BUILT_APP in "$$(dirname "$$(dirname "$$APP")")"/*/"$(APP_NAME)"; do \
-		if [ -d "$$BUILT_APP/Contents/PlugIns/TextWardenBrowserExtension.appex" ]; then \
-			/System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister -u "$$BUILT_APP" >/dev/null 2>&1 || true; \
-		fi; \
-	done; \
 	rm -rf "/Applications/$(APP_NAME)" 2>/dev/null || true; \
 	cp -R "$$APP" /Applications/; \
 	echo "$(GREEN)✅ Installed$(NC)"
@@ -231,7 +227,7 @@ reset: ## Reset app state (clear preferences)
 
 reset-onboarding: ## Reset onboarding flag (for testing first-run experience)
 	@defaults delete com.typeright.app hasCompletedOnboarding 2>/dev/null || true
-	@echo "$(GREEN)✅ Onboarding reset - restart TextWarden to see onboarding$(NC)"
+	@echo "$(GREEN)✅ Onboarding reset - restart TypeRight to see onboarding$(NC)"
 
 version: ## Show version info
 	@echo "$(BLUE)Versions:$(NC)"

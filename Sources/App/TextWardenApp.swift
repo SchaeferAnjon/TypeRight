@@ -23,14 +23,34 @@ enum StartupSetup: Equatable {
     }
 }
 
+/// TypeRight lives in the menu bar and shows in the Dock and Cmd-Tab only while one of its
+/// windows is open. Windows that switch the app to .regular hand back through here after they
+/// close, so it returns to menu-bar only once no titled window is left on screen.
+@MainActor
+enum MenuBarOnlyMode {
+    static func restoreIfNoWindowOpen() {
+        let open = NSApp.windows.contains { $0.isVisible && $0.styleMask.contains(.titled) && !isPlaceholder($0) }
+        if !open { NSApp.setActivationPolicy(.accessory) }
+    }
+
+    /// The placeholder scene's window is zero-sized but visible and titled from launch on, so
+    /// it would otherwise always count as open. SwiftUI names it "<scene id>-AppWindow-<n>".
+    static func isPlaceholder(_ window: NSWindow) -> Bool {
+        window.identifier?.rawValue.hasPrefix(TextWardenApp.placeholderWindowID + "-") == true
+    }
+}
+
 @main
 struct TextWardenApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var permissionManager = PermissionManager.shared
 
+    /// SwiftUI needs one window scene to carry the menu commands; its window stays empty.
+    static let placeholderWindowID = "hidden-placeholder"
+
     var body: some Scene {
         // Menu bar app - hidden placeholder scene (no visible window)
-        WindowGroup(id: "hidden-placeholder") {
+        WindowGroup(id: Self.placeholderWindowID) {
             EmptyView()
                 .frame(width: 0, height: 0)
                 .hidden()
@@ -189,7 +209,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Initialize unified logging (Rust → Swift bridge)
         Logger.registerRustLogCallback()
 
-        BrowserIntegration.shared.start()
+        // TypeRight ships without TextWarden's browser extension: browsers are read through
+        // Accessibility like every other app, so the extension bridge is never started.
 
         // Initialize Rust logging (with Swift callback now registered)
         let logLevel = Logger.minimumLogLevel
@@ -283,9 +304,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 Logger.debug("onPermissionGranted callback is now set (callback != nil: \(permissionManager.onPermissionGranted != nil))", category: Logger.permissions)
             }
 
-            // Open onboarding window
-            DispatchQueue.main.asyncAfter(deadline: .now() + TimingConstants.longDelay) { [weak self] in
-                self?.openOnboardingWindow()
+            // Open onboarding window. Unit tests run inside the app; never put a setup window
+            // on the user's screen then.
+            if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil {
+                DispatchQueue.main.asyncAfter(deadline: .now() + TimingConstants.longDelay) { [weak self] in
+                    self?.openOnboardingWindow()
+                }
             }
         } else {
             // Permission granted and onboarding completed - start grammar checking immediately
@@ -340,8 +364,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor
     @objc func openOnboardingWindow() {
-        // TypeRight: unit tests run inside the app; never put a setup window on the user's screen then.
-        guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else { return }
         guard let setup = StartupSetup.required(
             hasCompletedOnboarding: UserPreferences.shared.hasCompletedOnboarding,
             hasPermission: PermissionManager.shared.isPermissionGranted
@@ -386,14 +408,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in
             // Delay cleanup to let window animations complete (macOS 26 fix)
             DispatchQueue.main.asyncAfter(deadline: .now() + TimingConstants.windowCleanupDelay) {
-                self?.onboardingWindow = nil
-                if self?.settingsWindow?.isVisible != true,
-                   self?.tutorialWindow?.isVisible != true,
-                   !SketchPadWindowController.shared.isVisible
-                {
-                    NSApp.setActivationPolicy(.accessory)
+                MainActor.assumeIsolated {
+                    self?.onboardingWindow = nil
+                    // Finishing setup opens the main window, which must keep the Dock icon.
+                    MenuBarOnlyMode.restoreIfNoWindowOpen()
+                    Logger.debug("Setup window closed", category: Logger.ui)
                 }
-                Logger.debug("Setup window closed", category: Logger.ui)
             }
         }
 
@@ -447,9 +467,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.tutorialWindow = nil
-                if !SketchPadWindowController.shared.isVisible, self?.settingsWindow?.isVisible != true {
-                    NSApp.setActivationPolicy(.accessory)
-                }
+                MenuBarOnlyMode.restoreIfNoWindowOpen()
             }
         }
 
@@ -464,7 +482,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_: Notification) {
-        BrowserIntegration.shared.stop()
         Logger.info("Application will terminate - cleaning up", category: Logger.lifecycle)
 
         // Save Sketch Pad document synchronously before termination
@@ -654,7 +671,6 @@ extension AppDelegate: NSWindowDelegate {
             Task { @MainActor in
                 let preferences = UserPreferences.shared
                 guard preferences.keyboardShortcutsEnabled else { return }
-                if BrowserIntegration.shared.requestTool("grammar") { return }
 
                 // Toggle: hide if visible, show if hidden
                 if SuggestionPopover.shared.isVisible {
@@ -672,7 +688,6 @@ extension AppDelegate: NSWindowDelegate {
             Task { @MainActor in
                 let preferences = UserPreferences.shared
                 guard preferences.keyboardShortcutsEnabled else { return }
-                if BrowserIntegration.shared.requestTool("style") { return }
 
                 // Toggle: hide if visible, show if hidden
                 if SuggestionPopover.shared.isVisible {
@@ -689,7 +704,6 @@ extension AppDelegate: NSWindowDelegate {
         KeyboardShortcuts.onKeyUp(for: .quickRewrite) {
             Task { @MainActor in
                 guard UserPreferences.shared.keyboardShortcutsEnabled else { return }
-                if BrowserIntegration.shared.requestTool("rewrite") { return }
                 AnalysisCoordinator.shared.quickRewriteSelection()
             }
         }
@@ -699,7 +713,6 @@ extension AppDelegate: NSWindowDelegate {
             Task { @MainActor in
                 let preferences = UserPreferences.shared
                 guard preferences.keyboardShortcutsEnabled else { return }
-                if BrowserIntegration.shared.requestTool("compose") { return }
 
                 // Toggle: hide if visible, show if hidden
                 if TextGenerationPopover.shared.isVisible {
@@ -717,7 +730,6 @@ extension AppDelegate: NSWindowDelegate {
             Task { @MainActor in
                 let preferences = UserPreferences.shared
                 guard preferences.keyboardShortcutsEnabled else { return }
-                if BrowserIntegration.shared.requestTool("readability") { return }
 
                 // Toggle: hide if visible, show if hidden
                 if ReadabilityPopover.shared.isVisible {

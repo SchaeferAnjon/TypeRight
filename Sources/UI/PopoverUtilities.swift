@@ -131,8 +131,9 @@ enum ModalDialogDetector {
 
             let ownerName = windowInfo[kCGWindowOwnerName as String] as? String ?? ""
 
-            // Skip our own TextWarden windows
-            if ownerName == "TextWarden" { continue }
+            // Skip our own windows (the cards and popovers sit above the floating level). Match the
+            // process ID rather than the process name, which no longer says TextWarden.
+            if windowInfo[kCGWindowOwnerPID as String] as? pid_t == ProcessInfo.processInfo.processIdentifier { continue }
 
             // Skip system UI (menu bar, status items, etc.)
             // - Window Server: menu bar, cursor, transition effects

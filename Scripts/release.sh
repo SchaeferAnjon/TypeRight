@@ -1,5 +1,5 @@
 #!/bin/bash
-# Release script for TextWarden
+# Release script for TypeRight (based on TextWarden's)
 # Handles: archive, sign, DMG creation, appcast update, GitHub release
 
 set -e
@@ -13,22 +13,32 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 # Project settings
-APP_NAME="TextWarden"
+# The Xcode project, scheme and module keep TextWarden's names; the built app is TypeRight.app.
+APP_NAME="TypeRight"
 BUNDLE_ID="com.typeright.app"
 PROJECT="TextWarden.xcodeproj"
 SCHEME="TextWarden"
-GITHUB_REPO="PhilipSchmid/textwarden"
+GITHUB_REPO="SchaeferAnjon/TypeRight"
 
 # Code signing settings
 DEVELOPER_ID="Developer ID Application: zonghan jia (3H5S5NXPXS)"
 ENTITLEMENTS="TextWarden.entitlements"
 APPLE_ID="${APPLE_ID:-}"  # Set via environment or keychain
 TEAM_ID="3H5S5NXPXS"
+NOTARY_PROFILE="TypeRight"  # xcrun notarytool store-credentials "TypeRight" ...
+
+# Sparkle update signing. The private key lives in the login keychain under its own account,
+# like GetNewWord's ("getnewword"), so it never mixes with the other apps' keys.
+SPARKLE_ACCOUNT="typeright"
+# TextWarden's Sparkle public key, still in Info.plist after the fork. Installed copies accept only
+# updates signed by the matching private key, which only TextWarden's author holds.
+TEXTWARDEN_SPARKLE_PUBLIC_KEY="Vif5a8JO+wPQUakHgRhQh5ogO7CEZ/cFCAZGHe8ykg0="
 
 # Directories
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 RELEASE_DIR="$PROJECT_ROOT/releases"
+# Xcode names the DerivedData folder after the project file (TextWarden.xcodeproj).
 SPARKLE_BIN="$HOME/Library/Developer/Xcode/DerivedData/TextWarden-*/SourcePackages/artifacts/sparkle/Sparkle/bin"
 
 # Validate environment and dependencies
@@ -37,7 +47,7 @@ validate_environment() {
     local errors=0
 
     # Check required commands
-    local required_cmds=("xcodebuild" "codesign" "hdiutil" "git" "gh" "python3" "cargo" "rustc" "web-ext")
+    local required_cmds=("xcodebuild" "codesign" "hdiutil" "git" "gh" "python3" "cargo" "rustc")
     for cmd in "${required_cmds[@]}"; do
         if ! command -v "$cmd" &>/dev/null; then
             echo -e "${RED}Error: Required command '$cmd' not found${NC}" >&2
@@ -85,11 +95,6 @@ validate_environment() {
         echo -e "${YELLOW}Warning: GitHub CLI not authenticated (gh release upload will fail)${NC}" >&2
     fi
 
-    if [[ -z "${WEB_EXT_API_KEY:-}" || -z "${WEB_EXT_API_SECRET:-}" ]]; then
-        echo -e "${RED}Error: WEB_EXT_API_KEY and WEB_EXT_API_SECRET are required for Mozilla signing${NC}" >&2
-        errors=$((errors + 1))
-    fi
-
     if [[ $errors -gt 0 ]]; then
         echo -e "${RED}Environment validation failed with $errors error(s)${NC}" >&2
         exit 1
@@ -106,6 +111,49 @@ find_sparkle_tools() {
         exit 1
     fi
     echo "$bin_path"
+}
+
+# Stop before anything is built while Info.plist still carries TextWarden's Sparkle key.
+check_sparkle_public_key() {
+    local key
+    key=$(/usr/libexec/PlistBuddy -c "Print :SUPublicEDKey" "$PROJECT_ROOT/Info.plist" 2>/dev/null || true)
+    local tools
+    tools=$(ls -d $SPARKLE_BIN 2>/dev/null | head -1 || true)
+    tools="${tools:-<先编译一次，Sparkle 的工具在 DerivedData/TextWarden-*/SourcePackages/artifacts/sparkle/Sparkle/bin>}"
+    if [[ -z "$key" ]]; then
+        echo -e "${RED}没发：Info.plist 里没有 SUPublicEDKey。${NC}" >&2
+        exit 1
+    fi
+    if [[ "$key" == "$TEXTWARDEN_SPARKLE_PUBLIC_KEY" ]]; then
+        echo -e "${RED}没发：Info.plist 的 SUPublicEDKey 还是 TextWarden 的公钥。${NC}" >&2
+        echo "装着的 TypeRight 只接受这把公钥对应的私钥签过名的更新，那把私钥在 TextWarden 的作者手里，" >&2
+        echo "用它发出去的每一版都会被拒绝。先换成 TypeRight 自己的一对密钥：" >&2
+        echo "  1. 生成（只做一次，私钥存进登录钥匙串）：\"$tools/generate_keys\" --account $SPARKLE_ACCOUNT" >&2
+        echo "  2. 把它打印的公钥填进 Info.plist 的 SUPublicEDKey，提交" >&2
+        echo "  3. 备份私钥：\"$tools/generate_keys\" --account $SPARKLE_ACCOUNT -x <文件>，存到钥匙串以外的安全地方" >&2
+        echo "     丢了私钥，装着的 TypeRight 就再也收不到自动更新" >&2
+        exit 1
+    fi
+}
+
+# The private key in the login keychain must be the other half of SUPublicEDKey, or installed
+# copies reject the update. generate_keys -p only looks the key up; it never creates one.
+check_sparkle_key_pair() {
+    local sparkle_bin="$1"
+    local expected actual
+    expected=$(/usr/libexec/PlistBuddy -c "Print :SUPublicEDKey" "$PROJECT_ROOT/Info.plist")
+    if ! actual=$("$sparkle_bin/generate_keys" --account "$SPARKLE_ACCOUNT" -p 2>&1); then
+        echo -e "${RED}没发：登录钥匙串里没有 account \"$SPARKLE_ACCOUNT\" 的 Sparkle 私钥。${NC}" >&2
+        echo "$actual" >&2
+        echo "  从备份导入：\"$sparkle_bin/generate_keys\" --account $SPARKLE_ACCOUNT -f <私钥文件>" >&2
+        exit 1
+    fi
+    if [[ "$actual" != "$expected" ]]; then
+        echo -e "${RED}没发：钥匙串里的私钥和 Info.plist 的 SUPublicEDKey 不是一对。${NC}" >&2
+        echo "  钥匙串里的公钥：$actual" >&2
+        echo "  Info.plist 里的：$expected" >&2
+        exit 1
+    fi
 }
 
 # Get version from Info.plist
@@ -282,37 +330,9 @@ build_archive() {
     echo "$archive_path"
 }
 
-sign_firefox_extension() {
-    local version="$1"
-    local source_dir="$RELEASE_DIR/firefox-source"
-    local artifacts_dir="$RELEASE_DIR/firefox-signing"
-    local output="$RELEASE_DIR/TextWarden-Browser-Extension-Firefox-$version.xpi"
-
-    rm -rf "$source_dir" "$artifacts_dir"
-    python3 "$PROJECT_ROOT/Scripts/browser-extension.py" prepare "$PROJECT_ROOT/Info.plist" "$source_dir" --browser firefox
-    mkdir -p "$artifacts_dir"
-    # AMO manual review can exceed web-ext's 15-minute default.
-    WEB_EXT_SOURCE_DIR="$source_dir" WEB_EXT_ARTIFACTS_DIR="$artifacts_dir" \
-        WEB_EXT_CHANNEL=unlisted WEB_EXT_NO_INPUT=true \
-        WEB_EXT_APPROVAL_TIMEOUT="${WEB_EXT_APPROVAL_TIMEOUT:-86400000}" web-ext sign >&2
-
-    local signed_files=("$artifacts_dir"/*.xpi)
-    if [[ ${#signed_files[@]} -ne 1 || ! -f "${signed_files[0]}" ]]; then
-        echo -e "${RED}Mozilla signing did not produce exactly one XPI${NC}" >&2
-        return 1
-    fi
-    mv "${signed_files[0]}" "$output"
-    local numeric
-    numeric=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$source_dir/manifest.json")
-    python3 "$PROJECT_ROOT/Scripts/browser-extension.py" verify "$output" "$version" "$numeric" --browser firefox --signed
-    rm -rf "$source_dir" "$artifacts_dir"
-    echo "$output"
-}
-
 # Export app from archive
 export_app() {
     local archive_path="$1"
-    local firefox_xpi="${2:-}"
     local export_path="$RELEASE_DIR/export"
 
     echo -e "${BLUE}Exporting app...${NC}" >&2
@@ -322,22 +342,15 @@ export_app() {
 
     # Copy from archive
     cp -R "$archive_path/Products/Applications/$APP_NAME.app" "$export_path/"
-    if [[ -n "$firefox_xpi" ]]; then
-        cp "$firefox_xpi" "$export_path/$APP_NAME.app/Contents/Resources/TextWarden-Browser-Extension-Firefox.xpi"
-    fi
 
     # Re-sign with Developer ID and entitlements for distribution
     echo -e "${BLUE}Signing app with Developer ID...${NC}" >&2
-    # Nested code keeps its own permissions; --deep with the app's entitlement file
-    # would remove Safari's sandbox and apply app permissions to every helper.
+    # Nested code (Sparkle's helpers and XPC services) keeps its own entitlements; --deep with
+    # the app's entitlement file would apply the app's permissions to every helper.
     codesign --force --deep --timestamp --options=runtime \
         --sign "$DEVELOPER_ID" --preserve-metadata=entitlements \
         "$export_path/$APP_NAME.app" || return 1
     # Use release entitlements explicitly to strip Xcode's development-only grants.
-    codesign --force --timestamp --options=runtime \
-        --sign "$DEVELOPER_ID" \
-        --entitlements "$PROJECT_ROOT/SafariExtension/TextWardenBrowserExtension.entitlements" \
-        "$export_path/$APP_NAME.app/Contents/PlugIns/TextWardenBrowserExtension.appex" || return 1
     codesign --force --timestamp --options=runtime \
         --sign "$DEVELOPER_ID" \
         --entitlements "$PROJECT_ROOT/$ENTITLEMENTS" \
@@ -364,20 +377,20 @@ notarize_app() {
     if [[ -z "$APPLE_ID" ]]; then
         echo -e "${YELLOW}APPLE_ID not set. Checking keychain for notarytool credentials...${NC}"
         # Try using stored keychain profile
-        if ! xcrun notarytool history --keychain-profile "TextWarden" >/dev/null 2>&1; then
+        if ! xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 2>&1; then
             if [[ "$required" == "true" ]]; then
                 echo -e "${RED}No keychain profile found. Production releases require notarization.${NC}"
             else
                 echo -e "${YELLOW}No keychain profile found. Skipping notarization.${NC}"
             fi
             echo -e "${YELLOW}Configure notarization with:${NC}"
-            echo -e "  xcrun notarytool store-credentials \"TextWarden\" --apple-id YOUR_APPLE_ID --team-id $TEAM_ID"
+            echo -e "  xcrun notarytool store-credentials \"$NOTARY_PROFILE\" --apple-id YOUR_APPLE_ID --team-id $TEAM_ID"
             if [[ "$required" == "true" ]]; then
                 return 1
             fi
             return 0
         fi
-        local auth_args="--keychain-profile TextWarden"
+        local auth_args="--keychain-profile $NOTARY_PROFILE"
     else
         local auth_args="--apple-id $APPLE_ID --team-id $TEAM_ID --password @keychain:AC_PASSWORD"
     fi
@@ -385,7 +398,8 @@ notarize_app() {
     # Submit for notarization
     echo -e "${BLUE}Submitting to Apple notary service...${NC}"
     local result
-    result=$(xcrun notarytool submit "$dmg_path" $auth_args --wait 2>&1)
+    # A failed submit is judged below (and may be allowed for prereleases), not by set -e.
+    result=$(xcrun notarytool submit "$dmg_path" $auth_args --wait 2>&1) || true
 
     if echo "$result" | grep -q "status: Accepted"; then
         echo -e "${GREEN}Notarization successful${NC}"
@@ -448,8 +462,8 @@ sign_update() {
 
     # Don't suppress stderr - we need to see errors if keychain access fails
     local raw_signature
-    raw_signature=$("$sparkle_bin/sign_update" "$dmg_path" 2>&1)
-    local sign_exit_code=$?
+    local sign_exit_code=0
+    raw_signature=$("$sparkle_bin/sign_update" --account "$SPARKLE_ACCOUNT" "$dmg_path" 2>&1) || sign_exit_code=$?
 
     if [[ $sign_exit_code -ne 0 ]]; then
         echo -e "${RED}Failed to sign update (exit code $sign_exit_code):${NC}" >&2
@@ -457,7 +471,7 @@ sign_update() {
         echo "" >&2
         echo -e "${YELLOW}If keychain access failed, try:${NC}" >&2
         echo -e "  1. Run: security unlock-keychain ~/Library/Keychains/login.keychain-db" >&2
-        echo -e "  2. Or: $sparkle_bin/generate_keys  (to check key access)" >&2
+        echo -e "  2. Or: $sparkle_bin/generate_keys --account $SPARKLE_ACCOUNT -p  (to check key access)" >&2
         exit 1
     fi
 
@@ -480,12 +494,12 @@ sign_update() {
     # CRITICAL: Verify the signature is valid before continuing
     # This catches cases where keychain access silently failed
     echo -e "${BLUE}Verifying signature...${NC}" >&2
-    if ! "$sparkle_bin/sign_update" --verify "$dmg_path" "$signature" >/dev/null 2>&1; then
+    if ! "$sparkle_bin/sign_update" --account "$SPARKLE_ACCOUNT" --verify "$dmg_path" "$signature" >/dev/null 2>&1; then
         echo -e "${RED}SIGNATURE VERIFICATION FAILED!${NC}" >&2
         echo -e "The generated signature does not match the private key." >&2
         echo -e "This usually means keychain access is broken." >&2
         echo "" >&2
-        echo -e "Try running: $sparkle_bin/generate_keys -p" >&2
+        echo -e "Try running: $sparkle_bin/generate_keys --account $SPARKLE_ACCOUNT -p" >&2
         echo -e "If that fails, the keychain entry may need to be re-authorized." >&2
         exit 1
     fi
@@ -679,10 +693,9 @@ EOF
 create_github_release() {
     local version="$1"
     local dmg_path="$2"
-    local release_notes="$3"
-    local is_prerelease="$4"
-    local extension_zip="$5"
-    local firefox_zip="$6"
+    local appcast_path="$3"
+    local release_notes="$4"
+    local is_prerelease="$5"
 
     echo -e "${BLUE}Creating GitHub release...${NC}"
 
@@ -691,12 +704,13 @@ create_github_release() {
         prerelease_flag="--prerelease"
     fi
 
-    # Create release
+    # Create release. Installed copies read releases/latest/download/appcast.xml (SUFeedURL),
+    # so the feed is uploaded next to the DMG under exactly that name.
     gh release create "v$version" \
         --title "v$version" \
         --notes "$release_notes" \
         $prerelease_flag \
-        "$dmg_path" "$extension_zip" "$firefox_zip"
+        "$dmg_path" "$appcast_path"
 
     echo -e "${GREEN}GitHub release created: v$version${NC}"
 }
@@ -706,9 +720,6 @@ do_release() {
     local version="$1"
     local skip_confirm="$2"
 
-    # Validate environment first
-    validate_environment
-
     if [[ -z "$version" ]]; then
         version=$(get_version)
         echo -e "${YELLOW}No version specified, using current: $version${NC}"
@@ -716,6 +727,11 @@ do_release() {
 
     # Validate semver before proceeding
     validate_semver "$version"
+
+    # Local checks first: nothing here touches the network or the keychain.
+    check_sparkle_public_key
+
+    validate_environment
 
     local version_type=$(parse_version_type "$version")
     local is_prerelease="false"
@@ -728,7 +744,7 @@ do_release() {
 
     echo ""
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${BLUE}TextWarden Release${NC}"
+    echo -e "${BLUE}$APP_NAME Release${NC}"
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
     echo -e "  Version:     ${GREEN}$version${NC}"
@@ -748,8 +764,11 @@ do_release() {
         echo ""
     fi
 
-    # Find Sparkle tools
-    local sparkle_bin=$(find_sparkle_tools)
+    # Find Sparkle tools. Declared apart from the assignment so a failure stops the release
+    # (local x=$(...) would hide the exit status from set -e).
+    local sparkle_bin
+    sparkle_bin=$(find_sparkle_tools)
+    check_sparkle_key_pair "$sparkle_bin"
 
     # Create release directory
     mkdir -p "$RELEASE_DIR"
@@ -785,36 +804,33 @@ do_release() {
     local new_build=$((current_build + 1))
     set_build "$new_build"
     echo -e "Build number: $new_build"
-    python3 "$PROJECT_ROOT/Scripts/browser-extension.py" prepare "$PROJECT_ROOT/Info.plist" "$PROJECT_ROOT/BrowserExtension"
 
-    # Build
-    local archive_path=$(build_archive)
-
-    # Mozilla signs the self-distributed Firefox/Zen extension before it is embedded.
-    local firefox_xpi
-    firefox_xpi=$(sign_firefox_extension "$version")
+    # Each step below exits on failure inside a command substitution; keep declarations
+    # separate so set -e sees that exit status.
+    local archive_path
+    archive_path=$(build_archive)
 
     # Export
     local app_path
-    app_path=$(export_app "$archive_path" "$firefox_xpi")
-
-    python3 "$PROJECT_ROOT/Scripts/browser-extension.py" package "$app_path" "$RELEASE_DIR/TextWarden-Browser-Extension-$version.zip"
+    app_path=$(export_app "$archive_path")
 
     # Create DMG
-    local dmg_path=$(create_dmg "$app_path" "$version")
+    local dmg_path
+    dmg_path=$(create_dmg "$app_path" "$version")
 
     # Notarize the DMG FIRST (stapling modifies the DMG)
     notarize_app "$dmg_path" "$notarization_required"
 
     # Sign with Sparkle AFTER stapling (signature must be for final DMG)
-    local signature=$(sign_update "$dmg_path" "$sparkle_bin")
+    local signature
+    signature=$(sign_update "$dmg_path" "$sparkle_bin")
 
     # Update appcast
     update_appcast "$version" "$new_build" "$dmg_path" "$signature" "$release_notes" "$is_prerelease" "$version_type"
 
     # Commit version changes
     echo -e "${BLUE}Committing version changes...${NC}"
-    git add "$PROJECT_ROOT/Info.plist" "$PROJECT_ROOT/appcast.xml" "$PROJECT_ROOT/BrowserExtension/manifest.json"
+    git add "$PROJECT_ROOT/Info.plist" "$PROJECT_ROOT/appcast.xml"
     git commit -s -S -m "chore: release v$version"
 
     # Create git tag
@@ -863,17 +879,24 @@ do_upload() {
         is_prerelease="true"
     fi
 
-    local extension_zip="$RELEASE_DIR/TextWarden-Browser-Extension-$version.zip"
-    local firefox_zip="$RELEASE_DIR/TextWarden-Browser-Extension-Firefox-$version.xpi"
-    local extension_numeric
-    extension_numeric=$(git show "v$version:BrowserExtension/manifest.json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')
-    python3 "$PROJECT_ROOT/Scripts/browser-extension.py" verify "$extension_zip" "$version" "$extension_numeric"
-    python3 "$PROJECT_ROOT/Scripts/browser-extension.py" verify "$firefox_zip" "$version" "$extension_numeric" --browser firefox --signed
-    create_github_release "$version" "$dmg_path" "$release_notes" "$is_prerelease" "$extension_zip" "$firefox_zip"
+    # Upload the feed exactly as committed with this release, and only if it lists this DMG.
+    local appcast_path="$RELEASE_DIR/appcast.xml"
+    git -C "$PROJECT_ROOT" show "v$version:appcast.xml" > "$appcast_path"
+    local download_url="https://github.com/$GITHUB_REPO/releases/download/v$version/$(basename "$dmg_path")"
+    if ! grep -qF "url=\"$download_url\"" "$appcast_path"; then
+        echo -e "${RED}appcast.xml at v$version has no entry for $download_url${NC}"
+        exit 1
+    fi
+
+    create_github_release "$version" "$dmg_path" "$appcast_path" "$release_notes" "$is_prerelease"
 
     echo ""
     echo -e "${GREEN}Release uploaded!${NC}"
     echo -e "View at: https://github.com/$GITHUB_REPO/releases/tag/v$version"
+    if [[ "$is_prerelease" == "true" ]]; then
+        echo -e "${YELLOW}预发布版不会成为 GitHub 的 latest：装着的 TypeRight 读 releases/latest/download/appcast.xml，${NC}"
+        echo -e "${YELLOW}拿到的是最近一个正式版的 appcast。还没发过正式版时，这个地址是 404。${NC}"
+    fi
 }
 
 # Show usage

@@ -222,10 +222,9 @@ final class BrowserIntegration: ObservableObject {
         return true
     }
 
+    // TypeRight: the extension never takes a field over from Accessibility monitoring.
     private func setActiveSession(_ session: String?) {
-        guard activeSession != session else { return }
         activeSession = session
-        AnalysisCoordinator.shared.browserFocusChanged()
     }
 
     private func acceptConnection(_ descriptor: Int32) {
@@ -433,12 +432,10 @@ final class BrowserIntegration: ObservableObject {
     private func cancelTool() {
         let loadingSession = styleLoadingSession
         styleLoadingSession = nil
-        let hadTarget = toolTarget != nil
         toolTask?.cancel(); toolTask = nil
         toolTarget = nil; toolID = nil
         compose.hide(); readability.hide()
         if let loadingSession { sendResults(loadingSession) }
-        if hadTarget, activeSession == nil { AnalysisCoordinator.shared.browserFocusChanged() }
     }
 
     private func status(_ message: String, session: String) {

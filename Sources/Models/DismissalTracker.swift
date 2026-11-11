@@ -24,7 +24,7 @@ class DismissalTracker {
             baseURL = FileManager.default.temporaryDirectory
         }
 
-        let textWardenDir = baseURL.appendingPathComponent("TextWarden")
+        let textWardenDir = baseURL.appendingPathComponent(AppSupportFolder.name)
 
         try? FileManager.default.createDirectory(
             at: textWardenDir,

@@ -97,18 +97,17 @@ class CrashRecoveryManager {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             let alert = NSAlert()
-            alert.messageText = "TextWarden encountered repeated crashes"
+            alert.messageText = "TypeRight 接连崩溃了"
             alert.informativeText = """
-            The app has crashed \(restartAttempts) times. \
-            This may indicate a serious issue. Would you like to:
+            TypeRight 已经崩溃了 \(restartAttempts) 次，可能出了比较严重的问题。你可以：
 
-            • Reset preferences and try again
-            • View crash logs
-            • Quit the application
+            • 恢复默认设置后接着用
+            • 打开「控制台」看日志
+            • 退出 TypeRight
             """
-            alert.addButton(withTitle: "Reset & Restart")
-            alert.addButton(withTitle: "View Logs")
-            alert.addButton(withTitle: "Quit")
+            alert.addButton(withTitle: "恢复默认设置")
+            alert.addButton(withTitle: "看日志")
+            alert.addButton(withTitle: "退出")
             alert.alertStyle = .critical
 
             let response = alert.runModal()
@@ -122,7 +121,6 @@ class CrashRecoveryManager {
                 Logger.info("Preferences reset, restarting", category: Logger.lifecycle)
 
             case .alertSecondButtonReturn:
-                // Open Console app filtered to TextWarden logs
                 openConsoleLogs()
 
             default:
@@ -131,7 +129,7 @@ class CrashRecoveryManager {
         }
     }
 
-    /// Open Console.app with TextWarden logs
+    /// Open Console.app (unfiltered; TypeRight's messages use the com.typeright.app subsystem)
     private func openConsoleLogs() {
         let task = Process()
         task.launchPath = "/usr/bin/open"

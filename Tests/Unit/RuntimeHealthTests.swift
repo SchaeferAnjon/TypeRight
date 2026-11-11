@@ -58,7 +58,7 @@ final class RuntimeHealthTests: XCTestCase {
     }
 
     func testConsentPromptIsConcise() {
-        XCTAssertEqual(InactiveReason.consentRequired.displayMessage, "Choose how TextWarden works here.")
+        XCTAssertEqual(InactiveReason.consentRequired.displayMessage, "Choose how TypeRight works here.")
     }
 
     func testMenuHealthMessageStaysCompact() {
