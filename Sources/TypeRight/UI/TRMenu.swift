@@ -9,6 +9,33 @@
 import AppKit
 import SwiftUI
 
+/// 设置 › 通用 › 在菜单栏显示图标. TypeRight has no Dock icon, so with the menu bar icon off it
+/// keeps one way in, as GetNewWord does: opening the app again (Finder, Spotlight, Launchpad)
+/// shows the main window, and so does a launch while the icon is off, since nothing else on
+/// screen would say TypeRight is running.
+@MainActor
+enum TRMenuBarIcon {
+    enum Opens: Equatable {
+        case nothing, mainWindow, setup
+    }
+
+    static func setShown(_ shown: Bool) {
+        CoachSettings.menuBarIconShown = shown
+        MenuBarController.shared?.setIconVisible(shown)
+    }
+
+    /// At launch, once the first setup is done.
+    static func atLaunch(iconShown: Bool) -> Opens {
+        iconShown ? .nothing : .mainWindow
+    }
+
+    /// Opening TypeRight again while it runs. Windows already on screen just come forward.
+    static func onReopen(hasVisibleWindows: Bool, needsSetup: Bool) -> Opens {
+        if hasVisibleWindows { return .nothing }
+        return needsSetup ? .setup : .mainWindow
+    }
+}
+
 /// The "AI" line near the bottom of the menu.
 enum TRMenuAILine: Equatable {
     case ready(CoachProvider)
@@ -85,7 +112,8 @@ final class TypeRightMenu: NSObject {
         let header = NSMenuItem()
         let host = NSHostingView(rootView: TRMenuHeader(notebook: notebook))
         host.sizingOptions = []
-        host.frame = NSRect(x: 0, y: 0, width: 300, height: 104)
+        // As tall as the header's own content: a fixed height left empty space under the bars.
+        host.frame = NSRect(x: 0, y: 0, width: TRMenuHeader.width, height: host.fittingSize.height)
         header.view = host
         menu.addItem(header)
         menu.addItem(.separator())
@@ -151,15 +179,19 @@ final class TypeRightMenu: NSObject {
 }
 
 struct TRMenuHeader: View {
+    static let width: CGFloat = 300
+
     @ObservedObject var notebook: CoachNotebook
 
     var body: some View {
         let days = notebook.lastDays(14)
         let today = days.last ?? DayStat(day: "")
         let words = notebook.today.filter { $0.kind == .word }.count
-        VStack(alignment: .leading, spacing: 6) {
-            Text("今天改了 \(today.fixes) 处").font(.system(size: 14, weight: .semibold))
-            Text(subtitle(today, words: words)).font(.system(size: 12)).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 0) {
+            Text("今天改了 \(today.fixes) 处").font(.system(size: 15, weight: .semibold)).foregroundStyle(TR.text)
+            Text(subtitle(today, words: words)).font(.system(size: 12)).foregroundStyle(TR.text2)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 2)
             HStack(alignment: .bottom, spacing: 3) {
                 let peak = max(days.map(\.sentences).max() ?? 0, 1)
                 ForEach(days, id: \.day) { d in
@@ -170,10 +202,11 @@ struct TRMenuHeader: View {
                 }
             }
             .frame(height: 24)
+            .padding(.top, 12)
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .frame(width: 300, height: 104, alignment: .topLeading)
+        .padding(.vertical, 12)
+        .frame(width: Self.width, alignment: .topLeading)
     }
 
     private func subtitle(_ today: DayStat, words: Int) -> String {

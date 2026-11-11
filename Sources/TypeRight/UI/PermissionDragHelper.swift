@@ -147,7 +147,7 @@ final class PermissionDragHelper {
                         Image(systemName: "arrow.left").font(.system(size: 11, weight: .semibold))
                             .offset(x: nudge ? -3 : 1)
                         Text("把图标拖进系统设置的列表")
-                            .font(.system(size: 12.5, weight: .semibold))
+                            .font(.system(size: 13, weight: .medium)).foregroundStyle(TR.text)
                     }
                     Text("拖进去开关就打开了，不用重开 TypeRight。")
                         .font(.system(size: 12)).foregroundStyle(TR.text2)
@@ -162,7 +162,7 @@ final class PermissionDragHelper {
             }
             .padding(.horizontal, 14)
             .frame(width: 340, height: 92)
-            .background(TR.card, in: RoundedRectangle(cornerRadius: 12))
+            .background(TR.pop, in: RoundedRectangle(cornerRadius: 12))
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(TR.line, lineWidth: 0.5))
             .onAppear {
                 withAnimation(.easeInOut(duration: 0.6).repeatForever()) { nudge = true }

@@ -38,6 +38,7 @@ class MenuBarController: NSObject, NSMenuDelegate {
 
     private func setupMenuBar() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem?.isVisible = CoachSettings.menuBarIconShown
 
         guard let button = statusItem?.button else {
             Logger.error("Failed to create status item button", category: Logger.ui)
@@ -111,6 +112,13 @@ class MenuBarController: NSObject, NSMenuDelegate {
         // TypeRight: its own menu (today's count, pause, open, settings, AI, quit).
         // Shown manually in statusBarButtonClicked, not attached to statusItem.
         menu = TypeRightMenu.shared.build(frontmost: menuTargetApp)
+    }
+
+    /// 设置 › 通用 › 在菜单栏显示图标. A hidden item keeps working (the safe-trial question then
+    /// shows beside the app instead of under the icon).
+    func setIconVisible(_ visible: Bool) {
+        statusItem?.isVisible = visible
+        Logger.info("Menu bar icon \(visible ? "shown" : "hidden")", category: Logger.ui)
     }
 
     /// Update menu to reflect current pause state

@@ -51,8 +51,7 @@ struct LanguageSelectorView: View {
                 isSelectedList: true
             )
 
-            SearchField(text: $searchText, placeholder: "按名字或代码找语言")
-                .frame(maxWidth: .infinity, minHeight: 22, maxHeight: 22)
+            TRTextField(placeholder: "按名字或代码找语言", text: $searchText, search: true)
                 .accessibilityLabel("找语言")
 
             languageList(
@@ -94,9 +93,10 @@ struct LanguageSelectorView: View {
         let listHeight = languageListHeight(for: languages, maximumHeight: maximumHeight)
 
         return VStack(spacing: 0) {
-            HStack(spacing: 8) {
+            HStack(spacing: 12) {
                 Text(title)
-                    .font(.caption.weight(.semibold))
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(TR.text2)
 
                 Spacer()
 
@@ -104,35 +104,22 @@ struct LanguageSelectorView: View {
                     visibleCount: languages.count,
                     totalCount: totalCount,
                     isSelectedList: isSelectedList
-                ))
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
-
-                if languageListNeedsScrolling(languages, maximumHeight: maximumHeight) {
-                    Divider()
-                        .frame(height: 12)
-
-                    Label("可以滚动", systemImage: "arrow.up.arrow.down")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                ) + (languageListNeedsScrolling(languages, maximumHeight: maximumHeight) ? "，可以滚动" : ""))
+                .font(.system(size: 12).monospacedDigit())
+                .foregroundStyle(TR.text2)
 
                 if isSelectedList, totalCount > 0 {
-                    Divider()
-                        .frame(height: 12)
-
-                    Button("清空") {
+                    Button("全部取消") {
                         selectedLanguageCodes.removeAll()
                     }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.tint)
+                    .buttonStyle(TRGhostButtonStyle())
                     .help("全部取消勾选")
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
+            .padding(.horizontal, 12)
+            .frame(minHeight: 36)
 
-            Divider()
+            Rectangle().fill(TR.line).frame(height: 0.5)
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
@@ -150,14 +137,8 @@ struct LanguageSelectorView: View {
             .frame(height: listHeight)
             .scrollIndicators(.visible)
         }
-        .background {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(Color(nsColor: .controlBackgroundColor))
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(Color.secondary.opacity(0.22), lineWidth: 1)
-        }
+        .background(TR.bg, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(TR.line, lineWidth: 0.5))
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .accessibilityElement(children: .contain)
     }
@@ -195,11 +176,12 @@ struct LanguageSelectorView: View {
     ) -> some View {
         VStack(spacing: 2) {
             Text(title)
-                .font(.callout.weight(.medium))
+                .font(.system(size: 13))
+                .foregroundStyle(TR.text)
 
             Text(description)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .font(.system(size: 12))
+                .foregroundStyle(TR.text2)
         }
         .frame(maxWidth: .infinity, minHeight: height)
     }
@@ -211,8 +193,7 @@ struct LanguageSelectorView: View {
         ForEach(languages) { language in
             languageToggle(language, isSelectedList: isSelectedList)
 
-            Divider()
-                .padding(.leading, 38)
+            Rectangle().fill(TR.line).frame(height: 0.5).padding(.leading, 12)
         }
     }
 
@@ -224,23 +205,24 @@ struct LanguageSelectorView: View {
             HStack(spacing: 10) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(Self.chineseName(language))
-                        .font(.body)
+                        .font(.system(size: 13))
+                        .foregroundStyle(TR.text)
 
                     Text(language.nativeName)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .font(.system(size: 12))
+                        .foregroundStyle(TR.text2)
                 }
 
                 Spacer(minLength: 12)
 
                 Text(language.code.uppercased())
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.tertiary)
+                    .font(.system(size: 11).monospacedDigit())
+                    .foregroundStyle(TR.text2)
             }
             .contentShape(Rectangle())
         }
-        .toggleStyle(.checkbox)
-        .padding(.horizontal, 10)
+        .toggleStyle(SquareToggleStyle())
+        .padding(.horizontal, 12)
         .padding(.vertical, 6)
         .accessibilityLabel(accessibilityLabel(for: language))
         .accessibilityHint(isSelectedList ? "移回可选的语言" : "移到已选的语言")

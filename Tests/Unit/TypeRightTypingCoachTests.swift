@@ -248,7 +248,7 @@ class TypeRightCoachTestCase: XCTestCase {
     }
 
     var failedMessage: String? {
-        if case let .failed(message) = display.visible { return message }
+        if case let .failed(message, _) = display.visible { return message }
         return nil
     }
 }

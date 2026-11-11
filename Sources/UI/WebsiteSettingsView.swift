@@ -28,140 +28,48 @@ struct WebsiteSettingsView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            // Search field and add button row
-            HStack {
-                // Search field (matching Applications style)
-                HStack {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundColor(.secondary)
-                    TextField("找网站…", text: $searchText)
-                        .textFieldStyle(.plain)
-                    if !searchText.isEmpty {
-                        Button(action: { searchText = "" }) {
-                            Image(systemName: "xmark.circle.fill")
-                                .foregroundColor(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(8)
-                .background(Color(NSColor.controlBackgroundColor))
-                .cornerRadius(6)
+        VStack(alignment: .leading, spacing: 22) {
+            HStack(spacing: 8) {
+                TRTextField(placeholder: "找网站…", text: $searchText, search: true)
 
-                // Current website button (if in browser)
-                if showsCurrentSite, let currentDomain = AnalysisCoordinator.shared.browserDomain() {
-                    if !preferences.isWebsiteDisabled(currentDomain) {
-                        Button {
-                            preferences.disableWebsite(currentDomain)
-                        } label: {
-                            Label("在 \(currentDomain) 上关掉", systemImage: "minus.circle")
-                        }
-                        .buttonStyle(.bordered)
-                        .help("在刚才浏览的这个网站上不弹框")
+                // The site last open in a browser, if there is one.
+                if showsCurrentSite, let currentDomain = AnalysisCoordinator.shared.browserDomain(),
+                   !preferences.isWebsiteDisabled(currentDomain)
+                {
+                    Button("在 \(currentDomain) 上关掉") {
+                        preferences.disableWebsite(currentDomain)
                     }
+                    .buttonStyle(TRPlainButtonStyle())
+                    .help("在刚才浏览的这个网站上不弹框")
                 }
 
-                Button {
+                Button("加一个网站…") {
                     showingAddSheet = true
-                } label: {
-                    Image(systemName: "plus")
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(TRPlainButtonStyle())
                 .help("加一个不检查的网站")
             }
-            .padding()
 
-            // Website list
-            List {
-                Section {
-                    if filteredWebsites.isEmpty, !preferences.disabledWebsites.isEmpty {
-                        // Search returned no results
-                        HStack {
-                            Spacer()
-                            Text("没找到")
-                                .foregroundColor(.secondary)
-                            Spacer()
-                        }
-                        .padding(.vertical, 8)
-                    } else if preferences.disabledWebsites.isEmpty {
-                        // No websites added yet
-                        VStack(spacing: 12) {
-                            Image(systemName: "globe")
-                                .font(.system(size: 36))
-                                .foregroundColor(.secondary.opacity(0.5))
-                            Text("还没有关掉的网站")
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
-                            Text("加进来的网站上，TypeRight 不弹框")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                                .multilineTextAlignment(.center)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 20)
-                    } else {
-                        ForEach(filteredWebsites, id: \.self) { website in
-                            HStack {
-                                // Website icon
-                                Image(systemName: website.hasPrefix("*.") ? "globe.badge.chevron.backward" : "globe")
-                                    .foregroundColor(.accentColor)
-                                    .frame(width: 24, height: 24)
-
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(website)
-                                        .font(.body)
-                                    if website.hasPrefix("*.") {
-                                        Text("包括所有子域名")
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                    }
-                                }
-
-                                Spacer()
-
-                                // Status indicator
-                                Text(preferences.websitePausedUntil[website].map { "暂停到 " + $0.formatted(date: .abbreviated, time: .shortened) } ?? "已关掉")
-                                    .font(.caption)
-                                    .foregroundColor(.orange)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 2)
-                                    .background(Color.orange.opacity(0.15))
-                                    .cornerRadius(4)
-
-                                // Remove button
-                                Button {
-                                    preferences.enableWebsite(website)
-                                } label: {
-                                    Image(systemName: "trash")
-                                }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-                                .help("在这个网站上恢复弹框")
+            TRGroup(title: "不检查的网站（\(preferences.disabledWebsites.count) 个）",
+                    note: "在这些网站上 TypeRight 不弹框。可以写准确的域名，比如 github.com；写 *.google.com 就包括所有子域名。") {
+                if preferences.disabledWebsites.isEmpty {
+                    TRRow(title: "还没有关掉的网站", note: "加进来的网站上，TypeRight 不弹框", last: true) { EmptyView() }
+                } else if filteredWebsites.isEmpty {
+                    TRRow(title: "没找到", last: true) { EmptyView() }
+                } else {
+                    ForEach(Array(filteredWebsites.enumerated()), id: \.element) { index, website in
+                        TRRow(title: website, note: note(for: website), last: index == filteredWebsites.count - 1) {
+                            Image(systemName: "globe").font(.system(size: 15)).foregroundStyle(TR.text2)
+                        } trailing: {
+                            Button("移除") {
+                                preferences.enableWebsite(website)
                             }
-                            .padding(.vertical, 4)
+                            .buttonStyle(TRGhostButtonStyle())
+                            .help("在这个网站上恢复弹框")
                         }
-                    }
-                } header: {
-                    HStack {
-                        Text("不检查的网站")
-                            .font(.headline)
-                        Spacer()
-                        Text("\(preferences.disabledWebsites.count) 个")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
                     }
                 }
-                .headerProminence(.increased)
             }
-            .listStyle(.inset)
-
-            // Info text (matching Applications style)
-            Text("在这些网站上 TypeRight 不弹框。可以写准确的域名，比如 github.com；写 *.google.com 就包括所有子域名。刚在浏览器里看的网站，可以用上面的按钮直接关掉。")
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-                .padding()
         }
         .sheet(isPresented: $showingAddSheet) {
             AddWebsiteSheet(
@@ -174,6 +82,14 @@ struct WebsiteSettingsView: View {
             )
         }
     }
+
+    /// Off is the normal state of every site here, so only a wildcard or a pause with an end says more.
+    private func note(for website: String) -> String? {
+        let parts = [website.hasPrefix("*.") ? "包括所有子域名" : nil,
+                     preferences.websitePausedUntil[website].map { "暂停到 \(TRDate.moment($0))" }]
+        let text = parts.compactMap { $0 }.joined(separator: " · ")
+        return text.isEmpty ? nil : text
+    }
 }
 
 /// Sheet for adding a new website to the disabled list
@@ -184,43 +100,36 @@ private struct AddWebsiteSheet: View {
     @FocusState private var isTextFieldFocused: Bool
 
     var body: some View {
-        VStack(spacing: 20) {
-            // Header
-            VStack(spacing: 4) {
-                Image(systemName: "globe.badge.chevron.backward")
-                    .font(.system(size: 32))
-                    .foregroundColor(.accentColor)
+        VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text("加一个网站")
-                    .font(.headline)
+                    .font(.system(size: 15, weight: .semibold)).foregroundStyle(TR.text)
                 Text("在这个网站上不弹框")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                    .font(.system(size: 12)).foregroundStyle(TR.text2)
             }
 
-            // Input field
             VStack(alignment: .leading, spacing: 6) {
-                Text("域名")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
                 TextField("比如 github.com 或 *.google.com", text: $newWebsite)
-                    .textFieldStyle(.roundedBorder)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13))
                     .focused($isTextFieldFocused)
+                    .padding(.horizontal, 10)
+                    .frame(height: 28)
+                    .background(TR.card, in: RoundedRectangle(cornerRadius: 6))
+                    .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(TR.line2, lineWidth: 0.5))
                 Text("可以写域名、域名:端口或完整网址。*.example.com 包括所有子域名。")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                    .font(.system(size: 12)).foregroundStyle(TR.text2)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
-            Divider()
-
-            // Buttons
-            HStack {
+            HStack(spacing: 8) {
+                Spacer()
                 Button("取消") {
                     newWebsite = ""
                     isPresented = false
                 }
+                .buttonStyle(TRPlainButtonStyle())
                 .keyboardShortcut(.cancelAction)
-
-                Spacer()
 
                 Button("加入") {
                     let trimmed = newWebsite.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -229,13 +138,14 @@ private struct AddWebsiteSheet: View {
                     }
                     isPresented = false
                 }
+                .buttonStyle(TRInkButtonStyle())
                 .keyboardShortcut(.defaultAction)
-                .buttonStyle(.borderedProminent)
                 .disabled(newWebsite.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
         .padding(24)
         .frame(width: 400)
+        .background(TR.bg)
         .onAppear {
             isTextFieldFocused = true
         }

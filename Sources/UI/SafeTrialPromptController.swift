@@ -13,7 +13,7 @@ import SwiftUI
 final class SafeTrialPromptController: NSObject, NSPopoverDelegate {
     static let shared = SafeTrialPromptController()
 
-    private static let contentSize = NSSize(width: 336, height: 122)
+    static let contentSize = NSSize(width: 336, height: 148)
     static let fallbackCollectionBehavior: NSWindow.CollectionBehavior = [
         .canJoinAllSpaces,
         .stationary,
@@ -338,70 +338,66 @@ struct SafeTrialPromptView: View {
     let onKeepPaused: () -> Void
 
     var body: some View {
-        HStack(alignment: .top, spacing: 11) {
+        HStack(alignment: .top, spacing: 12) {
             applicationIdentity
 
             VStack(alignment: .leading, spacing: 0) {
                 Text("在「\(applicationName)」里也用 TypeRight？")
-                    .font(.headline)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(TR.text)
                     .lineLimit(1)
                     .minimumScaleFactor(0.9)
 
                 Text("这类 App 默认不看。")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .padding(.top, 3)
+                    .font(.system(size: 12))
+                    .foregroundStyle(TR.text2)
+                    .padding(.top, 4)
 
-                HStack(alignment: .firstTextBaseline, spacing: 7) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Image(systemName: "checkmark.shield")
-                        .frame(width: 15)
-                        .foregroundStyle(.secondary)
+                        .font(.system(size: 12))
+                        .frame(width: 16)
+                        .foregroundStyle(TR.text2)
                         .accessibilityHidden(true)
 
                     VStack(alignment: .leading, spacing: 2) {
                         Text("开了以后照常弹框")
-                            .foregroundStyle(.primary)
+                            .foregroundStyle(TR.text)
                         Text("随时能在设置 › App 里关掉")
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(TR.text2)
                     }
-                    .font(.callout)
+                    .font(.system(size: 12))
                 }
-                .padding(.top, 7)
+                .padding(.top, 8)
+
+                Spacer(minLength: 12)
 
                 HStack(spacing: 8) {
                     Spacer()
                     Button("先不用", action: onKeepPaused)
-                        .buttonStyle(.borderless)
-                        .foregroundStyle(.secondary)
+                        .buttonStyle(TRPlainButtonStyle())
                     Button("开启", action: onTry)
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(TRInkButtonStyle())
                         .keyboardShortcut(.defaultAction)
                 }
-                .controlSize(.small)
-                .padding(.top, 7)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(.init(top: 8, leading: 11, bottom: 7, trailing: 10))
-        .frame(width: 336, height: 122, alignment: .topLeading)
+        .padding(12)
+        .frame(width: SafeTrialPromptController.contentSize.width, height: SafeTrialPromptController.contentSize.height,
+               alignment: .topLeading)
         .background {
             if showsPanelBackground {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(.regularMaterial)
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(Color(nsColor: .windowBackgroundColor).opacity(0.86))
-                }
+                RoundedRectangle(cornerRadius: 12, style: .continuous).fill(TR.pop)
             } else {
-                // Native popovers remain translucent, but this semantic surface tint keeps
-                // their content legible over both bright and dark windows.
-                Color(nsColor: .windowBackgroundColor).opacity(0.86)
+                // Inside the system popover, which draws its own rounded frame and arrow.
+                TR.pop
             }
         }
         .overlay {
             if showsPanelBackground {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(Color(nsColor: .separatorColor).opacity(0.65), lineWidth: 1)
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(TR.line2, lineWidth: 0.5)
             }
         }
         .accessibilityElement(children: .contain)
@@ -417,13 +413,13 @@ struct SafeTrialPromptView: View {
                 .shadow(color: .black.opacity(0.16), radius: 2, y: 1)
                 .accessibilityHidden(true)
         } else {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(.quaternary)
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(TR.fill)
                 .frame(width: 38, height: 38)
                 .overlay {
                     Image(systemName: "app.dashed")
-                        .font(.system(size: 20, weight: .medium))
-                        .foregroundStyle(.secondary)
+                        .font(.system(size: 16))
+                        .foregroundStyle(TR.text2)
                 }
                 .accessibilityHidden(true)
         }

@@ -61,9 +61,11 @@ final class TypeRightSnapshotTests: XCTestCase {
         }
         let settings = TRSettingsWindowController.shared
         let pages = try samplePages()
+        // Tall enough for the whole page (通用 ends with 启动, AI 服务商 with the Key box).
+        let heights: [TRSettingsPage: CGFloat] = [.general: 1000, .ai: 880]
         for page in TRSettingsPage.allCases where page != .advanced {
             settings.page = page
-            draw(TRSettingsView(controller: settings, samplePage: pages), NSSize(width: 940, height: 680), "settings-\(page.rawValue)")
+            draw(TRSettingsView(controller: settings, samplePage: pages), NSSize(width: 940, height: heights[page] ?? 680), "settings-\(page.rawValue)")
         }
         for step in TROnboardingStep.allCases {
             draw(TROnboardingView(start: step, accessGranted: false, translateKey: unsetName(), onFinish: {}),
@@ -78,13 +80,16 @@ final class TypeRightSnapshotTests: XCTestCase {
                                                              corrected: "I want to book a meeting room tomorrow because I have a question.",
                                                              changes: [.init(from: "I has", to: "I have", why: "主语是 I，动词要用 have。", type: "agreement")]))),
             ("thinking", .thinking),
-            ("failed", .failed("AI 没回上来：AI 服务返回 401：Authentication Fails")),
+            // The words the app really shows: a key the provider turned down, and no network.
+            ("failed", .failed(try XCTUnwrap(CoachAIError.http(401).errorDescription), keyRejected: true)),
+            ("failed-offline", .failed(try XCTUnwrap(CoachAIError.offline.errorDescription))),
         ]
         for (name, content) in cards {
             draw(CoachCardView(content: content, tail: CoachTailPlacement(pointsUp: true, x: 30)).padding(20).background(Color.gray.opacity(0.15)),
                  nil, "card-\(name)")
         }
-        draw(TRMenuHeader(notebook: notebook), NSSize(width: 300, height: 104), "menu-header")
+        draw(TRMenuHeader(notebook: notebook), nil, "menu-header")
+        draw(KeyCapSheet().padding(20).background(TR.bg), nil, "keycaps")
     }
 
     // MARK: What changed in this round (light)
@@ -103,14 +108,14 @@ final class TypeRightSnapshotTests: XCTestCase {
             rewriteName: unsetName()
         )
         settings.page = .advanced
-        let tabs: [(SettingsTab, CGFloat)] = [(.general, 1000), (.grammar, 2520), (.style, 760), (.applications, 900),
-                                              (.websites, 760), (.diagnostics, 2400), (.about, 1000)]
+        let tabs: [(SettingsTab, CGFloat)] = [(.general, 700), (.grammar, 3000), (.style, 480), (.applications, 760),
+                                              (.websites, 380), (.diagnostics, 1840), (.about, 800)]
         for (tab, height) in tabs {
             PreferencesWindowController.shared.selectTab(tab)
             let view = TRSettingsView(controller: settings, samplePage: { page in
                 page == .advanced ? AnyView(PreferencesView(preferences: preferences, vocabulary: vocabulary, sample: sample)) : nil
             })
-            draw(view, NSSize(width: 940, height: height), "advanced-\(tab.rawValue)-\(tab)", appearances: [false])
+            draw(view, NSSize(width: 940, height: height), "advanced-\(tab.rawValue)-\(tab)")
         }
 
         settings.page = .privacy
@@ -147,7 +152,7 @@ final class TypeRightSnapshotTests: XCTestCase {
         drawGuide(MenuReplica(menu: TypeRightMenu.shared.build(state: state, notebook: notebook), notebook: notebook, highlight: "设置…"),
                   nil, "guide-menu")
 
-        for (page, name, height) in [(TRSettingsPage.ai, "guide-ai-provider", 712.0), (.keys, "guide-shortcuts", 680), (.apps, "guide-apps", 680)] {
+        for (page, name, height) in [(TRSettingsPage.ai, "guide-ai-provider", 800.0), (.keys, "guide-shortcuts", 680), (.apps, "guide-apps", 680)] {
             settings.page = page
             drawGuide(TRSettingsView(controller: settings, samplePage: pages), NSSize(width: 940, height: height), name)
         }
@@ -178,6 +183,9 @@ final class TypeRightSnapshotTests: XCTestCase {
         preferences.disableWebsite("*.google.com")
         // Shows the style choices under 改写 (this Mac may not have Apple Intelligence).
         preferences.enableStyleChecking = true
+        // Shows the language picker under 拼写 › 别的语言.
+        preferences.enableLanguageDetection = true
+        preferences.excludedLanguages = ["deu", "fra"]
         return preferences
     }
 
@@ -278,6 +286,22 @@ final class TypeRightSnapshotTests: XCTestCase {
             try XCTUnwrap(rep.representation(using: .png, properties: [:])).write(to: file)
         } catch {
             XCTFail("could not save \(file.lastPathComponent): \(error)")
+        }
+    }
+}
+
+// MARK: - Key caps
+
+/// Every look of the key cap side by side; settings only show the unset one, since a set shortcut
+/// would have to be written into the user's own defaults.
+private struct KeyCapSheet: View {
+    var body: some View {
+        HStack(spacing: 16) {
+            KeyCap(label: "选一个键", look: .unset)
+            KeyCap(label: "按下新的组合键…", look: .recording)
+            KeyCap(label: "⌃⌥T", look: .set)
+            KeyCap(label: "Tab", look: .fixed)
+            KeyCap(label: "Esc")
         }
     }
 }

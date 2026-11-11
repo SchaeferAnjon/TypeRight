@@ -267,6 +267,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             analysisCoordinator = AnalysisCoordinator.shared
             Logger.info("Analysis coordinator initialized", category: Logger.lifecycle)
 
+            // Without the menu bar icon nothing on screen says TypeRight is running: open the main window.
+            if TRMenuBarIcon.atLaunch(iconShown: CoachSettings.menuBarIconShown) == .mainWindow,
+               ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil
+            {
+                DispatchQueue.main.asyncAfter(deadline: .now() + TimingConstants.longDelay) {
+                    MainActor.assumeIsolated { TRMainWindowController.shared.show() }
+                }
+            }
+
             // Check if user wants to open settings window in foreground
             if UserPreferences.shared.openInForeground {
                 Logger.info("Opening settings window in foreground (user preference)", category: Logger.ui)
@@ -361,6 +370,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// Prevent app from quitting when all windows close (menu bar app)
     func applicationShouldTerminateAfterLastWindowClosed(_: NSApplication) -> Bool {
         false
+    }
+
+    /// Tests swap these, so nothing opens on the user's screen and nothing reads this Mac's state.
+    var needsSetup: @MainActor () -> Bool = {
+        StartupSetup.required(hasCompletedOnboarding: UserPreferences.shared.hasCompletedOnboarding,
+                              hasPermission: PermissionManager.shared.isPermissionGranted) != nil
+    }
+
+    lazy var open: @MainActor (TRMenuBarIcon.Opens) -> Void = { [weak self] opens in
+        switch opens {
+        case .mainWindow: TRMainWindowController.shared.show()
+        case .setup: self?.openOnboardingWindow()
+        case .nothing: break
+        }
+    }
+
+    /// Opening TypeRight again (Finder, Spotlight, Launchpad) while it runs. With the menu bar icon
+    /// switched off this is the only way back in, so it always shows a window.
+    @MainActor
+    func applicationShouldHandleReopen(_: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        open(TRMenuBarIcon.onReopen(hasVisibleWindows: flag, needsSetup: needsSetup()))
+        return true
     }
 
     func applicationWillTerminate(_: Notification) {

@@ -15,7 +15,8 @@ enum CoachCardContent: Equatable {
     case translate(source: String, result: CoachTranslation)
     case sentence(original: String, check: CoachSentenceCheck)
     case thinking
-    case failed(String)
+    /// `keyRejected`: the provider turned the saved key down, so the card carries a `danger` dot.
+    case failed(String, keyRejected: Bool = false)
 
     /// The text Tab writes into the field, if this card has one.
     var acceptText: String? {
@@ -151,32 +152,41 @@ struct CoachCardView: View {
             }
             if !result.note.isEmpty {
                 Text(result.note)
-                    .font(.system(size: 12.5))
+                    .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
         case let .sentence(_, check):
-            Text(highlighted(check))
+            let sentence = sentenceDiff(check)
+            Text(sentence.text)
                 .font(.system(size: 15))
-                .lineSpacing(3)
+                .lineSpacing(6)
                 .fixedSize(horizontal: false, vertical: true)
-            VStack(alignment: .leading, spacing: 4) {
-                ForEach(Array(check.changes.prefix(4).enumerated()), id: \.offset) { _, change in
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text(change.from).strikethrough().foregroundStyle(.secondary)
-                        Text("→").foregroundStyle(.tertiary)
-                        Text(change.to).fontWeight(.medium).foregroundStyle(CoachPalette.fix(scheme))
-                        Text(change.why).foregroundStyle(.secondary)
+            if !sentence.notes.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(Array(sentence.notes.enumerated()), id: \.offset) { _, note in
+                        Text(note)
+                            .font(.system(size: 13))
+                            .foregroundStyle(.primary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-                    .font(.system(size: 12.5))
+                }
+                .padding(.top, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .overlay(alignment: .top) {
+                    Rectangle().fill(CoachPalette.line(scheme)).frame(height: 0.5)
                 }
             }
-        case let .failed(message):
-            Text(message)
-                .font(.system(size: 12.5))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+        case let .failed(message, keyRejected):
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                if keyRejected {
+                    Circle().fill(TR.danger).frame(width: 7, height: 7).alignmentGuide(.firstTextBaseline) { $0[.bottom] - 1 }
+                }
+                Text(message)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         case .thinking:
             EmptyView()
         }
@@ -193,7 +203,7 @@ struct CoachCardView: View {
             Text(content.acceptText == nil ? "关掉" : "不改")
             if case .translate = content, keys == .normal {
                 Spacer(minLength: 12)
-                Text("记进生词本").foregroundStyle(.tertiary)
+                Text("记进生词本").foregroundStyle(TR.text2)
             }
         }
         .font(.system(size: 12))
@@ -212,16 +222,47 @@ struct CoachCardView: View {
         Text(text).font(.system(size: 18, weight: .semibold)).foregroundStyle(CoachPalette.fix(scheme))
     }
 
-    /// The corrected sentence with each changed piece tinted green: whole words only, found in the
-    /// order of the changes, so a change `a` never lights up the a inside `have`.
-    private func highlighted(_ check: CoachSentenceCheck) -> AttributedString {
-        var text = AttributedString(check.corrected)
-        for found in CoachText.orderedWordRanges(of: check.changes.map(\.to), in: check.corrected) {
-            guard let found, let range = Range(found, in: text) else { continue }
-            text[range].foregroundColor = CoachPalette.fix(scheme)
-            text[range].backgroundColor = CoachPalette.fixSoft(scheme)
+    /// The corrected sentence with each change shown in place: the old words grey and struck
+    /// through, right before the new words in green. Changes are found as whole words in the order
+    /// they come, so a change `a` never lights up the a inside `have`. Under it the reasons; a change
+    /// that could not be placed in the sentence keeps its "old → new" in front of its reason.
+    private func sentenceDiff(_ check: CoachSentenceCheck) -> (text: AttributedString, notes: [String]) {
+        let corrected = check.corrected
+        let found = CoachText.orderedWordRanges(of: check.changes.map(\.to), in: corrected)
+        var text = AttributedString()
+        var notes: [String] = []
+        var cursor = corrected.startIndex
+        for (change, hit) in zip(check.changes, found) {
+            let why = change.why.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let hit, !change.to.isEmpty, hit.lowerBound >= cursor else {
+                notes.append([change.from.isEmpty ? change.to : "\(change.from) → \(change.to)", why].filter { !$0.isEmpty }.joined(separator: "  "))
+                continue
+            }
+            text += AttributedString(corrected[cursor ..< hit.lowerBound])
+            // A short change stays on one line with its old words: "I" at a line's end and
+            // "have" on the next reads as two changes.
+            let together = change.from.count + corrected[hit].count <= 32
+            func keep(_ piece: some StringProtocol) -> String {
+                together ? piece.replacingOccurrences(of: " ", with: "\u{00A0}") : String(piece)
+            }
+            if !change.from.isEmpty {
+                var old = AttributedString(keep(change.from))
+                old.strikethroughStyle = .single
+                old.foregroundColor = TR.text3
+                old.font = .system(size: 13)
+                text += old
+                text += AttributedString(together ? "\u{00A0}" : " ")
+            }
+            var new = AttributedString(keep(corrected[hit]))
+            new.foregroundColor = CoachPalette.fix(scheme)
+            new.backgroundColor = CoachPalette.fixSoft(scheme)
+            new.font = .system(size: 15, weight: .semibold)
+            text += new
+            cursor = hit.upperBound
+            if !why.isEmpty, !notes.contains(why) { notes.append(why) }
         }
-        return text
+        text += AttributedString(corrected[cursor...])
+        return (text, Array(notes.prefix(4)))
     }
 
     private func tailShape(up: Bool, x: CGFloat) -> some View {
@@ -250,21 +291,6 @@ struct CoachTail: Shape {
         }
         p.closeSubpath()
         return p
-    }
-}
-
-struct KeyCap: View {
-    let label: String
-    @Environment(\.colorScheme) private var scheme
-
-    var body: some View {
-        Text(label)
-            .font(.system(size: 11, weight: .medium))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 5)
-            .frame(minWidth: 22, minHeight: 20)
-            .background(RoundedRectangle(cornerRadius: 5).fill(Color.primary.opacity(0.05)))
-            .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(CoachPalette.line(scheme), lineWidth: 0.5))
     }
 }
 

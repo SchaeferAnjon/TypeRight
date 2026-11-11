@@ -1,10 +1,10 @@
-# Type Learn 界面标准
+# TypeRight 界面标准
 
 2026-11-08 用户挑了方向 A「贴词小卡」，本文件照它定下来；原型：`design/typing-assistant/redesign/proto-a.html`。
 
 macOS 菜单栏里的英文打字助手，没有 Dock 图标：和 GetNewWord、Ask Free 同一套骨架（左侧栏、发丝线分组、方角开关、一屏一个实心按钮、键帽），主色换成「改好了」的绿。
 纠错不判卷：原来的字灰色划掉，改好的字绿色；整个产品不用红色标错。
-颜色、字号的定义将来在 `Sources/UI/Theme.swift`（SwiftUI）；原型里的变量名在 `design/typing-assistant/redesign/proto-a.html` 的 `:root`。
+颜色和现成组件的定义在 `Sources/TypeRight/UI/TRTheme.swift`（SwiftUI 的 `TR`）；原型里的变量名在 `design/typing-assistant/redesign/proto-a.html` 的 `:root`。
 
 ## 字
 - 系统字体：`-apple-system, "SF Pro Text", "PingFang SC"`；界面中文，被纠正的内容英文。
@@ -36,7 +36,8 @@ macOS 菜单栏里的英文打字助手，没有 Dock 图标：和 GetNewWord、
 - 主窗口：单窗侧栏（今天、错题本、生词本、进步）。「今天」首屏把三本都露出来，不做表格后台。
 - 错题行：上一行原句（灰划线加绿色改法），下一行一句中文为什么，再下一行 App、日期、被改过几次；右边三颗点表示用对几次，3 次算掌握；右键能标为掌握、删除。
 - 首次引导：侧栏步骤（欢迎、辅助功能、选 AI、整句翻译键、好了）；授权靠把图标从右往左拖进系统设置的列表。
-- 设置：系统设置式侧栏（通用、App、快捷键、AI 服务商、隐私），「通用」顶上一张循环示意图，不让布局跳。键帽没设时是虚线框「选一个键」。
+- 设置：系统设置式侧栏（通用、App、快捷键、AI 服务商、隐私、高级），「通用」顶上一张循环示意图，不让布局跳。键帽没设时是虚线框「选一个键」。
+- 设置 › 高级：放 TextWarden 原来的设置，7 个标签页（通用、拼写、改写、全部 App、网站、诊断、关于）。页头下一排 `TRSegmented` 当标签，和页头左对齐、不套框；每页和别的设置页一样用 `TRGroup` / `TRRow`，开关 `SquareToggleStyle`，选项 `TRSegmented`，快捷键 `TRShortcutRecorder` 键帽，搜索框和输入框 `TRTextField`，按钮 `TRPlainButtonStyle`（清空、恢复这类用 `danger` 字），列表里的「移除」用 `TRGhostButtonStyle`，网页链接用 `TRLinkRow`。
 
 ## 你的偏好
 - 喜欢：边打边弹框改；拖图标授权（从右往左拖）；加按键可自定义、快捷键默认不设；点外面关面板；弹窗不抢焦点；方角开关；AI 多家可选；只留菜单栏图标且能在设置里关；引导用侧栏步骤；一打开就要权限；列表要右键菜单；英文名要直观；和 GetNewWord、Ask Free 同家族。

@@ -615,7 +615,7 @@ final class TypingCoach {
         }
         let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         Logger.warning("TypeRight: AI request failed: \(message)", category: Logger.llm)
-        showFailed(message, at: range)
+        showFailed(message, at: range, keyRejected: (error as? CoachAIError)?.keyRejected == true)
     }
 
     // MARK: - Showing and taking cards
@@ -635,10 +635,10 @@ final class TypingCoach {
     }
 
     /// A failed card, at the range's place in the current text (or the field's corner).
-    private func showFailed(_ message: String, at range: Range<Int>?) {
+    private func showFailed(_ message: String, at range: Range<Int>?, keyRejected: Bool = false) {
         let scalars = Array(latestText.unicodeScalars)
         let range = range.flatMap { $0.upperBound <= scalars.count ? $0 : nil } ?? 0 ..< 0
-        deliver(Card(content: .failed(message), range: range, piece: CoachText.substring(scalars, range), analyzedText: latestText))
+        deliver(Card(content: .failed(message, keyRejected: keyRejected), range: range, piece: CoachText.substring(scalars, range), analyzedText: latestText))
     }
 
     /// An AI card or a failure: shown now unless another card is up, then it waits for that one.

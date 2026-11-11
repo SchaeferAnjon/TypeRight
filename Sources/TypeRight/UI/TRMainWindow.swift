@@ -26,7 +26,8 @@ enum TRPage: String, CaseIterable {
         switch self {
         case .today: "sun.max"
         case .mistakes: "book.closed"
-        case .words: "textformat"
+        // Not textformat: that symbol turns into Chinese characters on a Chinese system.
+        case .words: "text.book.closed"
         case .progress: "chart.bar"
         }
     }

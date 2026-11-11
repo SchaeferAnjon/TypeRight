@@ -18,59 +18,32 @@ struct StyleCheckingSettingsView: View {
     @State private var fmStatus: StyleEngineStatus = .unknown("")
 
     var body: some View {
-        Form {
-            // Availability status (small section with the header)
-            Section {
-                HStack(spacing: 12) {
-                    Image(systemName: fmStatus.symbolName)
-                        .font(.title3)
-                        .foregroundColor(fmStatus.isAvailable ? .green : .orange)
+        VStack(alignment: .leading, spacing: 22) {
+            Text("选中一段英文，按「通用」里设的「改写选中的文字」键，按下面的风格改写一遍，你看过再决定用不用。在这台 Mac 上处理，不发给任何服务商；要 macOS 26 和 Apple 智能。")
+                .font(.system(size: 12)).foregroundStyle(TR.text2)
+                .fixedSize(horizontal: false, vertical: true)
 
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(fmStatus.isAvailable ? "可以用" : "用不了")
-                            .font(.system(size: 12, weight: .medium))
-
-                        if !fmStatus.isAvailable {
-                            Text(fmStatus.userMessage)
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                    }
-
-                    Spacer()
-
-                    if fmStatus == .appleIntelligenceNotEnabled {
-                        Button("打开系统设置") {
-                            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.appleintelli") {
-                                NSWorkspace.shared.open(url)
-                            }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.mini)
-                    } else if fmStatus.canRetry {
-                        Button("再看一次") {
-                            checkFMAvailability()
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.mini)
-                    }
-                }
-            } header: {
-                VStack(alignment: .leading, spacing: 12) {
+            TRGroup(title: "用 Apple 智能改写") {
+                TRRow(title: "Apple 智能", note: fmStatus.isAvailable ? nil : fmStatus.userMessage) {
                     HStack(spacing: 8) {
-                        Image(systemName: "sparkles")
-                            .font(.title2)
-                            .foregroundColor(.purple)
-                        Text("用 Apple 智能改写")
-                            .font(.title3)
-                            .fontWeight(.semibold)
+                        TRStatusDot(color: fmStatus.isAvailable ? TR.ok : TR.warn, text: fmStatus.isAvailable ? "可以用" : "用不了")
+                        if fmStatus == .appleIntelligenceNotEnabled {
+                            Button("打开系统设置") {
+                                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.appleintelli") {
+                                    NSWorkspace.shared.open(url)
+                                }
+                            }
+                            .buttonStyle(TRPlainButtonStyle())
+                        } else if fmStatus.canRetry {
+                            Button("再看一次") { checkFMAvailability() }
+                                .buttonStyle(TRPlainButtonStyle())
+                        }
                     }
-
-                    Text("选中一段英文，按「通用」里设的「改写选中的文字」键，按下面的风格改写一遍，你看过再决定用不用。在这台 Mac 上处理，不发给任何服务商；要 macOS 26 和 Apple 智能。")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
                 }
+                TRRow(title: "打开改写", note: "关着的时候，改写键不响", last: true) {
+                    Toggle("", isOn: $preferences.enableStyleChecking).toggleStyle(SquareToggleStyle()).labelsHidden()
+                }
+                .disabled(!fmStatus.isAvailable)
             }
             .onAppear {
                 checkFMAvailability()
@@ -82,101 +55,21 @@ struct StyleCheckingSettingsView: View {
                 foundationModelsAvailabilityObserver
             }
 
-            // Main toggle and options (no header, continues the section visually)
-            Section {
-                Toggle(isOn: $preferences.enableStyleChecking) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("打开改写")
-                        Text("关着的时候，改写键不响")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
+            if preferences.enableStyleChecking {
+                // While Apple Intelligence cannot be used these grey out with the switch above.
+                TRGroup(title: "改成什么样") {
+                    TRRow(title: "风格", note: styleDescription(for: preferences.selectedWritingStyle)) {
+                        TRSegmented(options: UserPreferences.writingStyles.map { ($0, styleLabel(for: $0)) },
+                                    selection: $preferences.selectedWritingStyle)
+                    }
+                    TRRow(title: "变化多少", note: selectedTemperaturePreset.description, last: true) {
+                        TRSegmented(options: StyleTemperaturePreset.allCases.map { ($0.rawValue, $0.label) },
+                                    selection: $preferences.styleTemperaturePreset)
                     }
                 }
-                .toggleStyle(.switch)
                 .disabled(!fmStatus.isAvailable)
-
-                if preferences.enableStyleChecking {
-                    // Writing Style segmented control
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("改成什么风格")
-                            .font(.headline)
-
-                        HStack(spacing: 0) {
-                            ForEach(UserPreferences.writingStyles, id: \.self) { style in
-                                Button {
-                                    preferences.selectedWritingStyle = style
-                                } label: {
-                                    Text(styleLabel(for: style))
-                                        .font(.system(size: 12, weight: preferences.selectedWritingStyle == style ? .semibold : .regular))
-                                        .foregroundColor(preferences.selectedWritingStyle == style ? .white : .primary)
-                                        .frame(maxWidth: .infinity)
-                                        .padding(.vertical, 6)
-                                        .background(
-                                            preferences.selectedWritingStyle == style
-                                                ? Color.accentColor
-                                                : Color.clear
-                                        )
-                                }
-                                .buttonStyle(.plain)
-                                .help(styleDescription(for: style))
-                                .accessibilityAddTraits(preferences.selectedWritingStyle == style ? .isSelected : [])
-                            }
-                        }
-                        .background(Color(.separatorColor).opacity(0.2))
-                        .cornerRadius(6)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 6)
-                                .stroke(Color(.separatorColor), lineWidth: 0.5)
-                        )
-                    }
-
-                    // Creativity segmented control
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("变化多少")
-                            .font(.headline)
-
-                        HStack(spacing: 0) {
-                            ForEach(StyleTemperaturePreset.allCases) { preset in
-                                Button {
-                                    preferences.styleTemperaturePreset = preset.rawValue
-                                } label: {
-                                    HStack(spacing: 4) {
-                                        Text(preset.label)
-                                        Image(systemName: preset.symbolName)
-                                            .font(.system(size: 10))
-                                            .accessibilityHidden(true)
-                                    }
-                                    .font(.system(size: 12, weight: selectedTemperaturePreset == preset ? .semibold : .regular))
-                                    .foregroundColor(selectedTemperaturePreset == preset ? .white : .primary)
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 6)
-                                    .background(
-                                        selectedTemperaturePreset == preset
-                                            ? Color.accentColor
-                                            : Color.clear
-                                    )
-                                }
-                                .buttonStyle(.plain)
-                                .help(preset.description)
-                                .accessibilityAddTraits(selectedTemperaturePreset == preset ? .isSelected : [])
-                            }
-                        }
-                        .background(Color(.separatorColor).opacity(0.2))
-                        .cornerRadius(6)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 6)
-                                .stroke(Color(.separatorColor), lineWidth: 0.5)
-                        )
-
-                        Text(selectedTemperaturePreset.description)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
             }
         }
-        .formStyle(.grouped)
-        .padding()
     }
 
     // MARK: - Style Labels

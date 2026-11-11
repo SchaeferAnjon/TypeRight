@@ -19,128 +19,43 @@ struct ApplicationSettingsView: View {
     @State private var supportedApps: [ApplicationInfo] = []
     @State private var otherApps: [ApplicationInfo] = []
     @State private var excludedApps: [ApplicationInfo] = []
-    @State private var isOtherSectionExpanded = false
-    @State private var isExcludedSectionExpanded = false
     @State private var applicationError: String?
 
     var body: some View {
-        VStack(spacing: 0) {
-            // Search field
-            HStack {
-                Image(systemName: "magnifyingglass")
-                    .foregroundColor(.secondary)
-                TextField("找 App…", text: $searchText)
-                    .textFieldStyle(.plain)
-                if !searchText.isEmpty {
-                    Button(action: { searchText = "" }) {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundColor(.secondary)
-                    }
-                    .buttonStyle(.plain)
+        VStack(alignment: .leading, spacing: 22) {
+            VStack(alignment: .leading, spacing: 10) {
+                TRTextField(placeholder: "找 App…", text: $searchText, search: true)
+                HStack(spacing: 12) {
+                    Text("不想让 TypeRight 看某个 App，选「一直暂停」。")
+                        .font(.system(size: 12)).foregroundStyle(TR.text2)
+                    Spacer()
+                    Button("暂停一个没在列表里的 App…", action: chooseApplicationToPause)
+                        .buttonStyle(TRPlainButtonStyle())
                 }
             }
-            .padding(8)
-            .background(Color(NSColor.controlBackgroundColor))
-            .cornerRadius(6)
-            .padding()
 
-            HStack {
-                Text("不想让 TypeRight 看某个 App，选「一直暂停」。")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button("暂停一个没在列表里的 App…", action: chooseApplicationToPause)
-            }
-            .padding(.horizontal)
-            .padding(.bottom, 8)
-
-            // Application list
-            List {
-                // MARK: - Supported Applications Section
-
-                if !filteredSupportedApps.isEmpty {
-                    Section {
-                        ForEach(filteredSupportedApps, id: \.bundleIdentifier) { app in
-                            ApplicationRow(
-                                app: app,
-                                preferences: preferences
-                            )
-                        }
-                    } header: {
-                        HStack {
-                            Text("一般 App")
-                                .font(.headline)
-                            Spacer()
-                            Text("\(filteredSupportedApps.count) 个")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                    } footer: {
-                        Text("这些 App 默认边打边弹框，可以单独暂停。")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    .headerProminence(.increased)
-                }
-
-                // MARK: - Other Applications Section
-
-                if !filteredOtherApps.isEmpty {
-                    Section {
-                        DisclosureGroup(
-                            isExpanded: $isOtherSectionExpanded,
-                            content: {
-                                ForEach(filteredOtherApps, id: \.bundleIdentifier) { app in
-                                    ApplicationRow(
-                                        app: app,
-                                        preferences: preferences
-                                    )
-                                }
-                            },
-                            label: {
-                                HStack {
-                                    Text("默认关着的 App")
-                                        .font(.headline)
-                                    Spacer()
-                                    Text("\(filteredOtherApps.count) 个")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                            }
-                        )
-
-                        if !isOtherSectionExpanded {
-                            Text("终端这类 App 里常打命令，默认不看；点「开启」才开始看。")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                    .headerProminence(.increased)
-                }
-
-                if !filteredExcludedApps.isEmpty {
-                    Section {
-                        DisclosureGroup(isExpanded: $isExcludedSectionExpanded) {
-                            ForEach(filteredExcludedApps, id: \.bundleIdentifier) { app in
-                                ApplicationRow(app: app, preferences: preferences)
-                            }
-                        } label: {
-                            Text("TypeRight 不看的 App")
-                                .font(.headline)
-                        }
-                    } footer: {
-                        Text("系统工具和密码类 App 一直不看，也不能打开。")
-                            .font(.caption)
-                    }
-                }
-
-                if filteredSupportedApps.isEmpty, filteredOtherApps.isEmpty, filteredExcludedApps.isEmpty {
-                    Text("没找到。用上面的「暂停一个没在列表里的 App…」选一个。")
-                        .foregroundStyle(.secondary)
+            if !filteredSupportedApps.isEmpty {
+                TRGroup(title: "一般 App（\(filteredSupportedApps.count) 个）", note: "这些 App 默认边打边弹框，可以单独暂停。") {
+                    rows(filteredSupportedApps)
                 }
             }
-            .listStyle(.inset)
 
+            if !filteredOtherApps.isEmpty {
+                TRGroup(title: "默认关着的 App（\(filteredOtherApps.count) 个）", note: "终端这类 App 里常打命令，默认不看；点「开启」才开始看。") {
+                    rows(filteredOtherApps)
+                }
+            }
+
+            if !filteredExcludedApps.isEmpty {
+                TRGroup(title: "TypeRight 不看的 App（\(filteredExcludedApps.count) 个）", note: "系统工具和密码类 App 一直不看，也不能打开。") {
+                    rows(filteredExcludedApps)
+                }
+            }
+
+            if filteredSupportedApps.isEmpty, filteredOtherApps.isEmpty, filteredExcludedApps.isEmpty {
+                Text("没找到。用上面的「暂停一个没在列表里的 App…」选一个。")
+                    .font(.system(size: 12)).foregroundStyle(TR.text2)
+            }
         }
         .onAppear {
             loadApplications()
@@ -151,12 +66,6 @@ struct ApplicationSettingsView: View {
         .onChange(of: preferences.discoveredApplications) {
             loadApplications()
         }
-        .onChange(of: searchText) {
-            if !searchText.isEmpty {
-                isOtherSectionExpanded = true
-                isExcludedSectionExpanded = true
-            }
-        }
         .alert("没能暂停这个 App", isPresented: Binding(
             get: { applicationError != nil },
             set: { if !$0 { applicationError = nil } }
@@ -164,6 +73,12 @@ struct ApplicationSettingsView: View {
             Button("好") { applicationError = nil }
         } message: {
             Text(applicationError ?? "")
+        }
+    }
+
+    private func rows(_ apps: [ApplicationInfo]) -> some View {
+        ForEach(Array(apps.enumerated()), id: \.element.bundleIdentifier) { index, app in
+            ApplicationRow(app: app, preferences: preferences, last: index == apps.count - 1)
         }
     }
 
@@ -316,103 +231,43 @@ struct ApplicationSettingsView: View {
 private struct ApplicationRow: View {
     let app: ApplicationInfo
     @ObservedObject var preferences: UserPreferences
+    var last = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                // App icon
-                if let icon = app.icon {
-                    Image(nsImage: icon)
-                        .resizable()
-                        .frame(width: 24, height: 24)
-                } else {
-                    Image(systemName: "app")
-                        .foregroundColor(.secondary)
-                        .frame(width: 24, height: 24)
-                }
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(app.name)
-                        .font(.body)
-                    HStack(spacing: 4) {
-                        Text(app.bundleIdentifier)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        Button {
-                            copyToClipboard(app.bundleIdentifier)
-                        } label: {
-                            Image(systemName: "doc.on.doc")
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                        .help("复制 bundle id")
-                    }
-
-                    if let statusDescription {
-                        Text(statusDescription)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                Spacer()
-
-                if app.policy == .ignored {
-                    Text("一直不看")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                } else if needsSafeTrialConsent {
-                    if preferences.getPauseDuration(for: app.bundleIdentifier) == .indefinite {
-                        Text("暂停着")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                    }
-                    Button("开启") {
-                        preferences.allowSafeTrial(for: app.bundleIdentifier)
-                        preferences.setPauseDuration(for: app.bundleIdentifier, duration: .active)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .help("让 TypeRight 在「\(app.name)」里边打边弹框")
-                } else {
-                    Picker("", selection: Binding(
-                        get: {
-                            preferences.getPauseDuration(for: app.bundleIdentifier)
-                        },
-                        set: { duration in
-                            preferences.setPauseDuration(for: app.bundleIdentifier, duration: duration)
-                        }
-                    )) {
-                        ForEach(PauseDuration.allCases, id: \.self) { duration in
-                            Text(duration.label).tag(duration)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .frame(width: 200)
-                    .help("在「\(app.name)」里看还是暂停")
-                }
-
-
+        TRRow(title: TRText.autospaced(app.name), note: statusDescription, last: last) {
+            if let icon = app.icon {
+                Image(nsImage: icon).resizable().frame(width: 22, height: 22)
+            } else {
+                Image(systemName: "app").font(.system(size: 16)).foregroundStyle(TR.text2)
             }
-
-            // Resume time if paused
-            if let until = preferences.getPausedUntil(for: app.bundleIdentifier) {
-                let pauseState = preferences.getPauseDuration(for: app.bundleIdentifier)
-                if pauseState == .oneHour || pauseState == .twentyFourHours {
-                    HStack {
-                        Spacer()
-                        Text("\(formatTime(until)) 自动恢复")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                            .padding(.trailing, 4)
+        } trailing: {
+            if app.policy == .ignored {
+                Text("一直不看").font(.system(size: 13)).foregroundStyle(TR.text2)
+            } else if needsSafeTrialConsent {
+                Button("开启") {
+                    preferences.allowSafeTrial(for: app.bundleIdentifier)
+                    preferences.setPauseDuration(for: app.bundleIdentifier, duration: .active)
+                }
+                .buttonStyle(TRPlainButtonStyle())
+                .help("让 TypeRight 在「\(app.name)」里边打边弹框")
+            } else {
+                Picker("", selection: Binding(
+                    get: {
+                        preferences.getPauseDuration(for: app.bundleIdentifier)
+                    },
+                    set: { duration in
+                        preferences.setPauseDuration(for: app.bundleIdentifier, duration: duration)
+                    }
+                )) {
+                    ForEach(PauseDuration.allCases, id: \.self) { duration in
+                        Text(duration.label).tag(duration)
                     }
                 }
+                .labelsHidden()
+                .fixedSize()
+                .help("在「\(app.name)」里看还是暂停")
             }
         }
-        .padding(.vertical, 4)
-        .alignmentGuide(.listRowSeparatorLeading) { _ in 0 }
-        .alignmentGuide(.listRowSeparatorTrailing) { dimensions in dimensions.width }
     }
 
     private var needsSafeTrialConsent: Bool {
@@ -420,29 +275,18 @@ private struct ApplicationRow: View {
             && !preferences.safeTrialApplications.contains(app.bundleIdentifier)
     }
 
+    /// The line under the name: why it is off, or when a pause ends.
     private var statusDescription: String? {
-        if needsSafeTrialConsent,
-           app.policy == .pausedByDefault,
-           preferences.getPauseDuration(for: app.bundleIdentifier) != .active
-        {
-            return "默认关着"
-        }
         if needsSafeTrialConsent {
-            return "点「开启」后才开始看"
+            return app.policy == .pausedByDefault ? "默认关着" : "点「开启」后才开始看"
+        }
+        let pauseState = preferences.getPauseDuration(for: app.bundleIdentifier)
+        if pauseState == .oneHour || pauseState == .twentyFourHours,
+           let until = preferences.getPausedUntil(for: app.bundleIdentifier)
+        {
+            return "\(TRDate.time(until)) 自动恢复"
         }
         return nil
-    }
-
-    private func formatTime(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.timeStyle = .short
-        return formatter.string(from: date)
-    }
-
-    private func copyToClipboard(_ text: String) {
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
     }
 }
 

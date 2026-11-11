@@ -152,6 +152,13 @@ enum CoachSettings {
         set { defaults.set(newValue, forKey: "typeright.pinyinEnabled") }
     }
 
+    /// 设置 › 通用 › 在菜单栏显示图标. TypeRight has no Dock icon, so while this is off the way
+    /// back in is opening the app again (see TRMenuBarIcon).
+    static var menuBarIconShown: Bool {
+        get { defaults.object(forKey: "typeright.menuBarIcon") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "typeright.menuBarIcon") }
+    }
+
     /// "us" or "uk": the IPA and the voice.
     static var accent: String {
         get { defaults.string(forKey: "typeright.accent") ?? "us" }

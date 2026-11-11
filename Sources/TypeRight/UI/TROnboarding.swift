@@ -105,9 +105,12 @@ struct TROnboardingView: View {
                 .buttonStyle(.plain)
             }
             Spacer()
-            Button("跳过，以后在菜单栏图标里接着设", action: finish)
-                .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(TR.text3)
-                .padding(.bottom, 18).padding(.horizontal, 6)
+            // On the last step 完成 does the same, so 跳过 would only be a second way out.
+            if step != .done {
+                Button("跳过，以后在菜单栏图标里接着设", action: finish)
+                    .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(TR.text2)
+                    .padding(.bottom, 18).padding(.horizontal, 6)
+            }
         }
         .padding(.horizontal, 10)
         .frame(width: 230)
@@ -137,10 +140,14 @@ struct TROnboardingView: View {
         }
     }
 
+    /// Lead paragraphs stop at 560 wide, so no line ends with two lonely characters.
+    static let leadWidth: CGFloat = 560
+
     private func heading(_ title: String, _ text: String) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(title).font(.system(size: 22, weight: .semibold)).foregroundStyle(TR.text)
             Text(text).font(.system(size: 13)).foregroundStyle(TR.text2).lineSpacing(3).fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: Self.leadWidth, alignment: .leading)
         }
     }
 
@@ -150,8 +157,9 @@ struct TROnboardingView: View {
             heading("放心用英文打字，打错了有人兜着",
                     "在任何 App 里照常打英文。下面三种时刻，TypeRight 会在旁边弹一个小框，按 Tab 就改好；不想改就接着打，框自己走开。")
             VStack(alignment: .leading, spacing: 16) {
-                feature("textformat.abc", "拼错一个词", "tomorow → tomorrow，打完这个词就弹，在本机查，不用等")
-                feature("character.bubble", "不会说，先打中文或拼音", "预约 / yuyue → book /bʊk/，带发音")
+                // Not textformat.abc / character.*: those symbols turn into Chinese characters on a Chinese system.
+                feature("pencil.line", "拼错一个词", "tomorow → tomorrow，打完这个词就弹，在本机查，不用等")
+                feature("text.bubble", "不会说，先打中文或拼音", "预约 / yuyue → book /bʊk/，带发音")
                 feature("text.badge.checkmark", "一句打完", "查整句语法，改动处标出来，配一句中文讲解")
             }
         }
@@ -163,7 +171,7 @@ struct TROnboardingView: View {
                 .frame(width: 32, height: 32).background(TR.fixSoft, in: RoundedRectangle(cornerRadius: 8))
             VStack(alignment: .leading, spacing: 3) {
                 Text(title).font(.system(size: 13, weight: .medium)).foregroundStyle(TR.text)
-                Text(text).font(.system(size: 12.5)).foregroundStyle(TR.text2)
+                Text(text).font(.system(size: 12)).foregroundStyle(TR.text2)
             }
         }
     }
@@ -209,6 +217,8 @@ struct TROnboardingView: View {
             Text("\(n)").font(.system(size: 11, weight: .medium)).foregroundStyle(TR.text2)
                 .frame(width: 20, height: 20).overlay(Circle().strokeBorder(TR.line2, lineWidth: 1))
             Text(text).font(.system(size: 13)).foregroundStyle(TR.text).padding(.top, 1)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: Self.leadWidth, alignment: .leading)
         }
     }
 
@@ -216,7 +226,7 @@ struct TROnboardingView: View {
         VStack(alignment: .leading, spacing: 20) {
             heading("选一个 AI",
                     "中文变英文、整句检查要用 AI。自带 Key 永久免费，请求从你的 Mac 直接发给你选的那家。不填也能用：拼写照样查。")
-            TRAISettings()
+            TRAISettings(showsIntro: false)
         }
     }
 
@@ -225,8 +235,8 @@ struct TROnboardingView: View {
             heading("整句翻译键",
                     "中英混打时，中文会自己变成英文。整句都是中文时（比如和朋友聊天）不会弹；想把这句变成英文，按你选的这个键。")
             TRGroup {
-                TRRow(title: "整句翻译", note: "要带 ⌘、⌥、⌃ 或 ⇧；不设也行，以后在设置里改", last: true) {
-                    KeyboardShortcuts.Recorder("", name: translateKey)
+                TRRow(title: "整句翻译", note: "点键帽，按下你顺手的组合键，要带 ⌘、⌥、⌃ 或 ⇧；不设也行，以后在设置里改", last: true) {
+                    TRShortcutRecorder(name: translateKey)
                 }
             }
         }
@@ -237,13 +247,22 @@ struct TROnboardingView: View {
             heading("好了，去打一句试试",
                     "打开微信、邮件或者备忘录，照常打英文。拼错一个词、打一个中文词、打完一句，都会弹出来。TypeRight 平时只在菜单栏里，点羽毛图标能打开错题本和设置。")
             VStack(alignment: .leading, spacing: 8) {
-                Text("可以先打这句：").font(.system(size: 12.5)).foregroundStyle(TR.text2)
-                Text("I want to 预约 a meeting room tomorow because I has a question.")
-                    .font(.system(size: 14, design: .monospaced)).foregroundStyle(TR.text)
+                Text("可以先打这句，标出来的三处都会弹：").font(.system(size: 12)).foregroundStyle(TR.text2)
+                Text(TRMarked.text([("I want to ", false), ("预约", true), (" a meeting room ", false), ("tomorow", true),
+                                    (" because ", false), ("I has", true), (" a question.", false)]))
+                    .font(.system(size: 15)).foregroundStyle(TR.text)
+                    .lineSpacing(4)
                     .textSelection(.enabled)
                     .padding(12).frame(maxWidth: .infinity, alignment: .leading)
                     .background(TR.card, in: RoundedRectangle(cornerRadius: 8))
                     .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(TR.line, lineWidth: 0.5))
+            }
+            if !isAccessGranted {
+                HStack(spacing: 10) {
+                    TRStatusDot(color: TR.warn, text: "辅助功能还没开，弹框不会出来")
+                    Button("回去开") { step = .access }
+                        .buttonStyle(TRPlainButtonStyle())
+                }
             }
         }
     }
@@ -258,13 +277,19 @@ struct TROnboardingView: View {
                 Button("上一步") { step = TROnboardingStep(rawValue: step.rawValue - 1) ?? .welcome }
                     .buttonStyle(TRPlainButtonStyle())
             }
-            Button(nextTitle) {
-                if step == .done { finish() } else { step = TROnboardingStep(rawValue: step.rawValue + 1) ?? .done }
+            // One solid button per screen: while access is not given, 打开系统设置 is the solid one.
+            if step == .access, !isAccessGranted {
+                Button(nextTitle, action: next).buttonStyle(TRPlainButtonStyle())
+            } else {
+                Button(nextTitle, action: next).buttonStyle(TRInkButtonStyle())
             }
-            .buttonStyle(TRInkButtonStyle())
         }
         .padding(.horizontal, 24)
         .frame(height: 60)
+    }
+
+    private func next() {
+        if step == .done { finish() } else { step = TROnboardingStep(rawValue: step.rawValue + 1) ?? .done }
     }
 
     private var footerNote: String {

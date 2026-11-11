@@ -35,253 +35,171 @@ struct ResourceMonitoringView: View {
     }
 
     var body: some View {
-        Section {
-            VStack(alignment: .leading, spacing: 16) {
-                // Header with time range selector
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Image(systemName: "chart.xyaxis.line")
-                            .font(.title2)
-                            .foregroundColor(.blue)
-                        Text("CPU 和内存")
-                            .font(.headline)
-                        Spacer()
-                        Picker("", selection: $selectedTimeRange) {
-                            ForEach(ResourceTimeRange.allCases, id: \.self) { range in
-                                Text(range.rawValue).tag(range)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                        .labelsHidden()
+        TRGroup(title: "资源占用") {
+            TRRow(title: "CPU 和内存",
+                  note: "TypeRight 自己用了多少。CPU 负载 1.0 表示占满一个核；这台 Mac 有 \(ProcessInfo.processInfo.activeProcessorCount) 个核，全部占满是 \(ProcessInfo.processInfo.activeProcessorCount).0。") {
+                TRSegmented(options: ResourceTimeRange.allCases.map { ($0, $0.rawValue) }, selection: $selectedTimeRange)
+            }
+
+            let samples = filteredSamples()
+            VStack(alignment: .leading, spacing: 24) {
+                if samples.isEmpty {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("这段时间还没有数据").font(.system(size: 13)).foregroundStyle(TR.text)
+                        Text("TypeRight 启动时开始记录。").font(.system(size: 12)).foregroundStyle(TR.text2)
                     }
-
-                    Text("TypeRight 自己用了多少 CPU 和内存")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-
-                    HStack(spacing: 4) {
-                        Image(systemName: "info.circle")
-                            .font(.caption)
-                            .foregroundColor(.blue)
-                        Text("CPU 负载 1.0 表示占满一个核；这台 Mac 有 \(ProcessInfo.processInfo.activeProcessorCount) 个核，全部占满是 \(ProcessInfo.processInfo.activeProcessorCount).0。")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                    }
-                }
-
-                Divider()
-
-                // Metrics display
-                let samples = filteredSamples()
-                if !samples.isEmpty {
-                    // CPU Metrics
-                    cpuMetricsView(samples: samples)
-
-                    Divider()
-                        .padding(.vertical, 8)
-
-                    // Memory Metrics
-                    memoryMetricsView(samples: samples)
-
-                    Divider()
-                        .padding(.vertical, 8)
-
-                    // Log Volume Metrics
-                    logVolumeMetricsView()
                 } else {
-                    VStack(spacing: 12) {
-                        Image(systemName: "chart.bar.xaxis")
-                            .font(.largeTitle)
-                            .foregroundColor(.secondary)
-                        Text("这段时间还没有数据")
-                            .font(.subheadline)
-                            .foregroundColor(.secondary)
-                        Text("TypeRight 启动时开始记录。")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 24)
+                    cpuMetricsView(samples: samples)
+                    memoryMetricsView(samples: samples)
+                    logVolumeMetricsView()
                 }
             }
-        } header: {
-            Text("资源占用")
-                .font(.headline)
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    // MARK: - Shared chart pieces
+
+    /// Numbers in the charts: two decimals with a point, whatever the system's decimal separator.
+    static func load(_ value: Double) -> String {
+        String(format: "%.2f", value)
+    }
+
+    static func megabytes(_ bytes: UInt64) -> String {
+        String(format: "%.1f MB", Double(bytes) / 1_048_576)
+    }
+
+    private func chartTitle(_ text: String) -> some View {
+        Text(text).font(.system(size: 13, weight: .medium)).foregroundStyle(TR.text)
+    }
+
+    private func summary(_ values: [(String, String)], count: Int) -> some View {
+        HStack(alignment: .bottom, spacing: 24) {
+            ForEach(values, id: \.0) { label, value in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(label).font(.system(size: 12)).foregroundStyle(TR.text2)
+                    Text(value).font(.system(size: 13, weight: .medium).monospacedDigit()).foregroundStyle(TR.text)
+                }
+            }
+            Spacer()
+            Text("\(count) 个采样点").font(.system(size: 12)).foregroundStyle(TR.text2)
+        }
+    }
+
+    private var restartLegend: some View {
+        HStack(spacing: 6) {
+            Circle().fill(TR.text3).frame(width: 7, height: 7)
+            Text("灰点是 TypeRight 重启的时刻").font(.system(size: 12)).foregroundStyle(TR.text2)
+        }
+    }
+
+    private func peakLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 11).monospacedDigit())
+            .foregroundStyle(TR.text2)
+            .padding(.horizontal, 4)
+            .background(TR.card.opacity(0.9), in: RoundedRectangle(cornerRadius: 4))
+    }
+
+    private func tooltip(_ time: Date, _ lines: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(time, format: .dateTime.hour().minute().second()).font(.system(size: 11).monospacedDigit()).foregroundStyle(TR.text2)
+            ForEach(lines, id: \.self) { line in
+                Text(line).font(.system(size: 12, weight: .medium).monospacedDigit()).foregroundStyle(TR.text)
+            }
+        }
+        .padding(8)
+        .background(TR.pop, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(TR.line2, lineWidth: 0.5))
     }
 
     // MARK: - CPU Metrics View
 
     private func cpuMetricsView(samples: [ResourceMetricSample]) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Image(systemName: "cpu")
-                    .foregroundColor(.orange)
-                Text("CPU 负载")
-                    .font(.subheadline)
-                    .fontWeight(.semibold)
-                Spacer()
-            }
+            chartTitle("CPU 负载")
 
-            // CPU Load Line Chart
             let peakLoad = samples.map(\.processLoad).max() ?? 0.0
-            let maxLoad = peakLoad * 1.2 // Add 20% headroom
+            let maxLoad = max(peakLoad * 1.2, 0.05) // 20% headroom, and never a flat zero-high scale
 
-            // Add horizontal padding by extending the time domain
+            // Extend the time domain a little so the first and last points are not on the edge
             let rawTimeRange = (samples.first?.timestamp ?? Date()) ... (samples.last?.timestamp ?? Date())
             let duration = rawTimeRange.upperBound.timeIntervalSince(rawTimeRange.lowerBound)
-            let padding = duration * 0.045 // 4.5% padding on each side (~45pt equivalent)
+            let padding = duration * 0.045
             let timeRange = rawTimeRange.lowerBound.addingTimeInterval(-padding) ... rawTimeRange.upperBound.addingTimeInterval(padding)
 
-            // Filter app launches to only those within the raw time range (before padding)
             let visibleLaunches = statistics.appLaunchHistory.filter {
                 $0 >= rawTimeRange.lowerBound && $0 <= rawTimeRange.upperBound
             }
 
             Chart {
-                // CPU load line
                 ForEach(samples) { sample in
                     LineMark(
                         x: .value("Time", sample.timestamp),
                         y: .value("Load", sample.processLoad)
                     )
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(TR.text2)
+                    .lineStyle(StrokeStyle(lineWidth: 1.5))
                     .interpolationMethod(.monotone)
                 }
 
-                // Peak load line (dotted)
                 RuleMark(y: .value("Peak", peakLoad))
-                    .foregroundStyle(.red.opacity(0.5))
-                    .lineStyle(StrokeStyle(lineWidth: 2, dash: [5, 5]))
+                    .foregroundStyle(TR.text3)
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
                     .annotation(position: .top, alignment: .trailing) {
-                        Text("最高：\(String(format: "%.2f", peakLoad))")
-                            .font(.caption2)
-                            .foregroundColor(.red)
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 2)
-                            .background(.background.opacity(0.8))
-                            .cornerRadius(4)
+                        peakLabel("最高 \(Self.load(peakLoad))")
                     }
 
-                // App launch markers (dots)
                 ForEach(visibleLaunches, id: \.self) { launchTime in
                     PointMark(
                         x: .value("Launch", launchTime),
                         y: .value("Load", 0)
                     )
-                    .foregroundStyle(.gray)
-                    .symbolSize(60)
+                    .foregroundStyle(TR.text3)
+                    .symbolSize(30)
                 }
 
-                // Tooltip on hover
-                if let selectedCPUDate {
-                    // Find the nearest sample to the selected date
-                    let nearestSample = samples.min(by: { abs($0.timestamp.timeIntervalSince(selectedCPUDate)) < abs($1.timestamp.timeIntervalSince(selectedCPUDate)) })
-                    if let selectedSample = nearestSample {
-                        RuleMark(x: .value("Selected", selectedSample.timestamp))
-                            .foregroundStyle(.gray.opacity(0.5))
-                            .lineStyle(StrokeStyle(lineWidth: 1, dash: [5, 5]))
-                            .annotation(position: .top, alignment: .center) {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(selectedSample.timestamp, format: .dateTime.hour().minute().second())
-                                        .font(.caption2)
-                                        .foregroundColor(.secondary)
-                                    Text("负载：\(String(format: "%.2f", selectedSample.processLoad))")
-                                        .font(.callout)
-                                        .fontWeight(.bold)
-                                        .foregroundColor(.orange)
-                                    if let sys1m = selectedSample.systemLoad1m {
-                                        Text("系统：\(String(format: "%.2f", sys1m))")
-                                            .font(.caption2)
-                                            .foregroundColor(.secondary)
-                                    }
-                                }
-                                .padding(8)
-                                .background(.background)
-                                .cornerRadius(8)
-                                .shadow(radius: 3)
-                            }
-                    }
+                if let selectedCPUDate,
+                   let selectedSample = samples.min(by: { abs($0.timestamp.timeIntervalSince(selectedCPUDate)) < abs($1.timestamp.timeIntervalSince(selectedCPUDate)) })
+                {
+                    RuleMark(x: .value("Selected", selectedSample.timestamp))
+                        .foregroundStyle(TR.line2)
+                        .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                        .annotation(position: .top, alignment: .center) {
+                            tooltip(selectedSample.timestamp,
+                                    ["负载 \(Self.load(selectedSample.processLoad))"]
+                                        + (selectedSample.systemLoad1m.map { ["系统 \(Self.load($0))"] } ?? []))
+                        }
                 }
             }
             .chartXSelection(value: $selectedCPUDate)
             .chartXScale(domain: timeRange)
+            .chartXAxis {
+                AxisMarks { _ in
+                    AxisGridLine().foregroundStyle(TR.line)
+                    AxisValueLabel().font(.system(size: 11).monospacedDigit()).foregroundStyle(TR.text2)
+                }
+            }
             .chartYAxis {
                 AxisMarks(position: .leading) { value in
                     AxisValueLabel {
                         if let load = value.as(Double.self) {
-                            Text(String(format: "%.1f", load))
+                            Text(Self.load(load)).font(.system(size: 11).monospacedDigit()).foregroundStyle(TR.text2)
                         }
                     }
-                    AxisGridLine()
+                    AxisGridLine().foregroundStyle(TR.line)
                 }
             }
             .chartYScale(domain: 0 ... maxLoad)
-            .frame(height: 200)
+            .frame(height: 180)
 
-            // Summary statistics
             let loadValues = samples.map(\.processLoad)
             let avgLoad = loadValues.reduce(0, +) / Double(loadValues.count)
-            let medianLoad = median(loadValues)
-            HStack(spacing: 16) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("最低")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                    Text(String(format: "%.2f", loadValues.min() ?? 0))
-                        .font(.callout)
-                        .fontWeight(.semibold)
-                        .foregroundColor(.green)
-                }
+            summary([("最低", Self.load(loadValues.min() ?? 0)), ("最高", Self.load(loadValues.max() ?? 0)),
+                     ("平均", Self.load(avgLoad)), ("中位", Self.load(median(loadValues)))], count: samples.count)
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("最高")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                    Text(String(format: "%.2f", loadValues.max() ?? 0))
-                        .font(.callout)
-                        .fontWeight(.semibold)
-                        .foregroundColor(.red)
-                }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("平均")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                    Text(String(format: "%.2f", avgLoad))
-                        .font(.callout)
-                        .fontWeight(.semibold)
-                        .foregroundColor(.orange)
-                }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("中位")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                    Text(String(format: "%.2f", medianLoad))
-                        .font(.callout)
-                        .fontWeight(.semibold)
-                        .foregroundColor(.purple)
-                }
-
-                Spacer()
-
-                Text("\(samples.count) 个采样点")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-            }
-
-            // Legend for app restart markers
-            if !visibleLaunches.isEmpty {
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(.gray)
-                        .frame(width: 8, height: 8)
-                    Text("灰点是 TypeRight 重启的时刻")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
-            }
+            if !visibleLaunches.isEmpty { restartLegend }
         }
     }
 
@@ -289,169 +207,85 @@ struct ResourceMonitoringView: View {
 
     private func memoryMetricsView(samples: [ResourceMetricSample]) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Image(systemName: "memorychip")
-                    .foregroundColor(.blue)
-                Text("内存")
-                    .font(.subheadline)
-                    .fontWeight(.semibold)
-                Spacer()
-            }
+            chartTitle("内存")
 
-            // Memory Line Chart
             let maxMemoryMB = Double(samples.map(\.memoryBytes).max() ?? 0) / 1_048_576
             let minMemoryMB = Double(samples.map(\.memoryBytes).min() ?? 0) / 1_048_576
 
-            // Add horizontal padding by extending the time domain
             let rawTimeRange = (samples.first?.timestamp ?? Date()) ... (samples.last?.timestamp ?? Date())
             let duration = rawTimeRange.upperBound.timeIntervalSince(rawTimeRange.lowerBound)
-            let padding = duration * 0.045 // 4.5% padding on each side (~45pt equivalent)
+            let padding = duration * 0.045
             let timeRange = rawTimeRange.lowerBound.addingTimeInterval(-padding) ... rawTimeRange.upperBound.addingTimeInterval(padding)
 
-            // Filter app launches to only those within the raw time range (before padding)
             let visibleLaunches = statistics.appLaunchHistory.filter {
                 $0 >= rawTimeRange.lowerBound && $0 <= rawTimeRange.upperBound
             }
 
             Chart {
-                // Memory line
                 ForEach(samples) { sample in
                     LineMark(
                         x: .value("Time", sample.timestamp),
-                        y: .value("Memory", Double(sample.memoryBytes) / 1_048_576) // Convert to MB
+                        y: .value("Memory", Double(sample.memoryBytes) / 1_048_576)
                     )
-                    .foregroundStyle(.blue)
+                    .foregroundStyle(TR.text2)
+                    .lineStyle(StrokeStyle(lineWidth: 1.5))
                     .interpolationMethod(.monotone)
                 }
 
-                // Peak memory line (dotted)
                 RuleMark(y: .value("Peak", maxMemoryMB))
-                    .foregroundStyle(.red.opacity(0.5))
-                    .lineStyle(StrokeStyle(lineWidth: 2, dash: [5, 5]))
+                    .foregroundStyle(TR.text3)
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
                     .annotation(position: .top, alignment: .trailing) {
-                        Text("最高：\(Int(maxMemoryMB)) MB")
-                            .font(.caption2)
-                            .foregroundColor(.red)
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 2)
-                            .background(.background.opacity(0.8))
-                            .cornerRadius(4)
+                        peakLabel("最高 \(String(format: "%.1f MB", maxMemoryMB))")
                     }
 
-                // App launch markers (dots)
                 ForEach(visibleLaunches, id: \.self) { launchTime in
                     PointMark(
                         x: .value("Launch", launchTime),
                         y: .value("Memory", minMemoryMB)
                     )
-                    .foregroundStyle(.gray)
-                    .symbolSize(60)
+                    .foregroundStyle(TR.text3)
+                    .symbolSize(30)
                 }
 
-                // Tooltip on hover
-                if let selectedMemoryDate {
-                    // Find the nearest sample to the selected date
-                    let nearestSample = samples.min(by: { abs($0.timestamp.timeIntervalSince(selectedMemoryDate)) < abs($1.timestamp.timeIntervalSince(selectedMemoryDate)) })
-                    if let selectedSample = nearestSample {
-                        RuleMark(x: .value("Selected", selectedSample.timestamp))
-                            .foregroundStyle(.gray.opacity(0.5))
-                            .lineStyle(StrokeStyle(lineWidth: 1, dash: [5, 5]))
-                            .annotation(position: .top, alignment: .center) {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(selectedSample.timestamp, format: .dateTime.hour().minute().second())
-                                        .font(.caption2)
-                                        .foregroundColor(.secondary)
-                                    Text(ByteCountFormatter.string(fromByteCount: Int64(selectedSample.memoryBytes), countStyle: .memory))
-                                        .font(.callout)
-                                        .fontWeight(.bold)
-                                        .foregroundColor(.blue)
-                                }
-                                .padding(8)
-                                .background(.background)
-                                .cornerRadius(8)
-                                .shadow(radius: 3)
-                            }
-                    }
+                if let selectedMemoryDate,
+                   let selectedSample = samples.min(by: { abs($0.timestamp.timeIntervalSince(selectedMemoryDate)) < abs($1.timestamp.timeIntervalSince(selectedMemoryDate)) })
+                {
+                    RuleMark(x: .value("Selected", selectedSample.timestamp))
+                        .foregroundStyle(TR.line2)
+                        .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                        .annotation(position: .top, alignment: .center) {
+                            tooltip(selectedSample.timestamp, [Self.megabytes(selectedSample.memoryBytes)])
+                        }
                 }
             }
             .chartXSelection(value: $selectedMemoryDate)
             .chartXScale(domain: timeRange)
+            .chartXAxis {
+                AxisMarks { _ in
+                    AxisGridLine().foregroundStyle(TR.line)
+                    AxisValueLabel().font(.system(size: 11).monospacedDigit()).foregroundStyle(TR.text2)
+                }
+            }
             .chartYAxis {
                 AxisMarks(position: .leading) { value in
                     AxisValueLabel {
                         if let mb = value.as(Double.self) {
-                            Text("\(Int(mb)) MB")
+                            Text("\(Int(mb)) MB").font(.system(size: 11).monospacedDigit()).foregroundStyle(TR.text2)
                         }
                     }
-                    AxisGridLine()
+                    AxisGridLine().foregroundStyle(TR.line)
                 }
             }
             .chartYScale(domain: (minMemoryMB * 0.9) ... (maxMemoryMB * 1.1))
-            .frame(height: 200)
+            .frame(height: 180)
 
-            // Summary statistics
             let memoryValues = samples.map(\.memoryBytes)
             let avgBytes = memoryValues.reduce(0, +) / UInt64(memoryValues.count)
-            let medianBytes = medianUInt64(memoryValues)
-            HStack(spacing: 16) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("最低")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                    Text(ByteCountFormatter.string(fromByteCount: Int64(memoryValues.min() ?? 0), countStyle: .memory))
-                        .font(.callout)
-                        .fontWeight(.semibold)
-                        .foregroundColor(.green)
-                }
+            summary([("最低", Self.megabytes(memoryValues.min() ?? 0)), ("最高", Self.megabytes(memoryValues.max() ?? 0)),
+                     ("平均", Self.megabytes(avgBytes)), ("中位", Self.megabytes(medianUInt64(memoryValues)))], count: samples.count)
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("最高")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                    Text(ByteCountFormatter.string(fromByteCount: Int64(memoryValues.max() ?? 0), countStyle: .memory))
-                        .font(.callout)
-                        .fontWeight(.semibold)
-                        .foregroundColor(.red)
-                }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("平均")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                    Text(ByteCountFormatter.string(fromByteCount: Int64(avgBytes), countStyle: .memory))
-                        .font(.callout)
-                        .fontWeight(.semibold)
-                        .foregroundColor(.blue)
-                }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("中位")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                    Text(ByteCountFormatter.string(fromByteCount: Int64(medianBytes), countStyle: .memory))
-                        .font(.callout)
-                        .fontWeight(.semibold)
-                        .foregroundColor(.purple)
-                }
-
-                Spacer()
-
-                Text("\(samples.count) 个采样点")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-            }
-
-            // Legend for app restart markers
-            if !visibleLaunches.isEmpty {
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(.gray)
-                        .frame(width: 8, height: 8)
-                    Text("灰点是 TypeRight 重启的时刻")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
-            }
+            if !visibleLaunches.isEmpty { restartLegend }
         }
     }
 
@@ -464,22 +298,12 @@ struct ResourceMonitoringView: View {
         let minLevel = Logger.minimumLogLevel
 
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Image(systemName: "doc.text.magnifyingglass")
-                    .foregroundColor(.purple)
-                Text("日志条数")
-                    .font(.subheadline)
-                    .fontWeight(.semibold)
-                Spacer()
-            }
+            chartTitle("日志条数")
 
             if totalLogs == 0 {
-                Text("还没有日志")
-                    .foregroundColor(.secondary)
-                    .font(.subheadline)
-                    .padding(.vertical, 8)
+                Text("还没有日志").font(.system(size: 12)).foregroundStyle(TR.text2)
             } else {
-                // Only consider counts for enabled levels when calculating max
+                // Only levels that are written count toward the longest bar
                 let enabledCounts = [
                     minLevel <= .critical ? counts.critical : 0,
                     minLevel <= .error ? counts.error : 0,
@@ -490,44 +314,34 @@ struct ResourceMonitoringView: View {
                 ]
                 let maxCount = max(enabledCounts.max() ?? 1, 1)
 
-                VStack(alignment: .leading, spacing: 10) {
-                    // Only show levels at or above the minimum configured level
+                VStack(alignment: .leading, spacing: 8) {
                     if minLevel <= .critical {
-                        LogVolumeRow(label: "严重", count: counts.critical, maxCount: maxCount, color: .red)
+                        LogVolumeRow(label: "严重", count: counts.critical, maxCount: maxCount)
                             .help("没法恢复、要马上处理的错误")
                     }
-
                     if minLevel <= .error {
-                        LogVolumeRow(label: "错误", count: counts.error, maxCount: maxCount, color: .orange)
+                        LogVolumeRow(label: "错误", count: counts.error, maxCount: maxCount)
                             .help("影响功能的失败")
                     }
-
                     if minLevel <= .warning {
-                        LogVolumeRow(label: "警告", count: counts.warning, maxCount: maxCount, color: .yellow)
+                        LogVolumeRow(label: "警告", count: counts.warning, maxCount: maxCount)
                             .help("能恢复的问题，比如换了备用接口或超时")
                     }
-
                     if minLevel <= .info {
-                        LogVolumeRow(label: "信息", count: counts.info, maxCount: maxCount, color: .blue)
+                        LogVolumeRow(label: "信息", count: counts.info, maxCount: maxCount)
                             .help("重要的节点，比如启动、查完一段")
                     }
-
                     if minLevel <= .debug {
-                        LogVolumeRow(label: "调试", count: counts.debug, maxCount: maxCount, color: .gray)
+                        LogVolumeRow(label: "调试", count: counts.debug, maxCount: maxCount)
                             .help("排查问题用的日常记录")
                     }
-
                     if minLevel <= .trace {
-                        LogVolumeRow(label: "追踪", count: counts.trace, maxCount: maxCount, color: Color.gray.opacity(0.5))
+                        LogVolumeRow(label: "追踪", count: counts.trace, maxCount: maxCount)
                             .help("鼠标移动这类很频繁的事件")
                     }
                 }
-                .padding(.vertical, 4)
 
-                Text("一共 \(totalLogs) 条")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .padding(.top, 4)
+                Text("一共 \(totalLogs) 条").font(.system(size: 12)).foregroundStyle(TR.text2)
             }
         }
     }
@@ -606,106 +420,39 @@ struct ResourceMonitoringView: View {
             return sorted[sorted.count / 2]
         }
     }
-
-    // MARK: - Helper Views
-
-    private func loadBadge(_ label: String, value: Double) -> some View {
-        VStack(spacing: 2) {
-            Text(label)
-                .font(.caption2)
-                .foregroundColor(.secondary)
-            Text(String(format: "%.1f%%", value))
-                .font(.caption)
-                .fontWeight(.semibold)
-                .foregroundColor(loadColor(value))
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(Color.secondary.opacity(0.1))
-        .cornerRadius(6)
-    }
-
-    private func loadColor(_ value: Double) -> Color {
-        switch value {
-        case 0 ..< 25: .green
-        case 25 ..< 50: .yellow
-        case 50 ..< 75: .orange
-        default: .red
-        }
-    }
-
-    private func percentileRow(_ label: String, value: Double, max: Double, color: Color, isPercent: Bool) -> some View {
-        HStack(spacing: 8) {
-            Text(label)
-                .font(.caption)
-                .frame(width: 40, alignment: .leading)
-                .foregroundColor(.secondary)
-
-            GeometryReader { geometry in
-                ZStack(alignment: .leading) {
-                    Rectangle()
-                        .fill(Color.secondary.opacity(0.15))
-                    Rectangle()
-                        .fill(color)
-                        .frame(width: max > 0 ? geometry.size.width * CGFloat(value / max) : 0)
-                }
-            }
-            .frame(height: 6)
-            .cornerRadius(3)
-
-            if isPercent {
-                Text(String(format: "%.1f%%", value))
-                    .font(.caption)
-                    .frame(width: 50, alignment: .trailing)
-                    .monospacedDigit()
-            } else {
-                Text(ByteCountFormatter.string(fromByteCount: Int64(value), countStyle: .memory))
-                    .font(.caption)
-                    .frame(width: 70, alignment: .trailing)
-                    .monospacedDigit()
-            }
-        }
-    }
 }
 
 // MARK: - Log Volume Helper Views
 
-/// Horizontal bar row for log volume by severity (matches LatencyRow style)
+/// One bar per log level, all in one neutral color: the levels are not a traffic light.
 private struct LogVolumeRow: View {
     let label: String
     let count: Int
     let maxCount: Int
-    let color: Color
 
     var body: some View {
-        HStack {
+        HStack(spacing: 12) {
             Text(label)
-                .font(.subheadline)
-                .foregroundColor(.secondary)
-                .frame(width: 70, alignment: .leading)
+                .font(.system(size: 12))
+                .foregroundStyle(TR.text2)
+                .frame(width: 40, alignment: .leading)
 
-            // Visual bar indicator
             GeometryReader { geometry in
-                HStack(spacing: 4) {
-                    // Bar (scaled relative to max value)
-                    let percentage = maxCount > 0 ? (Double(count) / Double(maxCount)) : 0
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(color.opacity(0.5))
-                        .frame(width: geometry.size.width * 0.75 * percentage)
-                        .frame(height: 6)
-                        .accessibilityHidden(true)
-
-                    Spacer()
-
-                    // Value
-                    Text("\(count)")
-                        .font(.system(.subheadline, design: .monospaced))
-                        .fontWeight(.medium)
-                        // swiftlint:disable:next empty_count
-                        .foregroundColor(count > 0 ? color : .secondary) // count is Int, not collection
+                let share = maxCount > 0 ? Double(count) / Double(maxCount) : 0
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 3).fill(TR.fill)
+                    RoundedRectangle(cornerRadius: 3).fill(TR.line2)
+                        .frame(width: geometry.size.width * share)
                 }
+                .accessibilityHidden(true)
             }
-            .frame(height: 20)
+            .frame(height: 6)
+
+            Text("\(count)")
+                .font(.system(size: 12).monospacedDigit())
+                // swiftlint:disable:next empty_count
+                .foregroundStyle(count > 0 ? TR.text : TR.text2) // count is Int, not collection
+                .frame(width: 56, alignment: .trailing)
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(label)：\(count) 条")

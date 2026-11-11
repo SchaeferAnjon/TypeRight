@@ -74,6 +74,10 @@ final class TRSettingsWindowController: ObservableObject {
 }
 
 struct TRSettingsView: View {
+    /// Page header, page content and 高级's tab bar share one left edge.
+    static let gutter: CGFloat = 28
+    static let columnWidth: CGFloat = 720
+
     @ObservedObject var controller: TRSettingsWindowController
     /// Screenshots put pages with made-up data here; the window shows the real pages.
     var samplePage: ((TRSettingsPage) -> AnyView?)? = nil
@@ -97,14 +101,16 @@ struct TRSettingsView: View {
                     Text(controller.page.title).font(.system(size: 17, weight: .semibold)).foregroundStyle(TR.text)
                     Spacer()
                 }
-                .padding(.horizontal, 28).frame(height: 52)
+                .padding(.horizontal, Self.gutter).frame(height: 52)
                 Rectangle().fill(TR.line).frame(height: 0.5)
                 if controller.page == .advanced {
                     samplePage?(.advanced) ?? AnyView(PreferencesView())
                 } else {
                     ScrollView {
                         (samplePage?(controller.page) ?? AnyView(page))
-                            .padding(.horizontal, 32).padding(.vertical, 24).frame(maxWidth: 720)
+                            .padding(.horizontal, TRSettingsView.gutter).padding(.vertical, 24)
+                            .frame(maxWidth: TRSettingsView.columnWidth, alignment: .leading)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
             }
@@ -134,6 +140,7 @@ struct TRGeneralSettings: View {
     @State private var pinyin = CoachSettings.pinyinEnabled
     @State private var accent = CoachSettings.accent
     @State private var language = CoachSettings.explainLanguage
+    @State private var menuBarIcon = CoachSettings.menuBarIconShown
 
     private static let languages = ["简体中文", "繁體中文", "English", "Deutsch", "日本語", "한국어", "Français", "Español", "Italiano"]
 
@@ -158,8 +165,7 @@ struct TRGeneralSettings: View {
                         .onChange(of: pinyin) { CoachSettings.pinyinEnabled = $0 }
                 }
                 TRRow(title: "弹框放在哪", note: "贴在那个词下面，下面放不下就放上面", last: true) {
-                    Text("贴词小卡").font(.system(size: 12)).foregroundStyle(TR.text2)
-                        .padding(.horizontal, 8).frame(height: 22).background(TR.fill, in: RoundedRectangle(cornerRadius: 5))
+                    Text("贴词小卡").font(.system(size: 13)).foregroundStyle(TR.text2)
                 }
             }
             TRGroup(title: "讲解和发音") {
@@ -176,8 +182,12 @@ struct TRGeneralSettings: View {
                 }
             }
             TRGroup(title: "启动") {
-                TRRow(title: "开机时打开", last: true) {
+                TRRow(title: "开机时打开") {
                     LaunchAtLogin.Toggle { EmptyView() }.toggleStyle(SquareToggleStyle()).labelsHidden()
+                }
+                TRRow(title: "在菜单栏显示图标", note: "关掉后，再打开 TypeRight 就进主窗口", last: true) {
+                    Toggle("", isOn: $menuBarIcon).toggleStyle(SquareToggleStyle()).labelsHidden()
+                        .onChange(of: menuBarIcon) { _, shown in TRMenuBarIcon.setShown(shown) }
                 }
             }
         }
@@ -203,13 +213,13 @@ struct TRAppSettings: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("关掉的 App 里 TypeRight 完全不看。终端和密码管理器默认就是关的。")
-                .font(.system(size: 12.5)).foregroundStyle(TR.text2)
+                .font(.system(size: 12)).foregroundStyle(TR.text2)
             TRGroup(title: "正在用的 App") {
                 ForEach(Array(apps.enumerated()), id: \.element.id) { i, app in
                     HStack(spacing: 10) {
                         Image(nsImage: app.icon).resizable().frame(width: 22, height: 22)
                         VStack(alignment: .leading, spacing: 1) {
-                            Text(app.name).font(.system(size: 13)).foregroundStyle(TR.text)
+                            Text(TRText.autospaced(app.name)).font(.system(size: 13)).foregroundStyle(TR.text)
                             Text(supportText(app.id)).font(.system(size: 12)).foregroundStyle(TR.text2)
                         }
                         Spacer()
@@ -273,19 +283,19 @@ struct TRKeySettings: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
             TRGroup(title: "弹框出来时") {
-                TRRow(title: "接受改法") { KeyCap(label: "Tab") }
-                TRRow(title: "不改，关掉") { KeyCap(label: "Esc") }
+                TRRow(title: "接受改法", note: "固定的键，不能换") { KeyCap(label: "Tab", look: .fixed) }
+                TRRow(title: "不改，关掉", note: "固定的键，不能换") { KeyCap(label: "Esc", look: .fixed) }
                 TRRow(title: "接着打字", note: "打两个字框就让开，不用按键", last: true) { EmptyView() }
             }
             TRGroup(title: "自己选的键") {
                 TRRow(title: "整句翻译", note: "整句都是中文时，按这个键把这句变成英文") {
-                    KeyboardShortcuts.Recorder("", name: translate)
+                    TRShortcutRecorder(name: translate)
                 }
                 TRRow(title: "暂停 / 继续", note: "所有 App 里暂停或继续弹框", last: true) {
-                    KeyboardShortcuts.Recorder("", name: pause)
+                    TRShortcutRecorder(name: pause)
                 }
             }
-            Text("快捷键要带 ⌘、⌥、⌃ 或 ⇧ 里至少一个。没设的键不会响。")
+            Text("点键帽，按下你想用的组合键，要带 ⌘、⌥、⌃ 或 ⇧ 里至少一个。设的时候按 Delete 清掉；没设的键不会响。")
                 .font(.system(size: 12)).foregroundStyle(TR.text2)
         }
     }
@@ -310,14 +320,20 @@ struct TRAISettings: View {
 
     enum TestState: Equatable { case idle, running, ok(String), failed(String) }
 
-    init(initialTest: TestState = .idle) {
+    /// The setup step says this in its own words above the list.
+    private let showsIntro: Bool
+
+    init(initialTest: TestState = .idle, showsIntro: Bool = true) {
         self.initialTest = initialTest
+        self.showsIntro = showsIntro
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text("中文变英文、整句检查要用 AI；拼写在这台 Mac 上查，不用 AI。Key 存在钥匙串里，请求从你的 Mac 直接发给你选的那家。")
-                .font(.system(size: 12.5)).foregroundStyle(TR.text2).fixedSize(horizontal: false, vertical: true)
+            if showsIntro {
+                Text("中文变英文、整句检查要用 AI；拼写在这台 Mac 上查，不用 AI。Key 存在钥匙串里，请求从你的 Mac 直接发给你选的那家。")
+                    .font(.system(size: 12)).foregroundStyle(TR.text2).fixedSize(horizontal: false, vertical: true)
+            }
             TRProviderList(selection: $provider)
                 .onChange(of: provider) { new in
                     saveKey()
@@ -334,11 +350,11 @@ struct TRAISettings: View {
                     HStack {
                         SecureField("粘贴 API Key", text: Binding(get: { key }, set: { typed($0) }))
                             .textFieldStyle(.roundedBorder)
-                            .font(.system(size: 12.5, design: .monospaced))
+                            .font(.system(size: 12, design: .monospaced))
                             .focused($keyFocused)
                             .onSubmit(saveKey)
                             .onChange(of: keyFocused) { _, focused in if !focused { saveKey() } }
-                        if let page = provider.keyPage { Link("去拿 Key", destination: page).font(.system(size: 12.5)) }
+                        if let page = provider.keyPage { TRInlineLink(title: "去拿 Key", url: page) }
                     }
                     TextField("模型（留空用 \(provider.defaultModel)）", text: $model)
                         .textFieldStyle(.roundedBorder)
@@ -352,7 +368,7 @@ struct TRAISettings: View {
                         case let .failed(text): Text(text).foregroundStyle(TR.text2).lineLimit(2)
                         }
                     }
-                    .font(.system(size: 12.5))
+                    .font(.system(size: 12))
                 }
                 .padding(14)
             }
@@ -438,14 +454,16 @@ struct TRProviderList: View {
                             Circle().strokeBorder(selection == p ? TR.fix : TR.line2, lineWidth: 1.2).frame(width: 15, height: 15)
                             if selection == p { Circle().fill(TR.fix).frame(width: 7, height: 7) }
                         }
-                        Text(p.displayName).font(.system(size: 13)).foregroundStyle(TR.text)
-                        Text(p.blurb).font(.system(size: 12)).foregroundStyle(TR.text2)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(p.displayName).font(.system(size: 13)).foregroundStyle(TR.text)
+                            Text(p.blurb).font(.system(size: 12)).foregroundStyle(TR.text2)
+                        }
                         Spacer()
                         if CoachKeyStore.shared.hasKey(p) {
-                            Text("已填 Key").font(.system(size: 12)).foregroundStyle(TR.fix)
+                            TRStatusDot(color: TR.ok, text: "已填 Key")
                         }
                     }
-                    .padding(.horizontal, 14).frame(height: 38)
+                    .padding(.horizontal, 14).padding(.vertical, 8).frame(minHeight: 48)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -483,7 +501,7 @@ struct TRPrivacySettings: View {
             TRGroup(title: "数据") {
                 TRRow(title: "清空错题本和生词本", note: "删掉这台 Mac 上记下的全部改动和生词，删了找不回来", last: true) {
                     Button("清空…") { confirmClear = true }
-                        .buttonStyle(.plain).font(.system(size: 13)).foregroundStyle(TR.danger)
+                        .buttonStyle(TRPlainButtonStyle(tint: TR.danger))
                 }
             }
         }
