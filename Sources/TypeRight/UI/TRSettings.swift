@@ -152,7 +152,7 @@ struct TRGeneralSettings: View {
                     Toggle("", isOn: $cards).toggleStyle(SquareToggleStyle()).labelsHidden()
                         .onChange(of: cards) { CoachSettings.cardsEnabled = $0 }
                 }
-                TRRow(title: "停下多久后弹", note: "拼错的词不用等，打完这个词就弹；中文和整句等你停一下") {
+                TRRow(title: "停下多久后弹", note: "拼错的词、打完的句子马上查；中文后面没再打字、句子没打句号时，等你停这么久") {
                     TRSegmented(options: [(0.5, "0.5 秒"), (0.8, "0.8 秒"), (1.5, "1.5 秒")], selection: $pause)
                         .onChange(of: pause) { CoachSettings.pauseSeconds = $0 }
                 }

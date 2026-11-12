@@ -64,23 +64,25 @@ final class TypeRightCoachTests: XCTestCase {
         XCTAssertEqual(CoachAI.stripCodeFence("Sure! {\"english\":\"book\"} hope it helps"), "{\"english\":\"book\"}")
     }
 
-    func testSentenceCheckDecodesWithMissingFields() throws {
-        let ok = try JSONDecoder().decode(CoachSentenceCheck.self, from: Data(#"{"ok": true}"#.utf8))
+    func testSentenceCheckReadsOkAndEdits() throws {
+        let ok = try XCTUnwrap(PartialJSON.parse(#"{"ok": true}"#).flatMap { CoachSentenceCheck.partial($0, original: "Fine.") })
         XCTAssertTrue(ok.ok)
         XCTAssertTrue(ok.changes.isEmpty)
 
-        let fix = try JSONDecoder().decode(CoachSentenceCheck.self, from: Data(#"""
-        {"ok": false, "corrected": "I have a question.", "changes": [{"from": "I has", "to": "I have", "why": "主语是 I，用 have"}]}
-        """#.utf8))
+        let json = try XCTUnwrap(PartialJSON.parse(#"""
+        {"ok": false, "edits": [{"from": "I has", "to": "I have"}], "notes": [{"why": "主语是 I，用 have", "type": "agreement"}]}
+        """#))
+        let fix = try XCTUnwrap(CoachSentenceCheck.partial(json, original: "Because I has a question."))
         XCTAssertFalse(fix.ok)
-        XCTAssertEqual(fix.corrected, "I have a question.")
-        XCTAssertEqual(fix.changes.first?.to, "I have")
+        XCTAssertEqual(fix.corrected, "Because I have a question.", "the corrected sentence is put together here")
+        XCTAssertEqual(fix.changes, [.init(from: "I has", to: "I have", why: "主语是 I，用 have", type: "agreement")])
     }
 
     func testTranslationNeedsEnglish() throws {
-        let t = try JSONDecoder().decode(CoachTranslation.self, from: Data(#"{"english": "book"}"#.utf8))
+        let t = try XCTUnwrap(PartialJSON.parse(#"{"english": "book"}"#).flatMap(CoachTranslation.partial))
         XCTAssertEqual(t.english, "book")
         XCTAssertEqual(t.ipa, "")
+        XCTAssertNil(PartialJSON.parse(#"{"english": "  ", "ipa": "/x/"}"#).flatMap(CoachTranslation.partial))
     }
 
     // MARK: Card actions

@@ -140,10 +140,13 @@ final class GrammarEngineFFITests: XCTestCase {
         let text = "This is a test sentence."
 
         // When: Analyzing text
+        let start = Date()
         let result = GrammarEngine.shared.analyzeText(text)
+        let elapsedMs = Date().timeIntervalSince(start) * 1000
 
-        // Then: Reported analysis time should be reasonable
-        XCTAssertGreaterThan(result.analysisTimeMs, 0, "Analysis time should be positive")
+        // Then: Reported analysis time should be reasonable. With the linter kept between analyses a
+        // short sentence takes under a millisecond, so the whole milliseconds reported may be 0.
+        XCTAssertLessThanOrEqual(Double(result.analysisTimeMs), elapsedMs + 1, "Reported time fits the time the call took")
         XCTAssertLessThan(result.analysisTimeMs, 10000, "Analysis time should be under 10 seconds")
     }
 

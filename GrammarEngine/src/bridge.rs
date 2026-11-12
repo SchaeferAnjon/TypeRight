@@ -89,6 +89,17 @@ mod ffi {
             check_unclosed_quotes: bool,
             check_dashes: bool,
         ) -> AnalysisResult;
+
+        fn is_known_word(
+            word: String,
+            dialect: String,
+            enable_internet_abbrev: bool,
+            enable_genz_slang: bool,
+            enable_it_terminology: bool,
+            enable_brand_names: bool,
+            enable_person_names: bool,
+            enable_last_names: bool,
+        ) -> bool;
     }
 }
 
@@ -102,7 +113,8 @@ fn read_process_memory(pid: Option<Pid>) -> u64 {
                 return 0;
             }
         };
-        sys.refresh_processes(ProcessesToUpdate::All, false);
+        // Only this process: refreshing every process on the Mac took about 12 ms, twice per analysis.
+        sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), false);
         return sys.process(pid).map(|p| p.memory()).unwrap_or(0);
     }
     0
@@ -307,6 +319,29 @@ fn initialize_logging(log_level: String) {
 #[no_mangle]
 pub extern "C" fn register_rust_log_callback(callback: SwiftLogCallback) {
     register_swift_callback(callback);
+}
+
+// FFI wrapper for the spelling card: whether Harper's dictionaries know a word.
+fn is_known_word(
+    word: String,
+    dialect: String,
+    enable_internet_abbrev: bool,
+    enable_genz_slang: bool,
+    enable_it_terminology: bool,
+    enable_brand_names: bool,
+    enable_person_names: bool,
+    enable_last_names: bool,
+) -> bool {
+    analyzer::is_known_word(
+        &word,
+        &dialect,
+        enable_internet_abbrev,
+        enable_genz_slang,
+        enable_it_terminology,
+        enable_brand_names,
+        enable_person_names,
+        enable_last_names,
+    )
 }
 
 // FFI wrapper that calls the analyzer and converts types

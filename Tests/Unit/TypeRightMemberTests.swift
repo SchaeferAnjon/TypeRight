@@ -426,7 +426,8 @@ class TypeRightMemberTestCase: XCTestCase {
     {
         let server = server
         let m = MemberService(api: api, defaults: defaults, tokens: .memory(token), device: { String(repeating: "ab", count: 32) },
-                              openURL: { [weak self] in self?.opened.append($0) }, send: { try server.handle($0) })
+                              openURL: { [weak self] in self?.opened.append($0) }, send: { try server.handle($0) },
+                              lines: CoachNet.lines(from: { try server.handle($0) }))
         m.ownKey = { ownKey }
         if let plan { m.plan = plan }
         m.pollInterval = .milliseconds(10)
@@ -506,7 +507,7 @@ final class TypeRightMemberServiceTests: TypeRightMemberTestCase {
         await dev.claimTrial()
         XCTAssertEqual(dev.state, .unavailable)
         XCTAssertEqual(dev.aiStatus, .memberBlocked(.unavailable))
-        let error = await caught { _ = try await dev.chat(Data(), use: UUID(), timeout: 15) }
+        let error = await caught { _ = try await dev.chatData(Data(), use: UUID(), timeout: 15) }
         XCTAssertEqual(error as? MemberError, .unavailable)
         XCTAssertTrue(server.requests.isEmpty)
     }
@@ -813,7 +814,7 @@ final class TypeRightMemberChatTests: TypeRightMemberTestCase {
         let m = make(token: "trd_one")
         await m.refresh()
         let use = UUID()
-        let data = try await m.chat(body(use), use: use, timeout: 15)
+        let data = try await m.chatData(body(use), use: use, timeout: 15)
         XCTAssertEqual(try JSONDecoder().decode(CoachTranslation.self, from: CoachAI.content(of: data)).english, "book")
         let sent = try XCTUnwrap(server.requests(to: "/v1/typeright/chat/completions").first)
         XCTAssertEqual(sent.httpMethod, "POST")
@@ -833,7 +834,7 @@ final class TypeRightMemberChatTests: TypeRightMemberTestCase {
         server.on("POST", "/v1/typeright/chat/completions", .init(body: chatOK))
         let m = make()
         let use = UUID()
-        _ = try await m.chat(body(use), use: use, timeout: 15)
+        _ = try await m.chatData(body(use), use: use, timeout: 15)
         XCTAssertEqual(server.paths, ["POST /v1/typeright/device", "POST /v1/typeright/chat/completions"])
         XCTAssertEqual(server.requests.last?.value(forHTTPHeaderField: "Authorization"), "Bearer trd_new")
         XCTAssertTrue(m.registered)
@@ -845,7 +846,7 @@ final class TypeRightMemberChatTests: TypeRightMemberTestCase {
                   .init(status: 503, body: #"{"error":{"code":"upstream","message":"会员 AI 服务暂时不可用"}}"#), .init(body: chatOK))
         let m = make(token: "trd_one")
         let use = UUID()
-        _ = try await m.chat(body(use), use: use, timeout: 15)
+        _ = try await m.chatData(body(use), use: use, timeout: 15)
         XCTAssertEqual(useIDs(), [use.uuidString.lowercased(), use.uuidString.lowercased()])
     }
 
@@ -854,7 +855,7 @@ final class TypeRightMemberChatTests: TypeRightMemberTestCase {
         server.on("POST", "/v1/typeright/chat/completions", .init(status: 503, body: #"{"error":{"code":"upstream","message":"x"}}"#))
         let m = make(token: "trd_one")
         let use = UUID()
-        let error = await caught { _ = try await m.chat(body(use), use: use, timeout: 15) }
+        let error = await caught { _ = try await m.chatData(body(use), use: use, timeout: 15) }
         XCTAssertEqual((error as? MemberError)?.code, "upstream")
         XCTAssertEqual((error as? MemberError)?.kind, .busy)
         XCTAssertEqual(useIDs(), Array(repeating: use.uuidString.lowercased(), count: 3))
@@ -867,7 +868,7 @@ final class TypeRightMemberChatTests: TypeRightMemberTestCase {
         server.on("POST", "/v1/typeright/device", .init(body: registration(token: "trd_two", trial: "existing")))
         let m = make(token: "trd_one")
         let use = UUID()
-        _ = try await m.chat(body(use), use: use, timeout: 15)
+        _ = try await m.chatData(body(use), use: use, timeout: 15)
         XCTAssertEqual(server.paths, ["POST /v1/typeright/chat/completions", "POST /v1/typeright/device", "POST /v1/typeright/chat/completions"])
         XCTAssertEqual(server.requests(to: "/v1/typeright/chat/completions").map { $0.value(forHTTPHeaderField: "Authorization") ?? "" },
                        ["Bearer trd_one", "Bearer trd_two"])
@@ -880,7 +881,7 @@ final class TypeRightMemberChatTests: TypeRightMemberTestCase {
         server.on("POST", "/v1/typeright/device", .init(status: 429, body: #"{"error":{"code":"re-register-limit","message":"约 3 小时后再试","resetAt":1793318400000}}"#))
         let m = make(token: "trd_one")
         let use = UUID()
-        let error = await caught { _ = try await m.chat(body(use), use: use, timeout: 15) }
+        let error = await caught { _ = try await m.chatData(body(use), use: use, timeout: 15) }
         XCTAssertEqual((error as? MemberError)?.code, "re-register-limit")
         XCTAssertEqual((error as? MemberError)?.kind, .tokenExpired)
         XCTAssertEqual(server.paths, ["POST /v1/typeright/chat/completions", "POST /v1/typeright/device"])
@@ -892,7 +893,7 @@ final class TypeRightMemberChatTests: TypeRightMemberTestCase {
         server.on("GET", "/v1/typeright/status", .init(body: trialStatus(left: 0)))
         let m = make(token: "trd_one")
         let use = UUID()
-        let error = await caught { _ = try await m.chat(body(use), use: use, timeout: 15) }
+        let error = await caught { _ = try await m.chatData(body(use), use: use, timeout: 15) }
         XCTAssertEqual((error as? MemberError)?.kind, .usedUp)
         XCTAssertEqual(server.paths, ["POST /v1/typeright/chat/completions", "GET /v1/typeright/status"])
         XCTAssertEqual(m.aiStatus, .memberBlocked(.trialUsedUp))
@@ -905,7 +906,7 @@ final class TypeRightMemberChatTests: TypeRightMemberTestCase {
         server.on("GET", "/v1/typeright/status", .init(body: memberBody(todayLeft: 0, reason: "daily-limit")))
         let m = make(token: "trd_one")
         let use = UUID()
-        let error = await caught { _ = try await m.chat(body(use), use: use, timeout: 15) }
+        let error = await caught { _ = try await m.chatData(body(use), use: use, timeout: 15) }
         let e = try XCTUnwrap(error as? MemberError)
         XCTAssertEqual(e.kind, .dailyLimit)
         XCTAssertEqual(e.resetAt, Date(timeIntervalSince1970: 1_793_318_400))
@@ -918,7 +919,7 @@ final class TypeRightMemberChatTests: TypeRightMemberTestCase {
         server.on("POST", "/v1/typeright/chat/completions", .init(error: URLError(.notConnectedToInternet)))
         let m = make(token: "trd_one")
         let use = UUID()
-        let error = await caught { _ = try await m.chat(body(use), use: use, timeout: 15) }
+        let error = await caught { _ = try await m.chatData(body(use), use: use, timeout: 15) }
         XCTAssertEqual((error as? MemberError)?.kind, .offline)
         XCTAssertEqual(server.requests.count, 1)
     }
@@ -930,7 +931,7 @@ final class TypeRightMemberChatTests: TypeRightMemberTestCase {
         let m = make(token: "trd_one")
         let use = UUID()
         let started = Date()
-        let error = await caught { _ = try await m.chat(body(use), use: use, timeout: 15) }
+        let error = await caught { _ = try await m.chatData(body(use), use: use, timeout: 15) }
         XCTAssertEqual((error as? MemberError)?.kind, .busy)
         XCTAssertEqual(server.requests.count, 1)
         XCTAssertLessThan(Date().timeIntervalSince(started), 2)
@@ -942,8 +943,15 @@ final class TypeRightMemberChatTests: TypeRightMemberTestCase {
         let m = make(token: "trd_one")
         for _ in 0 ..< 2 {
             guard case let .member(use)? = m.aiStatus.route() else { return XCTFail("member should route through the backend") }
-            _ = try await m.chat(body(use), use: use, timeout: 15)
+            _ = try await m.chatData(body(use), use: use, timeout: 15)
         }
         XCTAssertEqual(Set(useIDs()).count, 2)
+    }
+}
+
+extension MemberService {
+    /// A card's whole reply at once, for tests that look at it in one piece.
+    func chatData(_ body: Data, use: UUID, timeout: TimeInterval) async throws -> Data {
+        await CoachNet.body(of: try await chat(body, use: use, timeout: timeout))
     }
 }

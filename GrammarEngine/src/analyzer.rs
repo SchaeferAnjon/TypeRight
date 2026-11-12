@@ -4,13 +4,13 @@
 
 use crate::language_filter::LanguageFilter;
 use crate::slang_dict;
-use harper_core::spell::{MergedDictionary, MutableDictionary};
+use harper_core::spell::{Dictionary, MergedDictionary, MutableDictionary};
 use harper_core::{
     linting::{LintGroup, Linter},
     parsers::MarkdownOptions,
-    Dialect, Document,
+    CharStringExt, Dialect, Document,
 };
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, TryLockError};
 use std::time::Instant;
 use tracing;
 
@@ -89,6 +89,91 @@ fn get_or_build_dictionary(
     }
 
     (dictionary, false)
+}
+
+// MARK: - Linter Cache
+
+/// Everything a curated linter is configured from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LinterCacheKey {
+    dictionary: DictionaryCacheKey,
+    dialect: Dialect,
+    enforce_oxford_comma: bool,
+    check_ellipsis: bool,
+    check_unclosed_quotes: bool,
+    check_dashes: bool,
+}
+
+struct CachedLinter {
+    key: LinterCacheKey,
+    linter: LintGroup,
+}
+
+/// One linter kept between analyses. Building it costs a few milliseconds, and its caches (spelling
+/// suggestions per word, lints per unchanged sentence) are what make re-analysing text that is
+/// being typed cheap: without them every keystroke recomputed the suggestions for each misspelled
+/// word (40 to 90 ms in a three-word field). Analyses take turns on it.
+static LINTER_CACHE: Mutex<Option<CachedLinter>> = Mutex::new(None);
+
+fn new_linter(key: LinterCacheKey, dictionary: Arc<MergedDictionary>) -> LintGroup {
+    let mut linter = LintGroup::new_curated(dictionary, key.dialect);
+
+    // Configure individual rule toggles based on user preferences
+    // These allow fine-grained control over specific punctuation rules
+    if !key.enforce_oxford_comma {
+        linter.config.set_rule_enabled("OxfordComma", false);
+    }
+    if !key.check_ellipsis {
+        linter.config.set_rule_enabled("EllipsisLength", false);
+    }
+    if !key.check_unclosed_quotes {
+        linter.config.set_rule_enabled("UnclosedQuotes", false);
+    }
+    if !key.check_dashes {
+        linter.config.set_rule_enabled("Dashes", false);
+    }
+
+    // HARD-CODED: Always disable Harper's LongSentences rule (produces LintKind::Readability)
+    // We use our own ReadabilityCalculator instead, which provides:
+    // - Flesch Reading Ease score (not just word count > 40)
+    // - Target audience consideration
+    // - AI-powered simplification suggestions via Foundation Models
+    linter.config.set_rule_enabled("LongSentences", false);
+    linter
+}
+
+/// Whether Harper's dictionaries (with the chosen wordlists) know `word`, the way its spell
+/// checker decides: the exact word, its normalized form or that in lower case, in the dialect.
+pub fn is_known_word(
+    word: &str,
+    dialect_str: &str,
+    enable_internet_abbrev: bool,
+    enable_genz_slang: bool,
+    enable_it_terminology: bool,
+    enable_brand_names: bool,
+    enable_person_names: bool,
+    enable_last_names: bool,
+) -> bool {
+    let (dictionary, _) = get_or_build_dictionary(
+        enable_internet_abbrev,
+        enable_genz_slang,
+        enable_it_terminology,
+        enable_brand_names,
+        enable_person_names,
+        enable_last_names,
+    );
+    let dialect = parse_dialect(dialect_str);
+    let chars: Vec<char> = word.chars().collect();
+    let Some(metadata) = dictionary.get_word_metadata(&chars) else {
+        return false;
+    };
+    if !metadata.dialects.is_dialect_enabled(dialect) {
+        return false;
+    }
+    let normalized = chars.normalized();
+    dictionary.contains_exact_word(&chars)
+        || dictionary.contains_exact_word(normalized.as_ref())
+        || dictionary.contains_exact_word(normalized.to_lower().as_ref())
 }
 
 /// Build a merged dictionary with the specified wordlists
@@ -669,31 +754,49 @@ pub fn analyze_text(
     // --- PHASE 2: Linter Setup ---
     let linter_start = Instant::now();
 
-    // Initialize Harper linter with curated rules for selected dialect
-    // Clone the Arc so we can use the dictionary for both linting and document parsing
-    let mut linter = LintGroup::new_curated(dictionary.clone(), dialect);
-
-    // Configure individual rule toggles based on user preferences
-    // These allow fine-grained control over specific punctuation rules
-    if !enforce_oxford_comma {
-        linter.config.set_rule_enabled("OxfordComma", false);
-    }
-    if !check_ellipsis {
-        linter.config.set_rule_enabled("EllipsisLength", false);
-    }
-    if !check_unclosed_quotes {
-        linter.config.set_rule_enabled("UnclosedQuotes", false);
-    }
-    if !check_dashes {
-        linter.config.set_rule_enabled("Dashes", false);
-    }
-
-    // HARD-CODED: Always disable Harper's LongSentences rule (produces LintKind::Readability)
-    // We use our own ReadabilityCalculator instead, which provides:
-    // - Flesch Reading Ease score (not just word count > 40)
-    // - Target audience consideration
-    // - AI-powered simplification suggestions via Foundation Models
-    linter.config.set_rule_enabled("LongSentences", false);
+    let linter_key = LinterCacheKey {
+        dictionary: DictionaryCacheKey {
+            internet_abbrev: enable_internet_abbrev,
+            genz_slang: enable_genz_slang,
+            it_terminology: enable_it_terminology,
+            brand_names: enable_brand_names,
+            person_names: enable_person_names,
+            last_names: enable_last_names,
+        },
+        dialect,
+        enforce_oxford_comma,
+        check_ellipsis,
+        check_unclosed_quotes,
+        check_dashes,
+    };
+    // The analysis queue is serial, so the kept linter is normally free. Another analysis using
+    // it at the same moment (Sketch Pad, tests) gets a linter of its own instead of waiting. A
+    // panic while linting poisons the lock; the linter it guarded is then rebuilt.
+    let mut own_linter = None;
+    let mut cached_linter = match LINTER_CACHE.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(TryLockError::Poisoned(poisoned)) => {
+            LINTER_CACHE.clear_poison();
+            let mut guard = poisoned.into_inner();
+            *guard = None;
+            Some(guard)
+        }
+        Err(TryLockError::WouldBlock) => None,
+    };
+    let linter = match cached_linter.as_mut() {
+        Some(cache) => {
+            if cache.as_ref().is_some_and(|c| c.key != linter_key) {
+                **cache = None;
+            }
+            &mut cache
+                .get_or_insert_with(|| CachedLinter {
+                    key: linter_key,
+                    linter: new_linter(linter_key, dictionary.clone()),
+                })
+                .linter
+        }
+        None => own_linter.insert(new_linter(linter_key, dictionary.clone())),
+    };
 
     let linter_setup_ms = linter_start.elapsed().as_millis() as u64;
 
@@ -713,6 +816,7 @@ pub fn analyze_text(
     // Perform linting
     tracing::debug!("Running Harper linter");
     let lints = linter.lint(&document);
+    drop(cached_linter);
     let harper_lint_ms = lint_start.elapsed().as_millis() as u64;
     tracing::debug!(
         "Harper linter found {} lints ({}ms)",
@@ -1302,6 +1406,66 @@ mod tests {
         );
         assert_eq!(result.errors.len(), 0);
         assert_eq!(result.word_count, 0);
+    }
+
+    #[test]
+    fn test_known_words_follow_the_chosen_wordlists() {
+        let known = |word: &str, it_terms: bool| {
+            is_known_word(
+                word, "American", false, false, it_terms, false, false, false,
+            )
+        };
+        assert!(known("tomorrow", false));
+        assert!(known("Tomorrow", false), "capitalized at a sentence start");
+        assert!(!known("tomorow", false));
+        assert!(!known("recieve", false));
+        assert!(
+            known("kubernetes", true),
+            "IT terminology when that wordlist is on"
+        );
+        assert!(!known("kubernetes", false));
+    }
+
+    #[test]
+    fn test_reused_linter_gives_the_same_errors_and_follows_the_settings() {
+        let analyze = |text: &str, oxford: bool| {
+            analyze_text(
+                text,
+                "American",
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                vec![],
+                true,
+                oxford,
+                true,
+                true,
+                true,
+            )
+        };
+        let text = "I will send it tomorow and recieve it.";
+        let first = analyze(text, true);
+        let again = analyze(text, true);
+        let spans = |r: &AnalysisResult| {
+            r.errors
+                .iter()
+                .map(|e| (e.start, e.end, e.suggestions.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(spans(&first), spans(&again));
+        assert!(first.errors.iter().any(|e| e.category == "Spelling"));
+
+        let list = "We bought apples, pears and plums.";
+        let with_rule = analyze(list, true);
+        let without_rule = analyze(list, false);
+        assert!(
+            with_rule.errors.len() > without_rule.errors.len(),
+            "turning the Oxford comma rule off rebuilds the linter"
+        );
     }
 
     #[test]

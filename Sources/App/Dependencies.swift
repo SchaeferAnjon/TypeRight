@@ -45,6 +45,17 @@ protocol GrammarAnalyzing: Sendable {
         checkUnclosedQuotes: Bool,
         checkDashes: Bool
     ) -> GrammarAnalysisResult
+
+    func isKnownWord(
+        _ word: String,
+        dialect: String,
+        enableInternetAbbrev: Bool,
+        enableGenZSlang: Bool,
+        enableITTerminology: Bool,
+        enableBrandNames: Bool,
+        enablePersonNames: Bool,
+        enableLastNames: Bool
+    ) -> Bool
 }
 
 /// Protocol for user preferences access

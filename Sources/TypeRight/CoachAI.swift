@@ -133,9 +133,10 @@ enum CoachSettings {
         set { defaults.set(newValue, forKey: "typeright.explainLanguage") }
     }
 
-    /// Seconds of no typing before the AI cards are asked for.
+    /// Seconds of no typing before Chinese at the end of the text, pinyin and sentences that were edited
+    /// are sent to the AI (a finished sentence and Chinese followed by a space go at once).
     static var pauseSeconds: Double {
-        get { defaults.object(forKey: "typeright.pauseSeconds") as? Double ?? 0.8 }
+        get { defaults.object(forKey: "typeright.pauseSeconds") as? Double ?? 0.5 }
         set { defaults.set(newValue, forKey: "typeright.pauseSeconds") }
     }
 
@@ -439,9 +440,14 @@ enum CoachAI {
             + "one short sentence each, plain words, no grammar jargon unless needed."
     }
 
-    /// The English for `fragment` (Chinese or pinyin) as it sits in `sentence`.
+    /// Hands each new, more complete version of the answer to the card as it arrives.
+    typealias Partial<T> = @MainActor @Sendable (T) -> Void
+
+    /// The English for `fragment` (Chinese or pinyin) as it sits in `sentence`. The English words come
+    /// first in the answer, so `partial` gets them before the IPA and the note.
     static func translate(fragment: String, in sentence: String, via route: CoachAIRoute,
-                          keys: CoachKeyStore = .shared, send: @escaping Send = Self.urlSession) async throws -> CoachTranslation
+                          keys: CoachKeyStore = .shared, lines: @escaping CoachNet.Lines = CoachNet.lines,
+                          partial: Partial<CoachTranslation>? = nil) async throws -> CoachTranslation
     {
         let marked = sentence.replacingOccurrences(of: fragment, with: "⟦\(fragment)⟧", options: [], range: sentence.range(of: fragment))
         let prompt = """
@@ -450,15 +456,21 @@ enum CoachAI {
         JSON: {"english": "...", "ipa": "IPA of the English words, \(CoachSettings.accent == "uk" ? "British" : "US"), with slashes", "note": "when to use it vs. close alternatives, one sentence"}
         Sentence: \(marked)
         """
-        let data = try await complete(prompt, maxTokens: 300, via: route, keys: keys, send: send)
-        guard let result = try? JSONDecoder().decode(CoachTranslation.self, from: data),
-              !result.english.trimmingCharacters(in: .whitespaces).isEmpty else { throw CoachAIError.badResponse }
+        var shown: CoachTranslation?
+        let json = try await stream(prompt, maxTokens: 300, via: route, keys: keys, lines: lines) { text in
+            guard let partial, let json = PartialJSON.parse(text), let now = CoachTranslation.partial(json), now != shown else { return }
+            shown = now
+            await partial(now)
+        }
+        guard let parsed = PartialJSON.parse(json), parsed.isClosed, let result = CoachTranslation.partial(parsed) else { throw CoachAIError.badResponse }
         return result
     }
 
-    /// Grammar, spelling and clearly unnatural wording in one finished sentence.
+    /// Grammar, spelling and clearly unnatural wording in one finished sentence. The model only lists
+    /// its edits and their reasons (edits first); the corrected sentence is put together here.
     static func check(sentence: String, mayBeUnfinished: Bool = false, via route: CoachAIRoute,
-                      keys: CoachKeyStore = .shared, send: @escaping Send = Self.urlSession) async throws -> CoachSentenceCheck
+                      keys: CoachKeyStore = .shared, lines: @escaping CoachNet.Lines = CoachNet.lines,
+                      partial: Partial<CoachSentenceCheck>? = nil) async throws -> CoachSentenceCheck
     {
         let unfinishedRule = mayBeUnfinished
             ? "The user may still be typing: never add words to complete it and do not add final punctuation. "
@@ -468,30 +480,41 @@ enum CoachAI {
         keep the meaning, tone and punctuation style. Casual chat words (wanna, gonna, lol) are fine, \
         but the pronoun I is always a capital letter. \
         Do not change names, code, URLs or anything in quotes. \(unfinishedRule)\
-        If it is fine, return {"ok": true}. Otherwise return {"ok": false, "corrected": "the whole corrected sentence", \
-        "changes": [{"from": "original words", "to": "new words", "why": "reason", \
-        "type": "one of spelling, article, tense, plural, preposition, chinglish, agreement, capitalization, word-choice, punctuation, other"}]}
+        If it is fine, return {"ok": true}. Otherwise return {"ok": false, \
+        "edits": [{"from": "words copied exactly from the sentence", "to": "what replaces them"}], \
+        "notes": [{"why": "reason", "type": "one of spelling, article, tense, plural, preposition, chinglish, agreement, capitalization, word-choice, punctuation, other"}]}. \
+        List the edits in sentence order; "from" is never empty (to add a word, include the word next to it); one note per edit, in the same order.
         Sentence: \(sentence)
         """
-        let data = try await complete(prompt, maxTokens: 500, via: route, keys: keys, send: send)
-        guard let result = try? JSONDecoder().decode(CoachSentenceCheck.self, from: data) else { throw CoachAIError.badResponse }
+        var shown: CoachSentenceCheck?
+        let json = try await stream(prompt, maxTokens: 500, via: route, keys: keys, lines: lines) { text in
+            guard let partial, let json = PartialJSON.parse(text),
+                  let now = CoachSentenceCheck.partial(json, original: sentence), now != shown else { return }
+            shown = now
+            await partial(now)
+        }
+        guard let parsed = PartialJSON.parse(json), parsed.isClosed,
+              let result = CoachSentenceCheck.partial(parsed, original: sentence) else { throw CoachAIError.badResponse }
         return result
     }
 
-    /// Seconds one request may take; a card that comes later than this is no use to someone typing.
+    /// Seconds one request may sit without a byte; a card that comes later than this is no use to someone typing.
     static let requestTimeout: TimeInterval = 15
 
-    typealias Send = @Sendable (URLRequest) async throws -> (Data, URLResponse)
-    static let urlSession: Send = { try await URLSession.shared.data(for: $0) }
-
-    /// Sends one prompt and returns the JSON the model wrote. A 401 or 403 from the provider marks
-    /// the key as turned down (`CoachKeyStore`), which stops the AI cards until a new key is saved.
-    static func complete(_ prompt: String, maxTokens: Int, via route: CoachAIRoute,
-                         keys: CoachKeyStore = .shared, send: @escaping Send = Self.urlSession) async throws -> Data
+    /// Sends one prompt with streaming on and calls `grew` with the model's text each time more of it
+    /// arrives; returns the whole text. A reply that is not a stream (a provider that ignores
+    /// `stream`) is read as one ordinary answer. A 401 or 403 from the provider marks the key as
+    /// turned down (`CoachKeyStore`), which stops the AI cards until a new key is saved.
+    static func stream(_ prompt: String, maxTokens: Int, via route: CoachAIRoute, keys: CoachKeyStore = .shared,
+                       lines: @escaping CoachNet.Lines = CoachNet.lines, grew: (String) async -> Void = { _ in }) async throws -> String
     {
-        let body = try JSONSerialization.data(withJSONObject: requestBody(prompt, maxTokens: maxTokens, via: route))
+        let body = try JSONSerialization.data(withJSONObject: requestBody(prompt, maxTokens: maxTokens, via: route, stream: true))
+        var timing = CoachStreamTiming(sent: CoachStreamTiming.now)
+        let replyLines: AsyncThrowingStream<String, Error>
+        let label: String
         switch route {
         case let .own(provider):
+            label = provider.rawValue
             guard case let .found(key) = keys.key(for: provider), !key.isEmpty,
                   let url = URL(string: provider.endpoint), url.host != nil else { throw CoachAIError.notConfigured }
             var request = URLRequest(url: url, timeoutInterval: requestTimeout)
@@ -499,29 +522,73 @@ enum CoachAI {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
             request.httpBody = body
-
-            let data: Data, response: URLResponse
+            CoachNet.used(url)
+            timing.sent = CoachStreamTiming.now
+            Logger.info("⏱ request sent (\(label))", category: Logger.llm)
+            let response: URLResponse
             do {
-                (data, response) = try await send(request)
+                (response, replyLines) = try await lines(request)
             } catch let error as URLError {
                 Logger.warning("TypeRight: \(provider.rawValue) gave no answer: URLError \(error.code.rawValue)", category: Logger.llm)
                 throw CoachAIError.from(error)
             }
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
             guard status == 200 else {
+                let data = await CoachNet.body(of: replyLines)
                 Logger.warning("TypeRight: \(provider.rawValue) answered HTTP \(status): \(String(decoding: data.prefix(300), as: UTF8.self))", category: Logger.llm)
                 let error = CoachAIError.http(status)
                 if error.keyRejected { keys.markRejected(provider) }
                 throw error
             }
-            return try content(of: data)
         case let .member(use):
+            label = "member"
+            if let api = MemberAPI.current { CoachNet.used(api) }
+            timing.sent = CoachStreamTiming.now
+            Logger.info("⏱ request sent (\(label))", category: Logger.llm)
             do {
-                return try content(of: await MemberService.shared.chat(body, use: use, timeout: requestTimeout))
+                replyLines = try await MemberService.shared.chat(body, use: use, timeout: requestTimeout)
             } catch let error as MemberError {
                 throw CoachAIError.member(error)
             }
         }
+        timing.headers = CoachStreamTiming.now
+
+        var text = ""
+        var plain = ""
+        var sawEvents = false
+        do {
+            for try await line in replyLines {
+                guard line.hasPrefix("data:") else {
+                    if !sawEvents { plain += line + "\n" }
+                    continue
+                }
+                sawEvents = true
+                let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+                if payload == "[DONE]" { break }
+                guard let event = try? JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any] else { continue }
+                if let usage = event["usage"] as? [String: Any] {
+                    timing.tokensIn = usage["prompt_tokens"] as? Int
+                    timing.tokensOut = usage["completion_tokens"] as? Int
+                }
+                guard let choices = event["choices"] as? [[String: Any]],
+                      let delta = choices.first?["delta"] as? [String: Any],
+                      let piece = delta["content"] as? String, !piece.isEmpty else { continue }
+                if timing.firstToken == nil { timing.firstToken = CoachStreamTiming.now }
+                text += piece
+                await grew(text)
+            }
+        } catch let error as URLError {
+            Logger.warning("TypeRight: \(label) stream broke off: URLError \(error.code.rawValue)", category: Logger.llm)
+            throw CoachAIError.from(error)
+        }
+        if !sawEvents {
+            text = String(decoding: try content(of: Data(plain.utf8)), as: UTF8.self)
+            timing.firstToken = CoachStreamTiming.now
+            await grew(text)
+        }
+        timing.done = CoachStreamTiming.now
+        Logger.info("⏱ response done (\(label)): headers \(timing.ms(timing.headers)) ms, first token \(timing.ms(timing.firstToken)) ms, done \(timing.ms(timing.done)) ms, tokens in \(timing.tokensIn.map(String.init) ?? "-") out \(timing.tokensOut.map(String.init) ?? "-")\(sawEvents ? "" : ", not streamed")", category: Logger.llm)
+        return stripCodeFence(text)
     }
 
     /// Output room for the thinking a model cannot turn off: it counts toward the output cap.
@@ -533,7 +600,7 @@ enum CoachAI {
     /// thinking off where it can be turned off, no `temperature` where reasoning models reject or
     /// ignore it, `max_completion_tokens` where `max_tokens` is deprecated, and no JSON mode where
     /// it is not supported (Claude answers 400 to `json_object`; Gemini does not document it).
-    static func requestBody(_ prompt: String, maxTokens: Int, via route: CoachAIRoute, model: String? = nil) -> [String: Any] {
+    static func requestBody(_ prompt: String, maxTokens: Int, via route: CoachAIRoute, model: String? = nil, stream: Bool = false) -> [String: Any] {
         var body: [String: Any] = [
             "model": MemberAPI.model,
             "messages": [
@@ -541,6 +608,7 @@ enum CoachAI {
                 ["role": "user", "content": prompt],
             ],
         ]
+        if stream { body["stream"] = true }
         let json = ["type": "json_object"]
         guard case let .own(provider) = route else {
             body["temperature"] = 0.2
@@ -556,6 +624,8 @@ enum CoachAI {
             body["max_tokens"] = maxTokens
             body["response_format"] = json
             body["thinking"] = ["type": "disabled"]
+            // Both document usage at the end of a stream; it goes into the timing line only.
+            if stream { body["stream_options"] = ["include_usage": true] }
         case .zhipu:
             body["temperature"] = 0.2
             body["response_format"] = json

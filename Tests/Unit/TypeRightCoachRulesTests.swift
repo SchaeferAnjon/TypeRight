@@ -232,8 +232,8 @@ final class TypeRightCoachRulesTests: XCTestCase {
     func testProviderTurningTheKeyDownMarksItAndCardSaysSo() async throws {
         let keys = MemoryKeychain(["deepseek_api_key": "sk-1"]).keyStore
         let error = await failure {
-            _ = try await CoachAI.complete("x", maxTokens: 10, via: .own(.deepseek), keys: keys,
-                                           send: Self.reply(status: 401, body: #"{"error":{"message":"Authentication Fails, your api key sk-1 is invalid"}}"#))
+            _ = try await CoachAI.stream("x", maxTokens: 10, via: .own(.deepseek), keys: keys,
+                                         lines: CoachNet.lines(from: Self.reply(status: 401, body: #"{"error":{"message":"Authentication Fails, your api key sk-1 is invalid"}}"#)))
         }
         let coachError = try XCTUnwrap(error as? CoachAIError)
         XCTAssertTrue(keys.isRejected(.deepseek))
@@ -255,8 +255,8 @@ final class TypeRightCoachRulesTests: XCTestCase {
     func testNoNetworkBecomesOffline() async {
         let keys = MemoryKeychain(["deepseek_api_key": "sk-1"]).keyStore
         let error = await failure {
-            _ = try await CoachAI.complete("x", maxTokens: 10, via: .own(.deepseek), keys: keys,
-                                           send: { _ in throw URLError(.notConnectedToInternet) })
+            _ = try await CoachAI.stream("x", maxTokens: 10, via: .own(.deepseek), keys: keys,
+                                         lines: CoachNet.lines(from: { _ in throw URLError(.notConnectedToInternet) }))
         }
         XCTAssertEqual((error as? CoachAIError)?.errorDescription, CoachAIError.offline.errorDescription)
         XCTAssertFalse(keys.isRejected(.deepseek))
@@ -344,7 +344,7 @@ final class TypeRightCoachRulesTests: XCTestCase {
 
     // MARK: Helpers
 
-    private static func reply(status: Int, body: String) -> CoachAI.Send {
+    private static func reply(status: Int, body: String) -> CoachNet.Send {
         { request in
             let url = request.url ?? URL(fileURLWithPath: "/")
             return (Data(body.utf8), HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: nil)!)

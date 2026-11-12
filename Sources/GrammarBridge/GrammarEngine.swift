@@ -156,6 +156,29 @@ import Foundation
         }.value
     }
 
+    /// Whether Harper's dictionaries, with the wordlists the user chose, know `word` (no linting, microseconds).
+    func isKnownWord(
+        _ word: String,
+        dialect: String,
+        enableInternetAbbrev: Bool,
+        enableGenZSlang: Bool,
+        enableITTerminology: Bool,
+        enableBrandNames: Bool,
+        enablePersonNames: Bool,
+        enableLastNames: Bool
+    ) -> Bool {
+        is_known_word(
+            RustString(word),
+            RustString(dialect),
+            enableInternetAbbrev,
+            enableGenZSlang,
+            enableITTerminology,
+            enableBrandNames,
+            enablePersonNames,
+            enableLastNames
+        )
+    }
+
     // MARK: - Convenience Methods
 
     /// Convenience method for analyzing text with default parameters

@@ -229,6 +229,8 @@ final class MemberService: ObservableObject {
     static let checkoutReuse: TimeInterval = 55 * 60
 
     private let send: @Sendable (URLRequest) async throws -> (Data, URLResponse)
+    /// The AI cards' replies, streamed over the AI session (see CoachNet).
+    private let lines: CoachNet.Lines
     private let tokens: MemberTokenStore
     private let defaults: UserDefaults
     private let device: () -> String
@@ -253,8 +255,10 @@ final class MemberService: ObservableObject {
     init(api: URL?, defaults: UserDefaults, tokens: MemberTokenStore? = nil,
          device: (() -> String)? = nil,
          openURL: @escaping (URL) -> Void = { NSWorkspace.shared.open($0) },
-         send: @escaping @Sendable (URLRequest) async throws -> (Data, URLResponse) = { try await URLSession.shared.data(for: $0) })
+         send: @escaping @Sendable (URLRequest) async throws -> (Data, URLResponse) = { try await URLSession.shared.data(for: $0) },
+         lines: @escaping CoachNet.Lines = CoachNet.lines)
     {
+        self.lines = lines
         self.api = api
         self.defaults = defaults
         let tokens = tokens ?? .keychain(api: api)
@@ -531,13 +535,14 @@ final class MemberService: ObservableObject {
 
     // MARK: AI cards
 
-    /// One AI card's chat request through the backend. Every request of the card carries the card's use
-    /// number, so the backend counts the card once whatever is retried; at most `requestsPerUse` go out.
-    /// A rejected device token is renewed (same Mac, same account) and the card sent again; when renewing
-    /// fails, its error comes back. The AI behind the backend being away or too many requests are retried
-    /// after a short wait; no network, no uses left and today's limit come back at once as a MemberError
-    /// (see `kind`).
-    func chat(_ body: Data, use: UUID, timeout: TimeInterval) async throws -> Data {
+    /// One AI card's chat request through the backend; the reply's lines (a stream of events when the
+    /// body asks for one) come back once its status is 200. Every request of the card carries the card's
+    /// use number, so the backend counts the card once whatever is retried; at most `requestsPerUse` go
+    /// out, and only before a reply has started. A rejected device token is renewed (same Mac, same
+    /// account) and the card sent again; when renewing fails, its error comes back. The AI behind the
+    /// backend being away or too many requests are retried after a short wait; no network, no uses left
+    /// and today's limit come back at once as a MemberError (see `kind`).
+    func chat(_ body: Data, use: UUID, timeout: TimeInterval) async throws -> AsyncThrowingStream<String, Error> {
         let useID = use.uuidString.lowercased()
         var renewed = false
         var last = MemberError.network
@@ -545,10 +550,10 @@ final class MemberService: ObservableObject {
             // After a rejected token this registers again (same Mac, same account).
             let token = try await ensureDevice()
             do {
-                let (data, headers) = try await call("POST", "chat/completions", body: body, token: token,
-                                                     headers: ["X-Use-Id": useID], timeout: timeout)
+                let (reply, headers) = try await callLines("POST", "chat/completions", body: body, token: token,
+                                                           headers: ["X-Use-Id": useID], timeout: timeout)
                 noteResponse(headers: headers, error: nil)
-                return data
+                return reply
             } catch let e as MemberError {
                 last = e
                 Logger.info("TypeRight member: card request \(attempt + 1) failed: \(e.code) \(e.status)", category: Logger.llm)
@@ -640,10 +645,8 @@ final class MemberService: ObservableObject {
         }
     }
 
-    /// One request to /v1/typeright/<path> (20 seconds unless told otherwise). A reply that is not 2xx
-    /// throws its MemberError; no reply at all throws `.network`.
-    private func call(_ method: String, _ path: String, body: Data? = nil, token: String? = nil, auth: Bool = true,
-                      headers: [String: String] = [:], timeout: TimeInterval = 20) async throws -> (Data, [String: String])
+    private func request(_ method: String, _ path: String, body: Data?, token: String?, auth: Bool,
+                         headers: [String: String], timeout: TimeInterval) throws -> URLRequest
     {
         guard let api else { throw MemberError.unavailable }
         var req = URLRequest(url: api.appendingPathComponent("v1/\(MemberAPI.product)/\(path)"), timeoutInterval: timeout)
@@ -655,6 +658,40 @@ final class MemberService: ObservableObject {
             req.setValue(v, forHTTPHeaderField: k)
         }
         req.httpBody = body
+        return req
+    }
+
+    /// Like `call`, but the reply is handed on line by line as it arrives.
+    private func callLines(_ method: String, _ path: String, body: Data, token: String,
+                           headers: [String: String], timeout: TimeInterval) async throws -> (AsyncThrowingStream<String, Error>, [String: String])
+    {
+        let req = try request(method, path, body: body, token: token, auth: true, headers: headers, timeout: timeout)
+        let reply: AsyncThrowingStream<String, Error>, response: URLResponse
+        do {
+            (response, reply) = try await lines(req)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let e as URLError where e.code == .cancelled {
+            throw CancellationError()
+        } catch {
+            Logger.info("TypeRight member: \(method) \(path) got no answer: \((error as? URLError)?.code.rawValue.description ?? String(describing: type(of: error)))", category: Logger.general)
+            throw MemberError.network
+        }
+        let http = response as? HTTPURLResponse
+        let status = http?.statusCode ?? 0
+        let replyHeaders = http?.stringHeaders ?? [:]
+        if (200 ..< 300).contains(status) { return (reply, replyHeaders) }
+        let error = MemberError.from(status: status, body: await CoachNet.body(of: reply), headers: replyHeaders)
+        Logger.info("TypeRight member: \(method) \(path) → \(status) \(error.code)", category: Logger.general)
+        throw error
+    }
+
+    /// One request to /v1/typeright/<path> (20 seconds unless told otherwise). A reply that is not 2xx
+    /// throws its MemberError; no reply at all throws `.network`.
+    private func call(_ method: String, _ path: String, body: Data? = nil, token: String? = nil, auth: Bool = true,
+                      headers: [String: String] = [:], timeout: TimeInterval = 20) async throws -> (Data, [String: String])
+    {
+        let req = try request(method, path, body: body, token: token, auth: auth, headers: headers, timeout: timeout)
         let data: Data, response: URLResponse
         do {
             (data, response) = try await send(req)

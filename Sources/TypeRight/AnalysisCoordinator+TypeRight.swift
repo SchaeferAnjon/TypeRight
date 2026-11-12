@@ -5,7 +5,8 @@
 //  Lets TypingCoach use what TextWarden already does well: where a word is on screen, where
 //  the caret is, and how to write a fix back into each kind of app. Every Accessibility call
 //  here goes through AXClient, so an app that hangs is skipped (AXWatchdog) instead of
-//  holding up the main thread.
+//  holding up the main thread. Spelling goes by the system spell checker, the same one that
+//  draws the red underline in the app, minus the words TextWarden's word lists know.
 //
 
 @preconcurrency import ApplicationServices
@@ -15,6 +16,12 @@ extension AnalysisCoordinator: TypingCoachHost {
     func coachAnchor(for range: Range<Int>, in text: String) -> CGRect? {
         guard let element = textMonitor.monitoredElement,
               let bundleID = monitoredContext?.bundleIdentifier else { return nil }
+        // Apps whose word positions need the selection moved or their whole tree walked are measured
+        // only after typing stops (that is why their analysis waits a second): while the user types,
+        // the card goes by the caret instead.
+        if appRegistry.configuration(for: bundleID).features.requiresTypingPause, TypingDetector.shared.isCurrentlyTyping {
+            return nil
+        }
         let parser = contentParserFactory.parser(for: bundleID)
         let result = parser.resolvePosition(
             for: NSRange(location: range.lowerBound, length: max(1, range.count)),
@@ -103,9 +110,9 @@ extension AnalysisCoordinator: TypingCoachHost {
 
     /// Writes the fix with TextWarden's per-app methods, then reads the field until it shows the fix
     /// (keyboard and paste methods land a moment later). Typing that follows the fix is allowed.
-    func coachReplace(range: Range<Int>, with replacement: String, analyzedText: String, harperError: GrammarErrorModel?) async -> CoachWriteResult {
-        let probe = harperError ?? GrammarErrorModel(start: range.lowerBound, end: range.upperBound, message: "TypeRight",
-                                                     severity: .error, category: "TypeRight", lintId: "TypeRight", suggestions: [replacement])
+    func coachReplace(range: Range<Int>, with replacement: String, analyzedText: String) async -> CoachWriteResult {
+        let probe = GrammarErrorModel(start: range.lowerBound, end: range.upperBound, message: "TypeRight",
+                                      severity: .error, category: "TypeRight", lintId: "TypeRight", suggestions: [replacement])
         guard let before = coachReadText(),
               case let .matched(target) = ReplacementTextMatcher.resolveRange(in: before, analyzedText: analyzedText, for: probe)
         else {
@@ -114,14 +121,10 @@ extension AnalysisCoordinator: TypingCoachHost {
         }
         let expected = CoachText.replacing(target, in: before, with: replacement)
 
-        if let harperError, currentErrors.contains(where: { $0 === harperError }) {
-            await applyTextReplacementAsync(for: harperError, with: replacement)
-        } else {
-            currentErrors.append(probe)
-            currentErrorSourceStore.replace(errors: currentErrors, sourceText: analyzedText)
-            await applyTextReplacementAsync(for: probe, with: replacement)
-            currentErrors.removeAll { $0 === probe }
-        }
+        currentErrors.append(probe)
+        currentErrorSourceStore.replace(errors: currentErrors, sourceText: analyzedText)
+        await applyTextReplacementAsync(for: probe, with: replacement)
+        currentErrors.removeAll { $0 === probe }
 
         var after: String?
         for wait in [0.0, 0.15, 0.3, 0.6, 1.0] {
@@ -151,6 +154,60 @@ extension AnalysisCoordinator: TypingCoachHost {
         let after = normal(after)
         if after == normal(before) { return .unchanged }
         return after.unicodeScalars.starts(with: normal(expected).unicodeScalars) ? .done : .wrong
+    }
+
+    /// The system spell checker in the user's English, so pinyin and names are judged as English
+    /// (an automatic language could let them pass as another language). Words Harper's lists know
+    /// (IT terms, brands, names, slang the user turned on), the user's own words and texts they told
+    /// TextWarden to ignore get no card; neither does anything when spelling checks are off.
+    func coachMisspelling(in word: String) -> CoachMisspelling? {
+        guard userPreferences.enabledCategories.contains("Spelling") else { return nil }
+        let checker = NSSpellChecker.shared
+        let language = Self.spellingLanguage(for: userPreferences.selectedDialect)
+        let found = checker.checkSpelling(of: word, startingAt: 0, language: language, wrap: false, inSpellDocumentWithTag: 0, wordCount: nil)
+        guard found.location != NSNotFound, found.length > 0, let range = Range(found, in: word) else { return nil }
+        let wrong = String(word[range])
+        guard !userPreferences.ignoredErrorTexts.contains(wrong), !customVocabulary.containsAnyWord(in: wrong),
+              !grammarEngine.isKnownWord(wrong, dialect: userPreferences.selectedDialect,
+                                         enableInternetAbbrev: userPreferences.enableInternetAbbreviations,
+                                         enableGenZSlang: userPreferences.enableGenZSlang,
+                                         enableITTerminology: userPreferences.enableITTerminology,
+                                         enableBrandNames: userPreferences.enableBrandNames,
+                                         enablePersonNames: userPreferences.enablePersonNames,
+                                         enableLastNames: userPreferences.enableLastNames)
+        else { return nil }
+        let guesses = checker.guesses(forWordRange: found, in: word, language: language, inSpellDocumentWithTag: 0) ?? []
+        let scalars = word.unicodeScalars
+        let lower = scalars.distance(from: scalars.startIndex, to: range.lowerBound)
+        return CoachMisspelling(range: lower ..< lower + wrong.unicodeScalars.count, guesses: guesses)
+    }
+
+    static func spellingLanguage(for dialect: String) -> String {
+        let code = switch dialect {
+        case "British": "en_GB"
+        case "Canadian": "en_CA"
+        case "Australian": "en_AU"
+        case "Indian": "en_IN"
+        default: "en_US"
+        }
+        return NSSpellChecker.shared.availableLanguages.contains(code) ? code : "en"
+    }
+
+    /// Apps that read slowly through Accessibility are only read when they say their text changed.
+    var coachReadsOnKeys: Bool {
+        guard let bundleID = monitoredContext?.bundleIdentifier else { return false }
+        return !appRegistry.configuration(for: bundleID).features.defersTextExtraction
+            && !AXWatchdog.shared.shouldDeferExtraction(for: bundleID)
+            && !AXWatchdog.shared.shouldSkipCalls(for: bundleID)
+    }
+
+    /// Every change of the field goes to the coach as it is read, before the analysis waits for typing
+    /// to settle; not in paused apps, on disabled websites (as the last analysis found the address) or
+    /// with checking turned off.
+    func coachTextChanged(_ text: String, in context: ApplicationContext) {
+        guard userPreferences.isEnabled, userPreferences.effectivePauseScope(for: context.bundleIdentifier) == nil else { return }
+        if context.isBrowser, let url = currentBrowserURL, !userPreferences.isEnabled(forURL: url) { return }
+        TypingCoach.shared.textDidChange(text)
     }
 
     var coachAppName: String { monitoredContext?.applicationName ?? "" }

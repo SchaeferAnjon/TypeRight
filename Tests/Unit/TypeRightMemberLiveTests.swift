@@ -73,15 +73,15 @@ final class TypeRightMemberLiveTests: XCTestCase {
 
         // One card: an answer, and one use gone (from the reply's headers).
         let first = UUID()
-        let reply = try await m.chat(card("Task: translate. 预约", first), use: first, timeout: 15)
+        let reply = try await m.chatData(card("Task: translate. 预约", first), use: first, timeout: 15)
         XCTAssertEqual(try JSONDecoder().decode(CoachTranslation.self, from: CoachAI.content(of: reply)).english, "book")
         XCTAssertEqual(m.state, .trial(left: total - 1, total: total))
         // The same card sent again (a retry) is not counted again.
-        _ = try await m.chat(card("Task: translate. 预约", first), use: first, timeout: 15)
+        _ = try await m.chatData(card("Task: translate. 预约", first), use: first, timeout: 15)
         XCTAssertEqual(m.state, .trial(left: total - 1, total: total))
         // A card whose AI fails every time: 3 requests, then busy, and nothing counted.
         let failing = UUID()
-        let outage = await caughtMember { _ = try await m.chat(card("ALWAYS_FAIL", failing), use: failing, timeout: 15) }
+        let outage = await caughtMember { _ = try await m.chatData(card("ALWAYS_FAIL", failing), use: failing, timeout: 15) }
         XCTAssertEqual(outage?.code, "upstream")
         XCTAssertEqual(outage?.kind, .busy)
         await m.refresh()
@@ -90,19 +90,19 @@ final class TypeRightMemberLiveTests: XCTestCase {
         // Use up the rest; then the trial is used up and the coach stops asking.
         for _ in 1 ..< total {
             let use = UUID()
-            _ = try await m.chat(card("Task: check. I has a question.", use), use: use, timeout: 15)
+            _ = try await m.chatData(card("Task: check. I has a question.", use), use: use, timeout: 15)
         }
         XCTAssertEqual(m.state, .trialUsedUp)
         XCTAssertEqual(m.aiStatus, .memberBlocked(.trialUsedUp))
         let late = UUID()
-        let usedUp = await caughtMember { _ = try await m.chat(card("Task: check. I has a question.", late), use: late, timeout: 15) }
+        let usedUp = await caughtMember { _ = try await m.chatData(card("Task: check. I has a question.", late), use: late, timeout: 15) }
         XCTAssertEqual(usedUp?.code, "trial-used-up")
         XCTAssertEqual(usedUp?.kind, .usedUp)
 
         // The same Mac with a token the backend does not know: registers again (existing), same account.
         let other = try service(api, device: String(device), token: "trd_not_a_real_token")
         let again = UUID()
-        let renewed = await caughtMember { _ = try await other.chat(card("Task: check. I has a question.", again), use: again, timeout: 15) }
+        let renewed = await caughtMember { _ = try await other.chatData(card("Task: check. I has a question.", again), use: again, timeout: 15) }
         XCTAssertEqual(renewed?.code, "trial-used-up")
         XCTAssertTrue(other.registered)
         XCTAssertEqual(other.trialResult, "existing")

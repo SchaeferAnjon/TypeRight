@@ -23,6 +23,8 @@ final class FakeCoachHost: TypingCoachHost {
     var composing = false
     var readable = true
     var write: Write = .writes
+    /// Words the system spell checker marks, with its guesses.
+    var misspellings: [String: [String]] = [:]
     private(set) var writes: [(range: Range<Int>, replacement: String)] = []
 
     func coachAnchor(for range: Range<Int>, in _: String) -> CGRect? {
@@ -33,7 +35,13 @@ final class FakeCoachHost: TypingCoachHost {
     func coachCaret(in text: String) -> Int? { text.unicodeScalars.count }
     func coachReadText() -> String? { readable ? text : nil }
 
-    func coachReplace(range: Range<Int>, with replacement: String, analyzedText _: String, harperError _: GrammarErrorModel?) async -> CoachWriteResult {
+    func coachMisspelling(in word: String) -> CoachMisspelling? {
+        misspellings[word].map { CoachMisspelling(range: 0 ..< word.unicodeScalars.count, guesses: $0) }
+    }
+
+    var coachReadsOnKeys: Bool { true }
+
+    func coachReplace(range: Range<Int>, with replacement: String, analyzedText _: String) async -> CoachWriteResult {
         writes.append((range, replacement))
         switch write {
         case .writes:
@@ -66,6 +74,15 @@ final class FakeCardDisplay: CoachCardDisplay {
         shown.append((content, keys, anchor))
         visible = reachesScreen ? content : nil
         return reachesScreen
+    }
+
+    private(set) var updates: [CoachCardContent] = []
+
+    func update(_ content: CoachCardContent, keys _: CoachCardKeys) -> Bool {
+        guard visible != nil else { return false }
+        updates.append(content)
+        visible = content
+        return true
     }
 
     func hide() { visible = nil }
@@ -143,8 +160,14 @@ final class FakeCoachAI {
     var status: CoachAIStatus = .own(.deepseek)
     var translation: Result<CoachTranslation, Error> = .success(CoachTranslation(english: "book", ipa: "/bʊk/", note: ""))
     var checkResult: Result<CoachSentenceCheck, Error> = .success(CoachSentenceCheck(ok: true, corrected: "", changes: []))
+    /// Answers given one by one for each sentence (in the order asked), before `checkResult`.
+    var checkResults: [String: CoachSentenceCheck] = [:]
+    /// What streams in before the whole answer: each is handed to the card, then the request waits for `release()`.
+    var translationParts: [CoachTranslation] = []
+    var checkParts: [CoachSentenceCheck] = []
     private(set) var translateCalls: [(fragment: String, route: CoachAIRoute)] = []
     private(set) var checkCalls: [(sentence: String, route: CoachAIRoute)] = []
+    private(set) var warmed = 0
     /// Requests wait until `release()`.
     var hold = false
     private var held: [CheckedContinuation<Void, Never>] = []
@@ -157,24 +180,45 @@ final class FakeCoachAI {
         waiting.forEach { $0.resume() }
     }
 
+    /// Lets the requests waiting now go one step further.
+    func step() {
+        let waiting = held
+        held = []
+        waiting.forEach { $0.resume() }
+    }
+
     var service: CoachAIService {
         CoachAIService(
             status: { [unowned self] in self.status },
             blocked: {},
-            translate: { [unowned self] fragment, sentence, route in try await self.translate(fragment, sentence, route) },
-            check: { [unowned self] sentence, unfinished, route in try await self.check(sentence, unfinished, route) }
+            warm: { [unowned self] in self.warmed += 1 },
+            translate: { [unowned self] fragment, sentence, route, partial in try await self.translate(fragment, sentence, route, partial) },
+            check: { [unowned self] sentence, unfinished, route, partial in try await self.check(sentence, unfinished, route, partial) }
         )
     }
 
-    private func translate(_ fragment: String, _: String, _ route: CoachAIRoute) async throws -> CoachTranslation {
-        translateCalls.append((fragment, route))
+    private func waitIfHeld() async {
         if hold { await withCheckedContinuation { held.append($0) } }
+    }
+
+    private func translate(_ fragment: String, _: String, _ route: CoachAIRoute, _ partial: CoachAI.Partial<CoachTranslation>) async throws -> CoachTranslation {
+        translateCalls.append((fragment, route))
+        await waitIfHeld()
+        for part in translationParts {
+            partial(part)
+            await withCheckedContinuation { held.append($0) }
+        }
         return try translation.get()
     }
 
-    private func check(_ sentence: String, _: Bool, _ route: CoachAIRoute) async throws -> CoachSentenceCheck {
+    private func check(_ sentence: String, _: Bool, _ route: CoachAIRoute, _ partial: CoachAI.Partial<CoachSentenceCheck>) async throws -> CoachSentenceCheck {
         checkCalls.append((sentence, route))
-        if hold { await withCheckedContinuation { held.append($0) } }
+        await waitIfHeld()
+        for part in checkParts {
+            partial(part)
+            await withCheckedContinuation { held.append($0) }
+        }
+        if let answer = checkResults[sentence] { return answer }
         return try checkResult.get()
     }
 }
@@ -208,23 +252,54 @@ class TypeRightCoachTestCase: XCTestCase {
         coach = TypingCoach(ai: ai.service, notebook: notebook, display: display, keys: keys, clock: clock,
                             behavior: { [unowned self] in self.behavior }, copy: { [unowned self] in self.copied.append($0) })
         coach.host = host
+        // The field gets focus empty.
+        coach.textDidChange("")
     }
 
     override func tearDown() async throws {
         try? FileManager.default.removeItem(at: folder)
     }
 
-    /// The user typed until the field read `text`, and the analysis ran.
+    /// The user typed until the field read `text`, and the analysis ran. A long stretch arrives as
+    /// typing does: all but its last characters, then the rest.
     func type(_ text: String, errors: [GrammarErrorModel] = []) {
         clock.lastKeyAt = clock.now
+        let scalars = Array(text.unicodeScalars)
+        for error in errors where error.category == "Spelling" && error.end <= scalars.count {
+            host.misspellings[CoachText.substring(scalars, error.start ..< error.end)] = error.suggestions
+        }
+        if text.hasPrefix(host.text), scalars.count - host.text.unicodeScalars.count > 8 {
+            host.text = CoachText.substring(scalars, 0 ..< scalars.count - 8)
+            coach.textDidChange(host.text)
+        }
         host.text = text
+        coach.textDidChange(text)
         coach.analysisDidUpdate(text: text, errors: errors)
     }
 
-    /// Time passes without typing; any AI request it started has answered.
+    /// Time passes without typing; every AI request it started has answered.
     func wait(_ seconds: TimeInterval = 1) async {
         clock.advance(seconds)
-        await coach.aiTask?.value
+        await answers()
+    }
+
+    /// The field is new or was left and came back: it gets focus empty.
+    func focusEmptyField() {
+        host.text = ""
+        coach.textDidChange("")
+    }
+
+    /// Lets requests that were just asked for reach the AI.
+    func untilAsked(_ count: Int) async {
+        for _ in 0 ..< 50 where ai.translateCalls.count + ai.checkCalls.count < count {
+            await Task.yield()
+        }
+    }
+
+    func answers() async {
+        while let task = coach.runningAI.first {
+            await task.value
+        }
     }
 
     func tab() async {
@@ -271,6 +346,7 @@ final class TypeRightTypingCoachTests: TypeRightCoachTestCase {
     func testChineseChatWithAnEnglishWordDoesNotPopUp() async {
         for text in ["明天 meeting 改到下午", "OK，我明天到", "我想 book 一个 meeting room"] {
             coach.reset()
+            focusEmptyField()
             type(text)
             await wait(3)
         }
@@ -383,7 +459,8 @@ final class TypeRightTypingCoachTests: TypeRightCoachTestCase {
 
     // Item 3: a misspelling typed past stays away in this field.
 
-    func testSpellingTypedPastDoesNotComeBack() async throws {
+    func testSpellingTypedPastRightAfterTheWordComesBackOnceAtTheNextStop() async throws {
+        ai.status = .localOnly
         let first = "a meeting room tomorow "
         type(first, errors: [try misspelling("tomorow", in: first, fixes: ["tomorrow"])])
         XCTAssertEqual(visibleKind, "spelling")
@@ -392,8 +469,15 @@ final class TypeRightTypingCoachTests: TypeRightCoachTestCase {
         XCTAssertNil(display.visible)
         let next = "a meeting room tomorow at"
         type(next, errors: [try misspelling("tomorow", in: next, fixes: ["tomorrow"])])
-        XCTAssertNil(display.visible)
-        XCTAssertEqual(display.shown.count, 1)
+        XCTAssertNil(display.visible, "not while typing")
+        clock.advance(TypingCoach.settleSeconds)
+        XCTAssertEqual(visibleKind, "spelling", "back at the stop")
+        keys.press(.other(printable: true))
+        keys.press(.other(printable: true))
+        type("a meeting room tomorow at no")
+        clock.advance(3)
+        XCTAssertNil(display.visible, "typed past after a stop: gone")
+        XCTAssertEqual(display.shown.filter { if case .spelling = $0.content { return true }; return false }.count, 2)
     }
 
     // Item 7: the "想一下" capsule does not hold the spot; an AI card waits for the card in front.
@@ -407,7 +491,7 @@ final class TypeRightTypingCoachTests: TypeRightCoachTestCase {
         type(text, errors: [try misspelling("tomorow", in: text, fixes: ["tomorrow"])])
         XCTAssertEqual(visibleKind, "spelling")
         ai.release()
-        await coach.aiTask?.value
+        await answers()
         XCTAssertEqual(visibleKind, "spelling", "the translation waits")
         keys.press(.escape)
         XCTAssertEqual(visibleKind, "translate")
@@ -423,11 +507,11 @@ final class TypeRightTypingCoachTests: TypeRightCoachTestCase {
         type("I want to 预")
         XCTAssertNil(display.visible)
         ai.release()
-        await coach.aiTask?.value
+        await answers()
         XCTAssertNil(display.visible)
     }
 
-    func testTypingTwoCharactersClosesThinkingAndNoCardFollows() async {
+    func testTypingTwoCharactersClosesThinkingAndTheCardWaitsForTheNextStop() async {
         ai.hold = true
         type("I want to 预约")
         clock.advance(1)
@@ -436,17 +520,22 @@ final class TypeRightTypingCoachTests: TypeRightCoachTestCase {
         type("I want to 预约 a")
         XCTAssertNil(display.visible)
         ai.release()
-        await coach.aiTask?.value
-        XCTAssertNil(display.visible)
+        await answers()
+        XCTAssertNil(display.visible, "the answer waits while the user types")
+        XCTAssertEqual(ai.translateCalls.count, 1, "the request went on")
+        clock.advance(TypingCoach.settleSeconds)
+        XCTAssertEqual(visibleKind, "translate")
     }
 
     func testClickingThinkingAwayCancelsItsCard() async {
         ai.hold = true
         type("I want to 预约")
         clock.advance(1)
+        await untilAsked(1)
+        XCTAssertEqual(visibleKind, "thinking")
         display.onClickOutside?()
         ai.release()
-        await coach.aiTask?.value
+        await answers()
         await wait(3)
         XCTAssertNil(display.visible)
         XCTAssertEqual(ai.translateCalls.count, 1)
@@ -508,6 +597,7 @@ final class TypeRightTypingCoachTests: TypeRightCoachTestCase {
         await wait()
         keys.press(.escape)
         host.fieldID = "com.example.mail#2"
+        focusEmptyField()
         type("I want to 预约")
         await wait()
         XCTAssertEqual(ai.translateCalls.count, 2)
@@ -518,6 +608,7 @@ final class TypeRightTypingCoachTests: TypeRightCoachTestCase {
         await wait()
         keys.press(.escape)
         coach.reset()
+        focusEmptyField()
         type("I want to 预约")
         await wait()
         XCTAssertEqual(ai.translateCalls.count, 2)
@@ -553,11 +644,13 @@ final class TypeRightTypingCoachTests: TypeRightCoachTestCase {
     func testWordEndsOnlyAtSpaceOrPunctuation() async throws {
         for text in ["cd srcc/", "mail me@exmaple", "see tomorow-"] {
             coach.reset()
+            focusEmptyField()
             let word = text.split(whereSeparator: { " /@-".contains($0) })[1]
             type(text, errors: [try misspelling(String(word), in: text, fixes: ["x"])])
             XCTAssertNil(display.visible, text)
         }
         coach.reset()
+        focusEmptyField()
         let text = "see you tomorow,"
         type(text, errors: [try misspelling("tomorow", in: text, fixes: ["tomorrow"])])
         XCTAssertEqual(visibleKind, "spelling")
@@ -620,7 +713,9 @@ final class TypeRightTypingCoachTests: TypeRightCoachTestCase {
         XCTAssertNil(keys.policy)
         display.reachesScreen = true
         ai.release()
-        await coach.aiTask?.value
+        await answers()
+        XCTAssertNil(display.visible, "it waits while the user types")
+        clock.advance(TypingCoach.settleSeconds)
         XCTAssertEqual(visibleKind, "translate", "the translation still comes")
         XCTAssertEqual(ai.translateCalls.count, 1)
     }
@@ -646,7 +741,7 @@ final class TypeRightTypingCoachTests: TypeRightCoachTestCase {
         type("明天下午")
         host.text = "明天下午开会可以吗"
         coach.translateWholeSentence()
-        await coach.aiTask?.value
+        await answers()
         XCTAssertEqual(ai.translateCalls.map(\.fragment), ["明天下午开会可以吗"])
     }
 
@@ -682,8 +777,9 @@ final class TypeRightTypingCoachTests: TypeRightCoachTestCase {
         XCTAssertTrue(notebook.entries.isEmpty)
 
         coach.reset()
-        host.text = "I recieve it "
-        type(host.text, errors: [try misspelling("recieve", in: host.text, fixes: ["receive"])])
+        focusEmptyField()
+        let again = "I recieve it "
+        type(again, errors: [try misspelling("recieve", in: again, fixes: ["receive"])])
         XCTAssertEqual(display.shown.last?.keys, .copy)
         await waitForTabGrace()
         await tab()
@@ -723,7 +819,7 @@ final class TypeRightTypingCoachTests: TypeRightCoachTestCase {
         XCTAssertEqual(visibleKind, "spelling", "the spelling card covers the capsule; the request goes on")
         type("Hi, I want to 预约 tomorow ")
         ai.release()
-        await coach.aiTask?.value
+        await answers()
         XCTAssertNotNil(failedMessage)
         XCTAssertEqual(display.shown.last?.anchor.minX, 100 + 14 * 10, "预约 moved from 10 to 14")
     }
@@ -743,6 +839,6 @@ final class TypeRightTypingCoachTests: TypeRightCoachTestCase {
 
     private func waitForTabGrace() async {
         clock.advance(TypingCoach.tabGrace + 0.05)
-        await coach.aiTask?.value
+        await answers()
     }
 }

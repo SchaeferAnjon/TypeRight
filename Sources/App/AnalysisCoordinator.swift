@@ -130,7 +130,7 @@ class AnalysisCoordinator: ObservableObject {
     var monitoredContext: ApplicationContext?
 
     /// Current browser URL (only populated when monitoring a browser)
-    private var currentBrowserURL: URL?
+    private(set) var currentBrowserURL: URL?
 
     /// Analysis queue for background processing
     let analysisQueue = DispatchQueue(label: "com.textwarden.analysis", qos: .userInitiated)
@@ -1545,8 +1545,9 @@ class AnalysisCoordinator: ObservableObject {
         // Monitor IMMEDIATE text changes (before debounce)
         // Note: We no longer hide overlays here to avoid flickering during typing
         // Overlays will update naturally after the debounced re-analysis completes
-        textMonitor.onImmediateTextChange = { [weak self] _, context in
+        textMonitor.onImmediateTextChange = { [weak self] text, context in
             guard let self else { return }
+            coachTextChanged(text, in: context) // TypeRight
 
             // Just clear the position cache so underlines update correctly after re-analysis
             // Don't hide overlays - that causes flickering while typing
