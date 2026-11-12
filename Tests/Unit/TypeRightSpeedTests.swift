@@ -123,16 +123,6 @@ final class TypeRightSpeedTests: TypeRightCoachTestCase {
         CoachSentenceCheck(ok: false, corrected: corrected, changes: changes)
     }
 
-    /// Types `text` after what is there, one character every `every` seconds, like a person.
-    private func typeOn(_ text: String, every: TimeInterval = 0.1) {
-        for character in text {
-            clock.advance(every)
-            clock.lastKeyAt = clock.now
-            host.text += String(character)
-            coach.textDidChange(host.text)
-        }
-    }
-
     func testSpellingCardComesAtTheWordEndWithoutTheAnalysis() {
         host.misspellings["tomorow"] = ["tomorrow"]
         typeOn("I will send it tomorow")

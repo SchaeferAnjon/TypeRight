@@ -15,10 +15,42 @@ import AppKit
 import Carbon
 import CoreGraphics
 
+/// What a key means for the card on screen.
 enum CoachKey: Equatable, Sendable {
     case tab
     case escape
-    case other(printable: Bool)
+    /// A character typed on: a letter, digit, punctuation or space, with or without Shift.
+    case typed
+    /// Return, the arrows, the page keys, Home, End and the delete keys (with any modifier), and
+    /// Shift-Tab: the caret went elsewhere or the text next to it changed.
+    case moves
+    /// Types nothing: function keys, modifier and input mode keys on their own, and shortcuts with
+    /// ⌘, ⌃ or ⌥ (a screenshot, copy, switching the input source).
+    case typesNothing
+
+    static func of(keyCode: Int64, flags: CGEventFlags) -> CoachKey {
+        if movingKeys.contains(keyCode) { return .moves }
+        // Every key that types a character has a code below 128; the codes above are the system
+        // keys of Apple keyboards (Mission Control, Spotlight, dictation, Globe and the like).
+        if !flags.isDisjoint(with: [.maskCommand, .maskControl, .maskAlternate]) || silentKeys.contains(keyCode) || keyCode > 127 {
+            return .typesNothing
+        }
+        switch keyCode {
+        case 48: return flags.contains(.maskShift) ? .moves : .tab
+        case 53: return flags.contains(.maskShift) ? .typesNothing : .escape
+        default: return .typed
+        }
+    }
+
+    /// Return, keypad Enter, ← → ↓ ↑, Page Up, Page Down, Home, End, Delete, Forward Delete.
+    private static let movingKeys: Set<Int64> = [36, 76, 123, 124, 125, 126, 116, 121, 115, 119, 51, 117]
+    /// F1 to F20; Command, Shift, Caps Lock, Option, Control and fn (left and right); volume up,
+    /// volume down, mute; Help; the JIS 英数 and かな keys.
+    private static let silentKeys: Set<Int64> = [
+        122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113, 106, 64, 79, 80, 90,
+        54, 55, 56, 57, 58, 59, 60, 61, 62, 63,
+        72, 73, 74, 114, 102, 104,
+    ]
 }
 
 /// Which keys the card on screen takes. `tabFrom` is an uptime: a Tab before it passes through.
@@ -49,8 +81,10 @@ struct CoachKeyGate: Equatable, Sendable {
         switch key {
         case .tab: return policy.tab && now >= policy.tabFrom && !composing
         case .escape: return policy.esc && !composing
-        case let .other(printable):
-            if printable { typedSinceShown += 1 }
+        case .typed:
+            typedSinceShown += 1
+            return false
+        case .moves, .typesNothing:
             return false
         }
     }
@@ -149,7 +183,7 @@ private final class CoachKeyTapBox: @unchecked Sendable {
             return Unmanaged.passUnretained(event)
         }
         guard type == .keyDown else { return Unmanaged.passUnretained(event) }
-        let key = Self.key(of: event)
+        let key = CoachKey.of(keyCode: event.getIntegerValueField(.keyboardEventKeycode), flags: event.flags)
         let swallowed = lock.withLock { gate.policy == nil ? nil : gate.swallows(key, at: ProcessInfo.processInfo.systemUptime) }
         guard let swallowed else { return Unmanaged.passUnretained(event) }
         DispatchQueue.main.async { [weak owner = self.owner] in
@@ -157,17 +191,6 @@ private final class CoachKeyTapBox: @unchecked Sendable {
         }
         return swallowed ? nil : Unmanaged.passUnretained(event)
     }
-
-    private static func key(of event: CGEvent) -> CoachKey {
-        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
-        let flags = event.flags.intersection([.maskCommand, .maskControl, .maskAlternate, .maskShift])
-        if keyCode == 48, flags.isEmpty { return .tab }
-        if keyCode == 53, flags.isEmpty { return .escape }
-        return .other(printable: flags.subtracting(.maskShift).isEmpty && !nonPrintable.contains(keyCode))
-    }
-
-    /// Arrows, return, delete, function keys and the like.
-    private static let nonPrintable: Set<Int64> = [36, 48, 51, 53, 117, 76, 123, 124, 125, 126, 115, 119, 116, 121, 122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111]
 }
 
 private func coachKeyTapCallback(

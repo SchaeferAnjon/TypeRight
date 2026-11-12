@@ -277,6 +277,16 @@ class TypeRightCoachTestCase: XCTestCase {
         coach.analysisDidUpdate(text: text, errors: errors)
     }
 
+    /// Types `text` after what is there, one character every `every` seconds, like a person.
+    func typeOn(_ text: String, every: TimeInterval = 0.1) {
+        for character in text {
+            clock.advance(every)
+            clock.lastKeyAt = clock.now
+            host.text += String(character)
+            coach.textDidChange(host.text)
+        }
+    }
+
     /// Time passes without typing; every AI request it started has answered.
     func wait(_ seconds: TimeInterval = 1) async {
         clock.advance(seconds)
@@ -370,8 +380,8 @@ final class TypeRightTypingCoachTests: TypeRightCoachTestCase {
     func testTranslationTypedPastIsNotAskedAgain() async {
         type("I want to 预约")
         await wait()
-        keys.press(.other(printable: true))
-        keys.press(.other(printable: true))
+        keys.press(.typed)
+        keys.press(.typed)
         XCTAssertNil(display.visible)
         type("I want to 预约 a ")
         await wait(3)
@@ -464,16 +474,16 @@ final class TypeRightTypingCoachTests: TypeRightCoachTestCase {
         let first = "a meeting room tomorow "
         type(first, errors: [try misspelling("tomorow", in: first, fixes: ["tomorrow"])])
         XCTAssertEqual(visibleKind, "spelling")
-        keys.press(.other(printable: true))
-        keys.press(.other(printable: true))
+        keys.press(.typed)
+        keys.press(.typed)
         XCTAssertNil(display.visible)
         let next = "a meeting room tomorow at"
         type(next, errors: [try misspelling("tomorow", in: next, fixes: ["tomorrow"])])
         XCTAssertNil(display.visible, "not while typing")
         clock.advance(TypingCoach.settleSeconds)
         XCTAssertEqual(visibleKind, "spelling", "back at the stop")
-        keys.press(.other(printable: true))
-        keys.press(.other(printable: true))
+        keys.press(.typed)
+        keys.press(.typed)
         type("a meeting room tomorow at no")
         clock.advance(3)
         XCTAssertNil(display.visible, "typed past after a stop: gone")
@@ -840,5 +850,176 @@ final class TypeRightTypingCoachTests: TypeRightCoachTestCase {
     private func waitForTabGrace() async {
         clock.advance(TypingCoach.tabGrace + 0.05)
         await answers()
+    }
+}
+
+// MARK: - Which keys make a card go
+
+/// 2026-11-12, from the user's own use: F1 for a screenshot closed the card, and so did the key
+/// pressed to type on after a translation card in Notes. Keys that leave the text alone keep the
+/// card up and are not counted; keys that move the caret or delete close it; typing makes the card
+/// step aside at the second character, a space included.
+final class TypeRightCardKeyTests: TypeRightCoachTestCase {
+    private typealias Press = (name: String, code: Int64, flags: CGEventFlags)
+
+    private let letterA: Int64 = 0
+    private let space: Int64 = 49
+
+    /// The key as the key tap reads it.
+    private func key(_ code: Int64, _ flags: CGEventFlags = []) -> CoachKey {
+        CoachKey.of(keyCode: code, flags: flags)
+    }
+
+    private func showSpellingCard() throws {
+        coach.reset()
+        focusEmptyField()
+        let text = "a meeting room tomorow "
+        type(text, errors: [try misspelling("tomorow", in: text, fixes: ["tomorrow"])])
+        XCTAssertEqual(visibleKind, "spelling")
+    }
+
+    /// Each key leaves a spelling card up; one letter after it still does and the second makes it
+    /// go, so the key was not counted as typing.
+    private func assertLeavesTheCardUp(_ presses: [Press], file: StaticString = #filePath, line: UInt = #line) throws {
+        for press in presses {
+            try showSpellingCard()
+            keys.press(key(press.code, press.flags))
+            XCTAssertEqual(visibleKind, "spelling", "\(press.name) closed the card", file: file, line: line)
+            keys.press(key(letterA))
+            XCTAssertEqual(visibleKind, "spelling", "\(press.name) counted as typing", file: file, line: line)
+            keys.press(key(letterA))
+            XCTAssertNil(display.visible, "two letters after \(press.name)", file: file, line: line)
+        }
+    }
+
+    func testFunctionKeysLeaveTheCardUp() throws {
+        let codes: [Int64] = [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113, 106, 64, 79, 80, 90]
+        try assertLeavesTheCardUp(codes.enumerated().map { ("F\($0.offset + 1)", $0.element, []) })
+        // As the keyboard sends them: with fn, or with Shift.
+        try assertLeavesTheCardUp([("F1 with fn", 122, .maskSecondaryFn), ("⇧F5", 96, .maskShift)])
+    }
+
+    func testShortcutsLeaveTheCardUp() throws {
+        try assertLeavesTheCardUp([
+            ("⌘⇧3", 20, [.maskCommand, .maskShift]), ("⌘⇧4", 21, [.maskCommand, .maskShift]), ("⌘⇧5", 23, [.maskCommand, .maskShift]),
+            ("⌘C", 8, .maskCommand), ("⌘Space", 49, .maskCommand), ("⌃⌘Space", 49, [.maskControl, .maskCommand]),
+            ("⌃Space, previous input source", 49, .maskControl), ("⌃⌥Space, next input source", 49, [.maskControl, .maskAlternate]),
+            ("⌥A", letterA, .maskAlternate), ("⌘Tab", 48, .maskCommand), ("⌃Tab", 48, .maskControl), ("⌥⌘Esc", 53, [.maskCommand, .maskAlternate]),
+            ("⇧Esc", 53, .maskShift),
+        ])
+    }
+
+    func testModifierAndInputModeKeysLeaveTheCardUp() throws {
+        try assertLeavesTheCardUp([
+            ("Command", 55, .maskCommand), ("right Command", 54, .maskCommand), ("Shift", 56, .maskShift), ("right Shift", 60, .maskShift),
+            ("Option", 58, .maskAlternate), ("Control", 59, .maskControl), ("fn", 63, .maskSecondaryFn), ("Caps Lock", 57, .maskAlphaShift),
+            ("英数", 102, []), ("かな", 104, []), ("volume up", 72, []), ("volume down", 73, []), ("mute", 74, []), ("Help", 114, []),
+            ("Mission Control key", 160, []), ("Globe key", 179, .maskSecondaryFn),
+        ])
+    }
+
+    /// A shortcut that does change the text closes the card only when the text it points at changed.
+    func testAShortcutThatChangesTheTextGoesByTheText() throws {
+        try showSpellingCard()
+        keys.press(key(6, .maskCommand)) // ⌘Z
+        XCTAssertEqual(visibleKind, "spelling", "the key itself")
+        host.text = "a meeting room "
+        coach.textDidChange(host.text)
+        XCTAssertNil(display.visible, "the undo took the word away")
+
+        try showSpellingCard()
+        keys.press(key(9, .maskCommand)) // ⌘V
+        host.text += "see you there"
+        coach.textDidChange(host.text)
+        XCTAssertEqual(visibleKind, "spelling", "a paste after the word leaves the word where it was")
+    }
+
+    func testKeysThatMoveTheCaretOrDeleteCloseTheCard() throws {
+        let presses: [Press] = [
+            ("Return", 36, []), ("Enter", 76, []), ("←", 123, []), ("→", 124, []), ("↓", 125, []), ("↑", 126, []),
+            ("← as the keyboard sends it", 123, [.maskNumericPad, .maskSecondaryFn]), ("Page Up", 116, []), ("Page Down", 121, []),
+            ("Home", 115, []), ("End", 119, []), ("Delete", 51, []), ("Forward Delete", 117, []),
+            ("⌘←", 123, .maskCommand), ("⌥←", 123, .maskAlternate), ("⇧→", 124, .maskShift), ("⌘Return", 36, .maskCommand),
+            ("⌥Delete", 51, .maskAlternate), ("⇧Tab", 48, .maskShift),
+        ]
+        for press in presses {
+            try showSpellingCard()
+            keys.press(key(press.code, press.flags))
+            XCTAssertNil(display.visible, press.name)
+        }
+    }
+
+    func testASpaceIsOneCharacterTyped() throws {
+        try showSpellingCard()
+        keys.press(key(space))
+        XCTAssertEqual(visibleKind, "spelling", "one space")
+        keys.press(key(space, .maskShift))
+        XCTAssertNil(display.visible, "two characters")
+    }
+
+    func testTabAndEscWorkAsBefore() async throws {
+        try showSpellingCard()
+        clock.advance(TypingCoach.tabGrace + 0.05)
+        XCTAssertTrue(keys.press(key(48)), "Tab takes the fix")
+        await coach.writeTask?.value
+        XCTAssertEqual(host.text, "a meeting room tomorrow ")
+
+        try showSpellingCard()
+        XCTAssertTrue(keys.press(key(53)), "Esc keeps the text")
+        XCTAssertNil(display.visible)
+        XCTAssertEqual(host.text, "a meeting room tomorow ")
+    }
+
+    // The user's own sentence (2026-11-12, Notes): English, then 风雪交加 from the Pinyin input
+    // method at the end of it, a stop, and the translation card.
+
+    private let usersCard = CoachCardContent.translate(source: "风雪交加", result: CoachTranslation(english: "a mix of wind and snow", ipa: "", note: ""))
+
+    private func showTheUsersTranslationCard() async {
+        ai.translation = .success(CoachTranslation(english: "a mix of wind and snow", ipa: "", note: ""))
+        typeOn("Who is Jason Huang, the outside is ")
+        host.composing = true
+        typeOn("fengxuejiaojia")
+        host.composing = false
+        clock.advance(0.1)
+        clock.lastKeyAt = clock.now
+        host.text = "Who is Jason Huang, the outside is 风雪交加"
+        coach.textDidChange(host.text)
+        coach.analysisDidUpdate(text: host.text, errors: [])
+        await wait()
+        XCTAssertEqual(display.visible, usersCard)
+    }
+
+    /// Types `character` the way it reaches TypeRight: the key, the field's change, the read after a
+    /// word-ending key, the analysis.
+    private func typeKey(_ code: Int64, _ character: String) {
+        keys.press(key(code))
+        typeOn(character)
+        if let scalar = character.unicodeScalars.first, CoachText.wordEnds.contains(scalar) { coach.wordEndKeyPressed() }
+        clock.advance(0.2)
+        coach.analysisDidUpdate(text: host.text, errors: [])
+    }
+
+    func testOneSpaceAfterTheUsersTranslationCardLeavesItUp() async {
+        await showTheUsersTranslationCard()
+        typeKey(space, " ")
+        XCTAssertEqual(display.visible, usersCard, "one space is one character")
+        await wait(2)
+        XCTAssertEqual(display.visible, usersCard, "and the card stays while the user stops")
+        XCTAssertEqual(ai.translateCalls.count, 1, "the space does not ask again")
+        typeKey(letterA, "a")
+        XCTAssertNil(display.visible, "the second character makes it step aside")
+    }
+
+    /// On the user's Mac ⌃Space switches between ABC and Pinyin: switching to English to type on is
+    /// not typing.
+    func testSwitchingToEnglishAfterTheUsersTranslationCardLeavesItUp() async {
+        await showTheUsersTranslationCard()
+        keys.press(key(space, .maskControl))
+        XCTAssertEqual(display.visible, usersCard, "⌃Space")
+        typeKey(space, " ")
+        XCTAssertEqual(display.visible, usersCard, "then one space")
+        typeKey(letterA, "a")
+        XCTAssertNil(display.visible, "the second character")
     }
 }

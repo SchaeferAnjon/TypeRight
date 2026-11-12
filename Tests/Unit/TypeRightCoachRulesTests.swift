@@ -119,7 +119,7 @@ final class TypeRightCoachRulesTests: XCTestCase {
         XCTAssertFalse(gate.swallows(.tab, at: 10.1))
         XCTAssertTrue(gate.swallows(.tab, at: 10.3))
         XCTAssertTrue(gate.swallows(.escape, at: 10.1))
-        XCTAssertFalse(gate.swallows(.other(printable: true), at: 10.4))
+        XCTAssertFalse(gate.swallows(.typed, at: 10.4))
     }
 
     func testFailedCardTakesNoKeyAndNoPolicyTakesNothing() {
@@ -137,9 +137,20 @@ final class TypeRightCoachRulesTests: XCTestCase {
         gate.reset(CoachKeyPolicy(tab: true, tabFrom: 0, esc: true), inputMethod: true)
         XCTAssertTrue(gate.swallows(.escape, at: 1), "nothing typed yet: the Esc is for the card")
         gate.reset(CoachKeyPolicy(tab: true, tabFrom: 0, esc: true), inputMethod: true)
-        XCTAssertFalse(gate.swallows(.other(printable: true), at: 1))
+        XCTAssertFalse(gate.swallows(.typed, at: 1))
         XCTAssertFalse(gate.swallows(.escape, at: 1))
         XCTAssertFalse(gate.swallows(.tab, at: 1))
+    }
+
+    /// A function key, switching the input source or a shortcut is not typing: with an input method
+    /// on, Tab and Esc stay the card's.
+    func testKeysThatLeaveTheTextAloneDoNotCountAsTyping() {
+        var gate = CoachKeyGate()
+        gate.reset(CoachKeyPolicy(tab: true, tabFrom: 0, esc: true), inputMethod: true)
+        for key in [CoachKey.of(keyCode: 122, flags: []), CoachKey.of(keyCode: 49, flags: .maskControl), CoachKey.of(keyCode: 8, flags: .maskCommand)] {
+            XCTAssertFalse(gate.swallows(key, at: 1))
+        }
+        XCTAssertTrue(gate.swallows(.escape, at: 1))
     }
 
     // MARK: Items 6 and 17: reading the field back after a write

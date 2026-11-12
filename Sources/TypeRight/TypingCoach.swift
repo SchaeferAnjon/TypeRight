@@ -13,9 +13,11 @@
 //
 //  Cards come one at a time, in the order of the text. An AI answer that arrives while the user is
 //  typing waits for a short stop, so nothing pops up under the words being typed; answers stream in
-//  and the card shows the first useful part. Tab takes the card's fix, Esc keeps the text, typing on
-//  makes it step aside. A spelling card typed past right after the word comes back once at the next
-//  stop, unless a sentence card covers its sentence.
+//  and the card shows the first useful part. Tab takes the card's fix, Esc keeps the text, the second
+//  character typed makes it step aside, return, an arrow or a delete key closes it; keys that type
+//  nothing (function keys, shortcuts, switching the input source) leave it. A spelling card typed
+//  past right after the word comes back once at the next stop, unless a sentence card covers its
+//  sentence.
 //
 //  What was offered is remembered per field (app and text field), by text and position: a piece
 //  offered (taken, turned down, clicked away, failed, or typed past after a stop) is not offered or
@@ -1161,15 +1163,19 @@ final class TypingCoach {
         case .escape:
             close(.declined)
             showNext()
-        case .other(printable: true):
+        case .typed:
             card.keysSinceShown += 1
             if card.keysSinceShown >= Self.typedAway {
                 close(.typedOn)
             } else {
                 active = card
             }
-        default:
-            // A Tab that went to the app, arrows, return, shortcuts.
+        case .typesNothing:
+            // A screenshot, copy, a function key, switching the input source. A shortcut that does
+            // change the text (paste, undo) closes the card once the text it points at changed.
+            break
+        case .tab, .moves:
+            // A Tab that went to the app, return, an arrow, a delete key: the caret is elsewhere.
             close(.typedOn)
         }
     }
