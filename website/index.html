@@ -562,7 +562,7 @@ const sheetOpen=()=>!document.getElementById('dlsheet').hidden;
 function closeSheet(){const s=document.getElementById('dlsheet');if(s)s.hidden=true}
 function renderSheet(){
   const s=REL.state,sh=document.getElementById('dlsheet');
-  const steps=`<ol class="dlsteps"><li>${t('打开下载的 DMG，把 TypeRight 拖进「应用程序」')}</li><li>${t('第一次打开如果提示无法验证开发者：打开「系统设置 › 隐私与安全性」，拉到最下面，点「仍要打开」')}</li><li>${t('跟着引导把图标拖进「辅助功能」列表；之后它待在右上角菜单栏，是一支羽毛笔')}</li></ol>`;
+  const steps=`<ol class="dlsteps"><li>${t('打开下载的 DMG，把 TypeRight 拖进「应用程序」')}</li><li>${t('第一次打开如果提示无法验证开发者：打开「系统设置 › 隐私与安全性」，拉到最下面，点「仍要打开」')}</li><li>${t('跟着引导把图标拖进「辅助功能」列表；之后它待在右上角菜单栏，是一个对勾')}</li></ol>`;
   const file=`<div class="dlfile">${APPICON(36)}<div><b>${s==='ready'?esc(REL.name):'TypeRight'}</b><span>${s==='ready'?`${REL.tag} · ${REL.mb} MB · `:''}${t('Apple 芯片和 Intel 通用')} · ${t('macOS 14 以上')}</span></div></div>`;
   let head,body='',act='';
   if(s==='ready'){head=t('开始下载 TypeRight');body=file+steps;act=`<a class="sbtn sm" href="${REL.url}">${I.dl}${t('没开始？再点一次')}</a><button type="button" class="sbtn sm" data-go="guide">${t('上手指南')}</button>`}
@@ -718,7 +718,7 @@ function renderGuide(){
      ${step(t('打开下载的 DMG，把 TypeRight 拖进「应用程序」，再打开它'),t('第一次打开如果提示无法验证开发者：打开「系统设置 › 隐私与安全性」，拉到最下面，点「仍要打开」。'))}
      ${step(t('跟着引导给辅助功能权限'),t('引导第 2 步点按钮，系统设置会打开「辅助功能」那一页；把旁边浮出来的 TypeRight 图标往左拖进列表，开关就打开了。回到引导，这一步会自己打勾。'),shot('guide-access.png',t('引导里的辅助功能这一步')))}
      ${step(t('选一种用法'),t('自带 Key、会员或者只用本机检查，引导里选一个，以后在设置里随时能换。不管选哪种，拼写都照样在本机查。'))}
-     ${step(t('在右上角菜单栏找到羽毛笔图标'),t('点它能看到今天改了几处，能在当前 App 里暂停、全部暂停 1 小时、打开设置。'),shot('guide-menu.png',t('菜单栏里的 TypeRight 菜单')))}</ol>`],
+     ${step(t('在右上角菜单栏找到对勾图标'),t('点它能看到今天改了几处，能在当前 App 里暂停、全部暂停 1 小时、打开设置。'),shot('guide-menu.png',t('菜单栏里的 TypeRight 菜单')))}</ol>`],
    [t('先选一家'),`<p>${t('中文变英文、整句检查要用 AI。在国内推荐 DeepSeek：便宜、中文好、不用海外网络。设置里能选这 10 家：')}</p>
      <div class="tblwrap"><table class="ptable" data-part="服务商表"><tr><th>${t('服务')}</th><th>${t('特点')}</th><th></th></tr>${PROV().map(([id,n,d,tg])=>`<tr><td><span class="pv"><span class="plogo">${LOGOS[id]}</span>${n}</span></td><td class="muted">${d}</td><td>${tg?`<span class="tag fix">${tg}</span>`:''}</td></tr>`).join('')}</table></div>`],
    [t('拿 DeepSeek 的 Key'),`<ol class="gsteps" data-part="拿 Key 步骤">
@@ -727,7 +727,7 @@ function renderGuide(){
      ${step(t('创建 API Key'),t('左边的「API keys」，再点「创建 API key」，名字随便写，比如 TypeRight。'),`<div class="shotmock" aria-hidden="true"><div class="bb"><i></i><i></i><i></i>platform.deepseek.com/api_keys</div><div class="bd"><span>API keys</span><span style="flex:1"></span><span class="sbtn sm ink hl">${t('创建 API key')}</span></div></div>`)}
      ${step(t('复制 Key'),t('只显示这一次，复制下来；以 sk- 开头。'),`<div class="shotmock" aria-hidden="true"><div class="bd"><span class="keybox">sk-3f9a••••••••••••••••c21e</span><span class="sbtn sm hl">${t('复制')}</span></div></div>`)}</ol>`],
    [t('填进 TypeRight'),`<ol class="gsteps">
-     ${step(t('点菜单栏的羽毛笔图标，选「设置…」，再点左边的「AI 服务商」'),'')}
+     ${step(t('点菜单栏的对勾图标，选「设置…」，再点左边的「AI 服务商」'),'')}
      ${step(t('在列表里点 DeepSeek，把 Key 粘贴进「粘贴 API Key」那一栏'),t('还没有 Key 的话，旁边的「去拿 Key」会打开 DeepSeek 拿 Key 的那一页。「模型」一栏留空，就用推荐的模型。之前用的是会员的话，把用法换成「自带 Key」。'),shot('guide-ai-provider.png',t('设置里的 AI 服务商，DeepSeek 已填好 Key')))}
      ${step(t('点「试一下」'),t('后面出现「连上了」就好了，它刚才替你查了 I has a question 这一句。菜单栏的下拉菜单里也会显示「AI：DeepSeek」。'))}
      ${step(t('回到任何 App，打一句中英混着的话试试'),t('比如 I want to 预约 a meeting room，停一下。'))}</ol>
@@ -737,7 +737,7 @@ function renderGuide(){
    [t('整句翻译键和暂停键'),`<ol class="gsteps">
      ${step(t('在设置的「快捷键」里，给「整句翻译」选一个键'),t('整句都是中文时（比如和朋友聊天）不会自己弹；想把这句变成英文，就按这个键。'),shot('guide-shortcuts.png',t('设置里的快捷键')))}
      ${step(t('想随时停下，再给「暂停 / 继续」选一个键'),t('按一下，所有 App 里都不弹；再按一下接着弹。'))}</ol>`+P(t('快捷键要带 ⌘、⌥、⌃ 或 ⇧ 里至少一个。两个键默认都没设，没设的键不会响。'))],
-   [t('在哪些 App 里弹'),P(t('设置的「App」里列着这台 Mac 上正在用的 App，每个一个开关；关掉的 App 里 TypeRight 完全不看。终端默认关着，想在终端里用就打开它。密码管理器、钥匙串访问、系统设置这类 App 一直不看。'))+P(t('临时不想让它弹：点菜单栏的羽毛笔，选「在「某个 App」里暂停」或者「全部暂停 1 小时」。'))+shot('guide-apps.png',t('设置里的 App 列表'))],
+   [t('在哪些 App 里弹'),P(t('设置的「App」里列着这台 Mac 上正在用的 App，每个一个开关；关掉的 App 里 TypeRight 完全不看。终端默认关着，想在终端里用就打开它。密码管理器、钥匙串访问、系统设置这类 App 一直不看。'))+P(t('临时不想让它弹：点菜单栏的对勾，选「在「某个 App」里暂停」或者「全部暂停 1 小时」。'))+shot('guide-apps.png',t('设置里的 App 列表'))],
    [t('常见问题'),`<div class="faq" style="margin:0">${faqHTML([
      [t('「试一下」显示 AI 服务返回 401'),t('Key 不对。重新复制一次，前后不要带空格；DeepSeek 的 Key 以 sk- 开头。')],
      [t('「试一下」显示 AI 服务返回 402'),t('DeepSeek 的余额用完了，去它的后台充值；充好以后不用重新填 Key。')],
