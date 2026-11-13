@@ -72,3 +72,6 @@ build/
 *.tmp
 CLAUDE.local.md
 
+# 设计稿和内部上线笔记不进公开仓库（原件在仓库外的 private/）
+design/
+docs/LAUNCH.md
