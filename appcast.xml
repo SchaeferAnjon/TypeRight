@@ -2,5 +2,22 @@
 <rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
     <channel>
         <title>TypeRight Releases</title>
+        <item>
+            <title>0.1.0</title>
+            <pubDate>Fri, 13 Nov 2026 15:59:07 +0100</pubDate>
+            <sparkle:version>2</sparkle:version>
+            <sparkle:shortVersionString>0.1.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description>&lt;h3&gt;TypeRight 第一版&lt;/h3&gt;
+&lt;ul&gt;
+&lt;li&gt;Mac 菜单栏上的英文打字助手：拼错一个词、不会说先打了中文、一句打完语法不对，它在那个词旁边弹一张小卡，按 Tab 改好，按 Esc 不改&lt;/li&gt;
+&lt;li&gt;拼写和几类常见语法错（像 I has、a apple）在你的 Mac 上用 Harper 查，不联网&lt;/li&gt;
+&lt;li&gt;中文和拼音变英文、整句检查：填自己的 AI Key（DeepSeek、智谱、通义千问等），或开会员（每月 ¥9.9 / $1.99，每天 500 次）&lt;/li&gt;
+&lt;li&gt;按 Tab 改过的记进错题本，从中文变来的词记进生词本，同一个点用对 3 次算会了&lt;/li&gt;
+&lt;li&gt;基于 TextWarden（Apache-2.0）改写，改了哪些见 NOTICE&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;这一版没有经过苹果公证：第一次打开时如果提示无法验证开发者，打开「系统设置 › 隐私与安全性」，拉到最下面点「仍要打开」。之后自动更新不再弹。&lt;/p&gt;</description>
+            <enclosure url="https://github.com/SchaeferAnjon/TypeRight/releases/download/v0.1.0/TypeRight-0.1.0-Universal.dmg" length="21242782" type="application/octet-stream" sparkle:edSignature="/d1f7UbOLgJkvv0vEPHdyb9YRJ3j3Rr85mtY7BFkaG6xdPpB6rLpErdMMzlz5YVan6FJ5YSSJm/BEcFQj3vzAQ=="/>
+        </item>
     </channel>
 </rss>
