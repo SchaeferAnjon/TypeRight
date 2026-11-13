@@ -384,13 +384,17 @@ struct CoachSentenceCheck: Decodable, Equatable {
     let ok: Bool
     let corrected: String
     let changes: [Change]
+    /// Found by Harper on this Mac, not by the AI (CoachLocalGrammar): the card says 本机查, and it
+    /// leaves the sentence's misspellings to their own cards.
+    let local: Bool
 
     private enum CodingKeys: String, CodingKey { case ok, corrected, changes }
 
-    init(ok: Bool, corrected: String, changes: [Change]) {
+    init(ok: Bool, corrected: String, changes: [Change], local: Bool = false) {
         self.ok = ok
         self.corrected = corrected
         self.changes = changes
+        self.local = local
     }
 
     init(from decoder: Decoder) throws {
@@ -398,6 +402,7 @@ struct CoachSentenceCheck: Decodable, Equatable {
         corrected = (try? c.decode(String.self, forKey: .corrected)) ?? ""
         changes = (try? c.decode([Change].self, forKey: .changes)) ?? []
         ok = (try? c.decode(Bool.self, forKey: .ok)) ?? changes.isEmpty
+        local = false
     }
 }
 

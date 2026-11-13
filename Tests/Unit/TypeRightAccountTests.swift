@@ -206,7 +206,7 @@ final class TypeRightAccountTests: XCTestCase {
     func testNoticeWords() {
         let none = CoachNotice.of(.noMember, word: "预约", facts: nil)
         XCTAssertEqual(none.title, "还没开会员")
-        XCTAssertTrue(none.body.hasPrefix("「预约」这次没翻成英文。拼写和基础语法照样在本机查"))
+        XCTAssertTrue(none.body.hasPrefix("「预约」这次没翻成英文。拼写和几类常见语法错照样在本机查"))
         XCTAssertEqual(none.links.map(\.action), [.pricing, .ownKey])
         XCTAssertEqual(none.pill, "没翻：还没开会员")
         let limit = CoachNotice.of(.dailyLimit, word: "预约", facts: facts(.member, .dailyLimit(reset: MemberStatus.date(Self.reset))))

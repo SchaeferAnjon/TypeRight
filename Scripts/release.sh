@@ -243,7 +243,7 @@ generate_release_notes() {
 ## TypeRight 第一版
 
 - Mac 菜单栏上的英文打字助手：拼错一个词、不会说先打了中文、一句打完语法不对，它在那个词旁边弹一张小卡，按 Tab 改好，按 Esc 不改
-- 拼写和基础语法在你的 Mac 上用 Harper 查，不联网
+- 拼写和几类常见语法错（像 I has、a apple）在你的 Mac 上用 Harper 查，不联网
 - 中文和拼音变英文、整句检查：填自己的 AI Key（DeepSeek、智谱、通义千问等），或开会员（每月 ¥9.9 / $1.99，每天 500 次）
 - 按 Tab 改过的记进错题本，从中文变来的词记进生词本，同一个点用对 3 次算会了
 - 基于 TextWarden（Apache-2.0）改写，改了哪些见 NOTICE

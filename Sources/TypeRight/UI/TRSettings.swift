@@ -525,7 +525,7 @@ struct TRPrivacySettings: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
             TRGroup(title: "你打的字去了哪里") {
-                TRRow(title: "拼写和基础语法", note: "在这台 Mac 上查，不联网") { EmptyView() }
+                TRRow(title: "拼写和几类常见语法错", note: "在这台 Mac 上查，不联网") { EmptyView() }
                 TRRow(title: "中文变英文、整句检查",
                       note: "只发正在打的这一句，不发前后文、不发聊天记录：自带 Key 时直接发给那一家；会员时经我们的服务器转给 DeepSeek，只记次数，不存内容") { EmptyView() }
                 TRRow(title: "密码框", note: "系统不让读，TypeRight 也不读") { EmptyView() }

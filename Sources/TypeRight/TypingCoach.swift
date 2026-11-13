@@ -7,7 +7,9 @@
 //  2. Chinese (or pinyin) inside an English sentence                   -> its English: at once when the
 //     user typed on after the Chinese, after a pause when the Chinese is the last thing typed
 //  3. a sentence was finished (. ? !)                                  -> whole-sentence check, at once;
-//     at a pause, every other sentence typed or edited in this field that is finished and not checked
+//     at a pause, every other sentence typed or edited in this field that is finished and not checked.
+//     Without AI (or when the AI does not answer) the sentence is checked on this Mac instead, with
+//     the analysis of the text as it reads then (CoachLocalGrammar): never both for one sentence.
 //  The coach reads every change of the field as it happens (and right after a space or punctuation
 //  key, in case the app does not say), not only after the analysis.
 //
@@ -27,7 +29,8 @@
 //
 //  On the member plan without a usable membership (none, ended, renewal not charged, today's 500
 //  used, no network twice in a row) a Chinese word gets a notice card the first time and a small
-//  capsule after that (CoachNotice); spelling and sentence checks go on as before.
+//  capsule after that (CoachNotice); spelling cards go on as before, and sentences are checked on
+//  this Mac.
 //
 //  What was offered is remembered per field (app and text field), by text and position: a piece
 //  offered (taken, turned down, clicked away, failed, or typed past after a stop) is not offered or
@@ -294,6 +297,25 @@ final class TypingCoach {
             if case .sentence = content { return true }
             return false
         }
+
+        /// The AI's sentence card writes the whole sentence right, spelling included: its misspellings
+        /// get no card of their own. The one checked on this Mac leaves spelling to the spelling cards.
+        var coversSpelling: Bool {
+            if case let .sentence(_, check) = content { return !check.local }
+            return false
+        }
+    }
+
+    /// A sentence checked on this Mac (no AI, or the AI did not answer), waiting for an analysis of
+    /// the text as it reads now.
+    private struct LocalCheck {
+        var range: Range<Int>
+        var piece: String
+        var unfinished: Bool
+        /// TypeRight changed something in it: it does not count as right the first time.
+        var assisted: Bool
+        /// Why the AI did not answer, told when nothing is found here either.
+        var failure: (message: String, keyRejected: Bool)?
     }
 
     /// An AI request, waiting for its turn or running.
@@ -463,6 +485,7 @@ final class TypingCoach {
     /// Cards that came while another card was up or the user was typing, in the order of the text.
     private var pending: [Card] = []
     private var jobs: [Job] = []
+    private var localChecks: [LocalCheck] = []
     private var skipped: [Skipped] = []
     private var latestText = ""
     /// The last texts the field read, to tell an analysis of an older text from one of a newer text.
@@ -623,6 +646,7 @@ final class TypingCoach {
             textDidChange(text, source: .analysis)
         }
         latestAnalysis = (text, errors)
+        checkLocally()
         guard follow == nil, text == latestText, let card = active, case .spelling = card.content else { return }
         // The analysis found nothing at the word the system spell checker marked (code, a link, a word
         // the app's own rules allow): the card goes and does not come back.
@@ -696,6 +720,7 @@ final class TypingCoach {
             job.task?.cancel()
         }
         jobs = []
+        localChecks = []
         close(.gone)
         pending = []
         skipped = []
@@ -731,6 +756,12 @@ final class TypingCoach {
                 Logger.info("TypeRight: the text sent to the AI was edited, request dropped", category: Logger.llm)
                 cancel(job.id)
             }
+        }
+        localChecks = localChecks.compactMap { item in
+            guard let moved = edit.shift(item.range), item.unfinished || ends.contains(moved.upperBound) else { return nil }
+            var item = item
+            item.range = moved
+            return item
         }
         pending = pending.compactMap { card in
             guard let moved = edit.shift(card.range) else { return nil }
@@ -873,7 +904,8 @@ final class TypingCoach {
     // MARK: - AI: when to ask
 
     /// What this edit ended: a sentence (its . ? ! or the character right after it was typed) or a
-    /// Chinese run (something was typed right after it). Those go to the AI now.
+    /// Chinese run (something was typed right after it). Those go to the AI now; without AI the
+    /// sentence is checked on this Mac.
     private func aiTriggers(after edit: CoachText.Edit, in scalars: [Unicode.Scalar], behavior: CoachBehavior) {
         let status = ai.status()
         guard follow == nil else { return }
@@ -893,7 +925,6 @@ final class TypingCoach {
                 }
             }
         }
-        guard status.isOn else { return }
         for sentence in sentences where sentence.finished {
             let tail = Self.terminatorStart(of: sentence.range, in: scalars)
             guard edit.start <= sentence.range.upperBound, typedEnd >= tail else { continue }
@@ -921,10 +952,8 @@ final class TypingCoach {
         let finished = Set(CoachText.sentences(in: scalars).filter(\.finished).map(\.range))
         let confirmed = unconfirmed.filter { finished.contains($0) }
         unconfirmed = []
-        if ai.status().isOn {
-            for range in confirmed {
-                check(range, scalars: scalars, unfinished: false)
-            }
+        for range in confirmed {
+            check(range, scalars: scalars, unfinished: false)
         }
         if active == nil { showCapsule() }
     }
@@ -941,24 +970,16 @@ final class TypingCoach {
         unconfirmed = []
         Logger.info("TypeRight: pause check (AI \(status), pinyin waiting \(waitingPinyin != nil), \(jobs.count) requests, \(pending.count) waiting)", category: Logger.ui)
 
-        guard status.isOn else {
-            // No membership, today's limit and the like: the Chinese gets a notice or a capsule.
-            if case .memberBlocked = status, behavior().autoTranslateMixed {
-                for sentence in sentences where memory.isTouched(sentence.range) && CoachText.shouldAutoTranslate(scalars, in: sentence.range) {
-                    for run in ChineseText.hanRuns(in: scalars, from: sentence.range.lowerBound, to: sentence.range.upperBound) {
-                        withoutAI(CoachMark(text: CoachText.substring(scalars, run), range: run), status: status)
-                    }
-                }
-            }
-            countWithoutAI(sentences, scalars: scalars)
-            showNext()
-            return
-        }
-
         if behavior().autoTranslateMixed {
             for sentence in sentences where memory.isTouched(sentence.range) && CoachText.shouldAutoTranslate(scalars, in: sentence.range) {
                 for run in ChineseText.hanRuns(in: scalars, from: sentence.range.lowerBound, to: sentence.range.upperBound) {
-                    translate(CoachMark(text: CoachText.substring(scalars, run), range: run), sentence: CoachText.substring(scalars, sentence.range))
+                    let mark = CoachMark(text: CoachText.substring(scalars, run), range: run)
+                    if status.isOn {
+                        translate(mark, sentence: CoachText.substring(scalars, sentence.range))
+                    } else {
+                        // No membership, today's limit and the like: the Chinese gets a notice or a capsule.
+                        withoutAI(mark, status: status)
+                    }
                 }
             }
         }
@@ -983,7 +1004,7 @@ final class TypingCoach {
 
     private func userLingered() {
         // A card is up: the sentence waits until the user is done with it and stops again.
-        guard let host, ai.status().isOn, active?.isCapsule ?? true, follow == nil else { return }
+        guard let host, active?.isCapsule ?? true, follow == nil else { return }
         let scalars = Array(latestText.unicodeScalars)
         let caret = min(host.coachCaret(in: latestText) ?? scalars.count, scalars.count)
         // Only when the caret sits at the end of what was typed.
@@ -998,19 +1019,58 @@ final class TypingCoach {
         sentence.trimmingCharacters(in: CharacterSet(charactersIn: ".?!").union(.whitespacesAndNewlines)).lowercased()
     }
 
-    /// Sends a sentence the user typed or edited here for a check, once per text.
+    /// Sends a sentence the user typed or edited here for a check, once per text: to the AI, or
+    /// without one, to the check on this Mac.
     private func check(_ range: Range<Int>, scalars: [Unicode.Scalar], unfinished: Bool) {
         let sentence = CoachText.substring(scalars, range)
         let key = Self.sentenceKey(sentence)
+        let withAI = ai.status().isOn
+        // The check here costs nothing, so a short line (`I has a question.`) gets it too; the AI
+        // gets sentences of three words or more.
         guard memory.isTouched(range), !memory.checked.contains(key),
               ChineseText.hanRuns(in: scalars, from: range.lowerBound, to: range.upperBound).isEmpty,
-              ChineseText.latinWordCount(in: scalars, from: range.lowerBound, to: range.upperBound) >= 3
+              ChineseText.latinWordCount(in: scalars, from: range.lowerBound, to: range.upperBound) >= (withAI ? 3 : 2)
         else { return }
         memory.checked.insert(key)
         // A sentence TypeRight already changed was not right the first time, whatever the AI says now.
         let assisted = memory.wasFixed(within: range)
+        guard withAI else {
+            checkLocally(LocalCheck(range: range, piece: sentence, unfinished: unfinished, assisted: assisted))
+            return
+        }
         enqueue(Job(kind: .check(sentence: sentence, unfinished: unfinished, assisted: assisted), range: range, piece: sentence,
                     capsuleAt: CoachText.lastWordRange(in: scalars, within: range), queuedAt: clock.now))
+    }
+
+    // MARK: - The sentence check on this Mac
+
+    private func checkLocally(_ check: LocalCheck) {
+        localChecks.append(check)
+        checkLocally()
+    }
+
+    /// The sentences waiting for an analysis of the text as it reads now: counted for the day, and
+    /// a card (like the AI's, marked 本机查) when Harper found something CoachLocalGrammar can explain.
+    /// Its card waits its turn like an AI answer, so it never pops up under the words being typed.
+    private func checkLocally() {
+        guard !localChecks.isEmpty, let analysis = latestAnalysis, analysis.text == latestText else { return }
+        let scalars = Array(latestText.unicodeScalars)
+        let due = localChecks
+        localChecks = []
+        for item in due where latestTextStill(has: item.piece, at: item.range) {
+            let clean = !item.assisted && !analysis.errors.contains { $0.start < item.range.upperBound && $0.end > item.range.lowerBound }
+            notebook.noteSentence(clean: clean)
+            if clean { notebook.noteCorrectUse(in: item.piece) }
+            guard let check = CoachLocalGrammar.check(item.range, in: scalars, errors: analysis.errors) else {
+                if let failure = item.failure { showFailed(failure.message, at: item.range, keyRejected: failure.keyRejected) }
+                continue
+            }
+            Logger.info("TypeRight: on-device check of \(item.range): \(check.changes.count) change(s)", category: Logger.ui)
+            var card = Card(content: .sentence(original: item.piece, check: check), range: item.range, piece: item.piece, analyzedText: latestText,
+                            anchorOverride: CoachText.firstChangeRange(check, in: scalars, within: item.range))
+            card.unfinished = item.unfinished
+            deliver(card, now: false)
+        }
     }
 
     /// Asks for the English of a fragment once: the fragment counts as offered from now on, whatever
@@ -1153,9 +1213,14 @@ final class TypingCoach {
         finish(id)
         if case let CoachAIError.member(memberError) = error {
             // Through our backend the membership could not be used (none, ended, today's limit,
-            // offline, device token …): a Chinese word gets the notice once, then the capsule.
+            // offline, device token …): a Chinese word gets the notice once, then the capsule; a
+            // sentence is checked on this Mac instead, without a word about the membership.
             Logger.info("TypeRight: member AI gave no card: \(memberError.kind) (\(memberError.code), HTTP \(memberError.status))", category: Logger.llm)
             if memberError.kind == .offline { offlineFailures += 1 }
+            if let job, case let .check(_, unfinished, assisted) = job.kind {
+                checkLocally(LocalCheck(range: job.range, piece: job.piece, unfinished: unfinished, assisted: assisted))
+                return
+            }
             guard let job, case .translate = job.kind, let issue = CoachNotice.issue(for: memberError),
                   latestTextStill(has: job.piece, at: job.range) else { return }
             if issue == .offline, offlineFailures < Self.offlineTries { return }
@@ -1163,8 +1228,15 @@ final class TypingCoach {
             return
         }
         let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        let keyRejected = (error as? CoachAIError)?.keyRejected == true
         Logger.warning("TypeRight: AI request failed: \(message)", category: Logger.llm)
-        showFailed(message, at: range, keyRejected: (error as? CoachAIError)?.keyRejected == true)
+        if let job, case let .check(_, unfinished, assisted) = job.kind {
+            // The sentence is checked on this Mac; the failure shows only when that finds nothing.
+            checkLocally(LocalCheck(range: job.range, piece: job.piece, unfinished: unfinished, assisted: assisted,
+                                    failure: (message, keyRejected)))
+            return
+        }
+        showFailed(message, at: range, keyRejected: keyRejected)
     }
 
     // MARK: - Showing and taking cards
@@ -1255,7 +1327,7 @@ final class TypingCoach {
         pending.removeAll { !latestTextStill(has: $0.piece, at: $0.range) && !$0.isFailure && !$0.isNotice }
         let scalars = Array(latestText.unicodeScalars)
         let sentences = CoachText.sentences(in: scalars)
-        let sentenceCards = pending.filter(\.isSentence) + [active].compactMap { $0 }.filter(\.isSentence)
+        let sentenceCards = pending.filter(\.coversSpelling) + [active].compactMap { $0 }.filter(\.coversSpelling)
         skipped.removeAll { item in
             !latestTextStill(has: item.mark.text, at: item.mark.range)
                 || sentenceCards.contains { $0.range.overlaps(item.mark.range) }
@@ -1317,8 +1389,8 @@ final class TypingCoach {
         }
         let shown = clock.now
         active = card
-        // A sentence card covers the misspellings in its sentence: they get no card of their own.
-        if card.isSentence { skipped.removeAll { card.range.overlaps($0.mark.range) } }
+        // The AI's sentence card covers the misspellings in its sentence: they get no card of their own.
+        if card.coversSpelling { skipped.removeAll { card.range.overlaps($0.mark.range) } }
         keys.set(policy(for: card, async: async))
         logShown(card, anchorAt: wordAnchor == nil ? "fallback" : "word", anchorMs: anchorDone - anchorStart, showMs: shown - anchorDone, at: anchor)
         let id = card.id
@@ -1373,7 +1445,7 @@ final class TypingCoach {
         switch content {
         case .spelling: "spelling"
         case .translate: "translate"
-        case .sentence: "sentence"
+        case let .sentence(_, check): check.local ? "local sentence" : "sentence"
         case .thinking: "thinking"
         case .failed: "failed"
         case .notice: "notice"
@@ -1892,23 +1964,6 @@ final class TypingCoach {
         let before = CoachText.substring(scalars, start ..< card.range.lowerBound)
         let after = CoachText.substring(scalars, card.range.upperBound ..< end)
         return (before + replacement + after).trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    /// Without an AI the sentence count comes from the spell checker: a finished sentence typed here
-    /// that the analysis found nothing in, and TypeRight did not change, counts as right the first time.
-    private func countWithoutAI(_ sentences: [CoachText.Sentence], scalars: [Unicode.Scalar]) {
-        guard let analysis = latestAnalysis, analysis.text == latestText else { return }
-        for sentence in sentences where sentence.finished && memory.isTouched(sentence.range) {
-            let text = CoachText.substring(scalars, sentence.range)
-            let key = Self.sentenceKey(text)
-            guard !memory.checked.contains(key),
-                  ChineseText.latinWordCount(in: scalars, from: sentence.range.lowerBound, to: sentence.range.upperBound) >= 3 else { continue }
-            memory.checked.insert(key)
-            let clean = !analysis.errors.contains { $0.start < sentence.range.upperBound && $0.end > sentence.range.lowerBound }
-                && !memory.wasFixed(within: sentence.range)
-            notebook.noteSentence(clean: clean)
-            if clean { notebook.noteCorrectUse(in: text) }
-        }
     }
 
     // MARK: - Text helpers

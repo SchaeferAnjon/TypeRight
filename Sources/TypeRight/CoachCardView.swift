@@ -215,7 +215,7 @@ struct CoachCardView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         main
                         if follow?.composing == true || follow?.inputMethodOn == true, follow?.phase == .typing { composingHint }
-                        if keys != .readOnly { keysRow }
+                        if keys != .readOnly || isLocal { footer }
                     }
                     .padding(.horizontal, 14)
                     .padding(.vertical, 12)
@@ -642,6 +642,22 @@ struct CoachCardView: View {
     }
 
     // MARK: Keys row
+
+    /// The keys, and on a sentence card Harper found on this Mac, 本机查 in small grey at the right.
+    private var footer: some View {
+        HStack(spacing: 0) {
+            if keys != .readOnly { keysRow }
+            if isLocal {
+                Spacer(minLength: 12)
+                Text("本机查").font(.system(size: 12)).foregroundStyle(TR.text3).lineLimit(1)
+            }
+        }
+    }
+
+    private var isLocal: Bool {
+        if case let .sentence(_, check) = content { return check.local }
+        return false
+    }
 
     private var composingHint: some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {

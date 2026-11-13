@@ -2,8 +2,9 @@
 //  AIPlan.swift
 //  TypeRight
 //
-//  The three ways TypeRight can work and where an AI card's request goes. Spelling and basic
-//  grammar are always checked on this Mac (Harper), whatever the plan. There are no free uses:
+//  The three ways TypeRight can work and where an AI card's request goes. Spelling and some
+//  common grammar mistakes are always checked on this Mac (Harper, CoachLocalGrammar), whatever
+//  the plan. There are no free uses:
 //  the AI cards come with a membership or the user's own key.
 //
 

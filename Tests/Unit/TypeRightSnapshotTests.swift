@@ -139,6 +139,25 @@ final class TypeRightSnapshotTests: XCTestCase {
         }
     }
 
+    /// The sentence card without AI (2026-11-13): on the window the app uses, light and dark, then
+    /// with two changes, while typing along and when done.
+    func testDrawLocalGrammarCard() throws {
+        let card = try TypeRightCardSamples.localSentence("I has a question.", [("has", "Agreement::the_form_of_the_verb_must_agree_in", "have")])
+        let two = try TypeRightCardSamples.localSentence("He don't like a apple.", [
+            ("don't", "Agreement::the_form_of_the_verb_must_agree_in", "doesn't"), ("a", "Miscellaneous::incorrect_indefinite_article", "an"),
+        ])
+        let word = try TypeRightCardSamples.word()
+        for (name, content) in [("card-local-grammar", card), ("card-local-grammar-two", two)] {
+            for dark in [false, true] {
+                let window = CoachCardPanel().place(content, keys: .normal, anchor: word)
+                save(window, dark: dark, backdrop: NSColor(white: 0.5, alpha: 0.15), to: dir.appendingPathComponent("\(name)-\(dark ? "dark" : "light").png"))
+            }
+        }
+        let tail = CoachTailPlacement(pointsUp: true, x: 20)
+        draw(CoachCardView(content: card, tail: tail, follow: CoachFollow(target: "have", right: 2)), nil, "card-local-grammar-typing")
+        draw(CoachCardView(content: card, tail: tail, follow: CoachFollow(phase: .done(filled: false), target: "have")), nil, "card-local-grammar-done")
+    }
+
     // MARK: What changed in this round (light)
 
     func testDrawReviewScreens() throws {

@@ -419,7 +419,7 @@ struct TRLicenseBox: View {
             }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("这台 Mac 不再用授权码 \(code ?? "")，之后只在本机查拼写和基础语法。授权码空出一个位置，可以在别的 Mac 上输入；会员本身不受影响。")
+            Text("这台 Mac 不再用授权码 \(code ?? "")，之后只在本机查拼写和几类常见语法错。授权码空出一个位置，可以在别的 Mac 上输入；会员本身不受影响。")
         }
     }
 
@@ -513,7 +513,7 @@ struct TRAccountPage: View {
                 HStack(spacing: 12) {
                     VStack(alignment: .leading, spacing: 1) {
                         Text("AI 用哪种").font(.system(size: 13)).foregroundStyle(TR.text)
-                        Text("拼写和基础语法一直在本机查，不算次数").font(.system(size: 12)).foregroundStyle(TR.text2)
+                        Text("拼写和几类常见语法错一直在本机查，不算次数").font(.system(size: 12)).foregroundStyle(TR.text2)
                     }
                     Spacer(minLength: 12)
                     TRSegmented(options: [(AIPlan.member, "会员"), (.own, "自带 Key"), (.local, "只用本机")],
@@ -581,7 +581,7 @@ struct TRAccountPage: View {
                 Text("只用本机检查").font(.system(size: 15, weight: .semibold)).foregroundStyle(TR.text)
                 Spacer()
             }
-            Text("拼写和基础语法在这台 Mac 上查，什么都不发出去；没有中文变英文和整句讲解。")
+            Text("拼写和几类常见语法错（像 I has、a apple、have went）在这台 Mac 上查，什么都不发出去；没有中文变英文和 AI 的整句讲解。")
                 .font(.system(size: 13)).foregroundStyle(TR.text).lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true).padding(.top, 10)
             if let note = facts.memberNote {
@@ -886,7 +886,7 @@ struct TRPricingView: View {
     private var localRow: some View {
         HStack(spacing: 12) {
             Image(systemName: "laptopcomputer").font(.system(size: 13)).foregroundStyle(TR.text2)
-            Text("不想用 AI 也行：只用本机检查，拼写和基础语法在这台 Mac 上查，不联网。")
+            Text("不想用 AI 也行：只用本机检查，拼写和几类常见语法错在这台 Mac 上查，不联网。")
                 .font(.system(size: 13)).foregroundStyle(TR.text2).fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 8)
             Button(facts.plan == .local ? "在用" : "改成只用本机") { handler.choose(.local) }
@@ -897,8 +897,8 @@ struct TRPricingView: View {
     }
 
     private static let questions: [(String, String)] = [
-        ("一次怎么算？", "一个用到 AI 的弹框算一次：中文变英文，或一句的整句检查。拼写和基础语法在本机查，不算。"),
-        ("不买会员能用吗？", "能。拼写和基础语法在本机查，一直免费；中文变英文和整句讲解也可以填自己的 AI Key，永久免费。"),
+        ("一次怎么算？", "一个用到 AI 的弹框算一次：中文变英文，或一句的整句检查。拼写和几类常见语法错在本机查，不算。"),
+        ("不买会员能用吗？", "能。拼写和几类常见语法错（像 I has、a apple）在本机查，一直免费；中文变英文和整句讲解也可以填自己的 AI Key，永久免费。"),
         ("怎么付钱、怎么取消？", "刷卡（人民币或美元）按月或按年自动续费，随时在「管理订阅」里取消，用到当期结束。人民币也能微信一次买 1 个月或 1 年，不自动续费。"),
         ("会员和自带 Key 有什么区别？", "会员不用去各家申请 Key，费用我们出，每天 500 次；自带 Key 永久免费、不限次数，费用走你自己的账户。随时能换。"),
         ("我打的字会被存吗？", "会员的请求经我们的服务器转给 DeepSeek，只记次数，不存内容。错题本只在你的 Mac 上。"),

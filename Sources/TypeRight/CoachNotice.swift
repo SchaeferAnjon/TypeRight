@@ -4,8 +4,8 @@
 //
 //  When the member plan cannot use the AI (no membership, ended, renewal not charged, today's 500
 //  used, no network), a Chinese word typed gets no English. The first time, a notice card says so
-//  next to the word, in the same place and look as any card: what happened, that spelling and basic
-//  grammar are still checked, and what to do. After that the same thing only gets a small capsule
+//  next to the word, in the same place and look as any card: what happened, that spelling and some
+//  common grammar mistakes are still checked on this Mac, and what to do. After that the same thing only gets a small capsule
 //  under the word («没翻：…») that goes by itself (design/membership/redesign, «一件事只说一次»).
 //  The notice takes no Tab (it has nothing to write); Esc closes it, typing on makes it step aside,
 //  its buttons are for the mouse.
@@ -48,29 +48,29 @@ struct CoachNotice: Equatable {
         switch issue {
         case .noMember:
             return CoachNotice(issue: issue, title: "还没开会员",
-                               body: missed + "拼写和基础语法照样在本机查；想用中文变英文和整句讲解，可以开会员，或填自己的 Key（永久免费）。",
+                               body: missed + "拼写和几类常见语法错照样在本机查；想用中文变英文和整句讲解，可以开会员，或填自己的 Key（永久免费）。",
                                links: [Link(action: .pricing, label: "看看会员"), Link(action: .ownKey, label: "填 Key")],
                                pill: "没翻：还没开会员")
         case .ended:
             let until = (facts?.status?.memberUntil).flatMap { MemberStatus.date($0) }
             return CoachNotice(issue: issue, title: until.flatMap { facts?.day($0) }.map { "会员 \($0)到期了" } ?? "会员到期了",
-                               body: missed + "拼写和基础语法照样查；续上会员或填自己的 Key，中文变英文就回来，授权码不变。",
+                               body: missed + "拼写和几类常见语法错照样查；续上会员或填自己的 Key，中文变英文就回来，授权码不变。",
                                links: [Link(action: .pricing, label: "续上会员"), Link(action: .ownKey, label: "填 Key")],
                                pill: "没翻：会员到期了")
         case .paymentFailed:
             return CoachNotice(issue: issue, title: "续费没扣成",
-                               body: missed + "拼写和基础语法照样查；在「管理订阅」里换一张卡，中文变英文就回来。",
+                               body: missed + "拼写和几类常见语法错照样查；在「管理订阅」里换一张卡，中文变英文就回来。",
                                links: [Link(action: .account, label: "换一张卡")],
                                pill: "没翻：续费没扣成")
         case .dailyLimit:
             let costCap = facts?.status?.limitBy == "cost"
             let back = reset.map { "\($0) 恢复" } ?? "明天恢复"
             return CoachNotice(issue: issue, title: costCap ? "今天的用量到上限了" : "今天的 500 次用完了",
-                               body: "「\(word)」这次没翻成英文，\(back)。这之前拼写和基础语法照样查。",
+                               body: "「\(word)」这次没翻成英文，\(back)。这之前拼写和几类常见语法错照样查。",
                                links: [], pill: "没翻：\(back)")
         case .offline:
             return CoachNotice(issue: issue, title: "没连上网",
-                               body: missed + "拼写和基础语法照样查；网好了自己接上，不用管它。",
+                               body: missed + "拼写和几类常见语法错照样查；网好了自己接上，不用管它。",
                                links: [], pill: "没翻：没网")
         }
     }

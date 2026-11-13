@@ -25,9 +25,22 @@ enum TypeRightCardSamples {
                                    check: CoachSentenceCheck(ok: false,
                                                              corrected: "I want to book a meeting room tomorrow because I have a question.",
                                                              changes: [.init(from: "I has", to: "I have", why: "主语是 I，动词要用 have。", type: "agreement")]))),
+            ("sentence-local", try localSentence("I has a question.", [("has", "Agreement::the_form_of_the_verb_must_agree_in", "have")])),
             ("thinking", .thinking),
             ("failed", .failed(try XCTUnwrap(CoachAIError.http(401).errorDescription), keyRejected: true)),
         ]
+    }
+
+    /// The card without AI for Harper's findings (words, lint id, fix) in `text`, as CoachLocalGrammar makes it.
+    static func localSentence(_ text: String, _ findings: [(words: String, id: String, fix: String)]) throws -> CoachCardContent {
+        let scalars = Array(text.unicodeScalars)
+        let errors = try findings.map { item in
+            let found = try XCTUnwrap(CoachText.wordRange(of: item.words, in: text))
+            let start = text.unicodeScalars.distance(from: text.unicodeScalars.startIndex, to: found.lowerBound)
+            return GrammarErrorModel(start: start, end: start + item.words.unicodeScalars.count, message: "", severity: .warning,
+                                     category: String(item.id.prefix { $0 != ":" }), lintId: item.id, suggestions: [item.fix])
+        }
+        return .sentence(original: text, check: try XCTUnwrap(CoachLocalGrammar.check(0 ..< scalars.count, in: scalars, errors: errors)))
     }
 
     /// A word in the middle of the main screen, in Cocoa coordinates.

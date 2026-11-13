@@ -307,7 +307,7 @@ struct TRAccountFacts: Equatable {
 
     // MARK: The status block (member plan)
 
-    static let perUse = "一次 = 一个用到 AI 的弹框：中文变英文，或查一整句。拼写和基础语法在本机查，不算次数。"
+    static let perUse = "一次 = 一个用到 AI 的弹框：中文变英文，或查一整句。拼写和几类常见语法错在本机查，不算次数。"
 
     var statusInfo: TRStatusInfo {
         var info = baseStatus
@@ -323,14 +323,14 @@ struct TRAccountFacts: Equatable {
                                 numLabel: used == nil ? nil : checkedAt.map { "上次 \(clock($0))" } ?? "上次",
                                 num: used.map(String.init), denom: used == nil ? nil : "/ \(limit) 次", numTone: .off,
                                 meter: meter, meterTone: .off,
-                                line: "联网后自己接上。这之前 AI 先停，拼写和基础语法照样在本机查。", actions: [.retry])
+                                line: "联网后自己接上。这之前 AI 先停，拼写和几类常见语法错照样在本机查。", actions: [.retry])
         }
         switch state {
         case .unavailable:
             return TRStatusInfo(icon: .alert, tone: .off, title: "调试版没连会员服务器", line: MemberText.detail(.unavailable))
         case .noMember:
             return TRStatusInfo(icon: .alert, tone: .warn, title: "还没开会员",
-                                line: "开会员就能用中文变英文和整句讲解：不用申请 Key，每天 \(limit) 次。也可以改用自带 Key，永久免费。现在只在本机查拼写和基础语法。",
+                                line: "开会员就能用中文变英文和整句讲解：不用申请 Key，每天 \(limit) 次。也可以改用自带 Key，永久免费。现在只在本机查拼写和几类常见语法错。",
                                 fine: Self.perUse, actions: [.buy, .enterCode])
         case .connecting, .offline:
             return TRStatusInfo(icon: .spark, title: "会员", line: "正在连会员服务器…")
@@ -362,18 +362,18 @@ struct TRAccountFacts: Equatable {
                                 meter: meter, line: line, actions: actions)
         case .dailyLimit:
             let line = costCap
-                ? "今天用的 AI 量到上限了（句子很长时会比次数先到），\(resetText) 恢复。这之前拼写和基础语法照样查。"
-                : "今天的 \(limit) 次用完了，\(resetText) 恢复。这之前拼写和基础语法照样查。"
+                ? "今天用的 AI 量到上限了（句子很长时会比次数先到），\(resetText) 恢复。这之前拼写和几类常见语法错照样查。"
+                : "今天的 \(limit) 次用完了，\(resetText) 恢复。这之前拼写和几类常见语法错照样查。"
             return TRStatusInfo(icon: .seal, title: kindTitle, numLabel: "今天", num: String(used ?? limit), denom: "/ \(limit) 次",
                                 meter: 1, meterTone: .warn, line: line, actions: status?.autoRenew == true ? [.portal] : [])
         case .paymentFailed:
             return TRStatusInfo(icon: .card, tone: .warn, title: "续费没扣成，会员停了",
-                                line: "上一期没扣成，现在只在本机查拼写和基础语法。在「管理订阅」里换一张卡就恢复，授权码不变。",
+                                line: "上一期没扣成，现在只在本机查拼写和几类常见语法错。在「管理订阅」里换一张卡就恢复，授权码不变。",
                                 actions: [.fixCard])
         case .ended:
             let title = MemberStatus.date(status?.memberUntil).map { "会员 \(day($0))到期了" } ?? "会员到期了"
             return TRStatusInfo(icon: .alert, tone: .warn, title: title,
-                                line: "现在只在本机查拼写和基础语法。续上会员就回来，授权码不变。", actions: [.renew, .enterCode])
+                                line: "现在只在本机查拼写和几类常见语法错。续上会员就回来，授权码不变。", actions: [.renew, .enterCode])
         }
     }
 

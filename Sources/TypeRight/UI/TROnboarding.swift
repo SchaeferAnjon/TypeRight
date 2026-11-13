@@ -232,7 +232,7 @@ struct TROnboardingView: View {
     private var ai: some View {
         VStack(alignment: .leading, spacing: 16) {
             heading("中文变英文、整句讲解要用 AI",
-                    "拼写和基础语法在这台 Mac 上查，不花钱，也不算次数。中文变英文和整句讲解要用 AI：选一种，以后在 设置 › 账号与会员 里随时换；不选就先只在本机查。")
+                    "拼写和几类常见语法错（像 I has、a apple）在这台 Mac 上查，不花钱，也不算次数。中文变英文和整句讲解要用 AI：选一种，以后在 设置 › 账号与会员 里随时换；不选就先只在本机查。")
             memberChoice.padding(.top, 6)
             VStack(spacing: 0) {
                 choiceRow(.own, "我有自己的 AI Key", "永久免费、不限次数，\(CoachProvider.allCases.count) 家可选", opens: true)
@@ -240,7 +240,7 @@ struct TROnboardingView: View {
                     TRAISettings(showsIntro: false).padding(.horizontal, 12).padding(.bottom, 12)
                 }
                 Rectangle().fill(TR.line).frame(height: 0.5)
-                choiceRow(.local, "先不用 AI，只在本机查", "打中文时不弹，拼写和基础语法照样查", opens: false)
+                choiceRow(.local, "先不用 AI，只在本机查", "打中文时不弹，拼写和几类常见语法错照样查", opens: false)
             }
             .background(TR.card, in: RoundedRectangle(cornerRadius: 8))
             .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(TR.line, lineWidth: 0.5))

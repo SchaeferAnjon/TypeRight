@@ -24,7 +24,7 @@
 | `a meeting room tomorow`（拼错一个词） | tomorow → **tomorrow** | Tab 改好；不理它接着打，卡自己让开 |
 | `because I has a question.`（一句打完） | 整句改好的版本，改动处标出来，加一句讲解：主语是 I，用 have | Tab 整句换掉 |
 
-- 拼写和基础语法在你的 Mac 上用开源的 [Harper](https://github.com/Automattic/harper) 查，不联网，不算次数。
+- 拼写和几类常见语法错在你的 Mac 上用开源的 [Harper](https://github.com/Automattic/harper) 查，不联网，不算次数。查的是这几类：代词作主语时的主谓一致（I has、he don't、they was）、a / an、did 和 have 后面的动词形式（didn't went、have went）、more taller 这类多余的 more / most、advices 这类不可数名词加了 s、could of、discuss about、its / it's、their / they're。没开 AI 时一句打完，查到这几类就弹一张写着「本机查」的整句卡，Tab 跟着打，Esc 不改。
 - 中文变英文和整句检查要用 AI，用法见下面「三种用法」。
 - 讲解默认用简体中文，设置里能换成繁體中文、English、日本語、한국어、Deutsch、Français、Español、Italiano。
 - 你按 Tab 接受的改法记进错题本，从中文变来的词记进生词本，同一个点用对 3 次算会了；主窗口的「进步」看最近 14 天。
@@ -45,7 +45,7 @@
 
 | | 怎么开始 | 花多少 |
 |---|---|---|
-| **只用本机检查** | 设置里把用法选成「只用本机检查」 | 免费。只查拼写和基础语法，什么都不发出去；没有中文变英文和整句检查 |
+| **只用本机检查** | 设置里把用法选成「只用本机检查」 | 免费。只查拼写和几类常见语法错，什么都不发出去；没有中文变英文和 AI 整句检查 |
 | **自带 Key** | 在「设置 › AI 服务商」里点一家，粘贴你的 API Key（[5 分钟图文教程](https://typeright.us-cloud.uk/#page=guide)） | 永久免费，不限次数；服务商按用量向你自己的账户收费，用 DeepSeek 查一句约 0.003 元 |
 | **会员** | 不用申请 Key：在「设置 › 账号与会员」里开会员，浏览器打开 Stripe 付款页，付完回到应用就生效 | 每月 ¥9.9 / $1.99，或每年 ¥99 / $19.9，Stripe 自动续费，随时取消；人民币也能用微信一次买 1 个月或 1 年，不自动续费。每天 500 次 AI 检查（一个用到 AI 的小卡算一次），按 UTC 日期重置；一个授权码最多 2 台 Mac |
 
@@ -55,7 +55,7 @@
 
 ## 隐私
 
-拼写和基础语法在你的 Mac 上查，不联网；用到 AI 时只发你正在打的这一句：自带 Key 时直接发给你选的服务商，会员时经我们的服务器转给 DeepSeek，服务器不存你打的字。系统标成密码的输入框不读，密码管理器和钥匙串访问整个不看。全文见[隐私政策](https://typeright.us-cloud.uk/#page=privacy)。
+拼写和几类常见语法错在你的 Mac 上查，不联网；用到 AI 时只发你正在打的这一句：自带 Key 时直接发给你选的服务商，会员时经我们的服务器转给 DeepSeek，服务器不存你打的字。系统标成密码的输入框不读，密码管理器和钥匙串访问整个不看。全文见[隐私政策](https://typeright.us-cloud.uk/#page=privacy)。
 
 ## 从源码编译
 
