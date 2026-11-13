@@ -91,12 +91,17 @@ final class FakeCoachHost: TypingCoachHost {
     var coachAppID: String? { appID }
     var coachFieldID: String? { fieldID }
     var coachIsWatching: Bool { watching }
-    var coachIsComposing: Bool { composing }
+    /// nil plays an app that does not say (Chrome); `composing` is what an app that does say says.
+    var reportsMarkedText = true
+    var lettersCompose = false
+    var coachMarkedText: Bool? { reportsMarkedText ? composing : nil }
+    var coachInputMethodComposesLetters: Bool { lettersCompose }
 }
 
 @MainActor
 final class FakeCardDisplay: CoachCardDisplay {
     var onClickOutside: (() -> Void)?
+    var onNoticeAction: ((CoachNotice.Action) -> Void)?
     private(set) var shown: [(content: CoachCardContent, keys: CoachCardKeys, anchor: CGRect)] = []
     private(set) var visible: CoachCardContent?
     /// False plays a card window that never makes it onto the screen (the 0 × 0 window of 2026-11-11).
@@ -390,6 +395,8 @@ class TypeRightCoachTestCase: XCTestCase {
         case .sentence: "sentence"
         case .thinking: "thinking"
         case .failed: "failed"
+        case .notice: "notice"
+        case .pill: "pill"
         case nil: nil
         }
     }

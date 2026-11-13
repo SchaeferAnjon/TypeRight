@@ -1,6 +1,12 @@
 #!/bin/bash
 # Release script for TypeRight (based on TextWarden's)
 # Handles: archive, sign, DMG creation, appcast update, GitHub release
+#
+# Not notarized (2026-11-13, like GetNewWord and Ask Free): without the "TypeRight" notarytool
+# keychain profile the release goes out signed with Developer ID only. The first launch then stops
+# at Gatekeeper; README, the website and the release notes tell users to click 仍要打开 in
+# System Settings › Privacy & Security. Create the profile (see notarize_app) to notarize again.
+# One maintainer, no pull requests: the release commit goes on the current branch, unsigned.
 
 set -e
 set -o pipefail
@@ -26,6 +32,8 @@ ENTITLEMENTS="TextWarden.entitlements"
 APPLE_ID="${APPLE_ID:-}"  # Set via environment or keychain
 TEAM_ID="3H5S5NXPXS"
 NOTARY_PROFILE="TypeRight"  # xcrun notarytool store-credentials "TypeRight" ...
+# Said in the release notes while releases are not notarized.
+UNNOTARIZED_NOTE="这一版没有经过苹果公证：第一次打开时如果提示无法验证开发者，打开「系统设置 › 隐私与安全性」，拉到最下面点「仍要打开」。之后自动更新不再弹。"
 
 # Sparkle update signing. The private key lives in the login keychain under its own account,
 # like GetNewWord's ("getnewword"), so it never mixes with the other apps' keys.
@@ -216,42 +224,39 @@ parse_version_type() {
     fi
 }
 
-# Generate release notes from git commits
-# Format: - commit message (short hash) by @author
-# Links to GitHub commits for full context
+# The last release tag before this version (v*: other tags, like a marker at the fork, do not count)
+last_release_tag() {
+    local version="$1"
+    git -C "$PROJECT_ROOT" tag --list 'v*' --sort=-creatordate | grep -v "^v$version$" | head -1 || true
+}
+
+# Release notes. Since the last release: one line per commit (subject and short hash). The first
+# release has no tag to start from, and TypeRight's history begins with TextWarden's 1,000 commits,
+# so it gets a fixed text instead.
 # Note: Does NOT include "Full Changelog" link - that's added only for GitHub releases
 generate_release_notes() {
     local from_tag="$1"
     local to_ref="${2:-HEAD}"
 
-    echo "## What's Changed"
-    echo ""
+    if [[ -z "$from_tag" ]] || ! git -C "$PROJECT_ROOT" rev-parse -q --verify "$from_tag" >/dev/null; then
+        cat <<'NOTES'
+## TypeRight 第一版
 
-    # Get all commits since last tag (or since beginning if no tag)
-    local log_range=""
-    if [[ -n "$from_tag" ]] && git rev-parse "$from_tag" >/dev/null 2>&1; then
-        log_range="$from_tag..$to_ref"
-    else
-        log_range="$to_ref"
+- Mac 菜单栏上的英文打字助手：拼错一个词、不会说先打了中文、一句打完语法不对，它在那个词旁边弹一张小卡，按 Tab 改好，按 Esc 不改
+- 拼写和基础语法在你的 Mac 上用 Harper 查，不联网
+- 中文和拼音变英文、整句检查：填自己的 AI Key（DeepSeek、智谱、通义千问等），或开会员（每月 ¥9.9 / $1.99，每天 500 次）
+- 按 Tab 改过的记进错题本，从中文变来的词记进生词本，同一个点用对 3 次算会了
+- 基于 TextWarden（Apache-2.0）改写，改了哪些见 NOTICE
+NOTES
+        return
     fi
 
-    # Format: - Subject ([hash](url)) by @author
-    # Look up actual GitHub username via API for each commit
-    git log $log_range --no-merges --pretty=format:"%s|%h|%an" | \
-        grep -v "^Merge" | \
+    echo "## What's Changed"
+    echo ""
+    git -C "$PROJECT_ROOT" log "$from_tag..$to_ref" --no-merges --pretty=format:"%s|%h" | \
         grep -v "^WIP" | \
-        while IFS='|' read -r subject hash local_author; do
-            # Look up actual GitHub username from commit via API
-            # Only use @username for valid GitHub logins (no spaces, not JSON error)
-            local api_response
-            api_response=$(gh api "repos/$GITHUB_REPO/commits/$hash" --jq '.author.login' 2>/dev/null)
-            if [[ $? -eq 0 && -n "$api_response" && "$api_response" != "null" && ! "$api_response" =~ [[:space:]] && ! "$api_response" =~ ^\{.*\}$ ]]; then
-                # Valid GitHub username - use @mention
-                echo "- $subject ([\`$hash\`](https://github.com/$GITHUB_REPO/commit/$hash)) by @$api_response"
-            else
-                # API failed (commit not pushed) or no GitHub account linked - use plain name
-                echo "- $subject ([\`$hash\`](https://github.com/$GITHUB_REPO/commit/$hash)) by $local_author"
-            fi
+        while IFS='|' read -r subject hash; do
+            echo "- $subject ([\`$hash\`](https://github.com/$GITHUB_REPO/commit/$hash))"
         done
 }
 
@@ -260,6 +265,7 @@ generate_release_notes() {
 generate_changelog_link() {
     local from_tag="$1"
     local to_ref="${2:-HEAD}"
+    [[ -n "$from_tag" ]] || return 0
     echo ""
     echo ""
     echo "**Full Changelog**: https://github.com/$GITHUB_REPO/compare/$from_tag...$to_ref"
@@ -366,56 +372,42 @@ export_app() {
     echo "$export_path/$APP_NAME.app"
 }
 
-# Notarize the app
+# Whether this Mac can notarize: the notarytool keychain profile, or APPLE_ID with its password in the keychain
+can_notarize() {
+    [[ -n "$APPLE_ID" ]] && return 0
+    xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 2>&1
+}
+
+# Notarize the DMG when this Mac can; a failed notarization stops the release. Without credentials
+# the release goes out unnotarized (TypeRight's first releases are, like the sibling apps').
 notarize_app() {
     local dmg_path="$1"
-    local required="${2:-false}"
 
-    echo -e "${BLUE}Notarizing app...${NC}"
-
-    # Check for Apple ID credentials
-    if [[ -z "$APPLE_ID" ]]; then
-        echo -e "${YELLOW}APPLE_ID not set. Checking keychain for notarytool credentials...${NC}"
-        # Try using stored keychain profile
-        if ! xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 2>&1; then
-            if [[ "$required" == "true" ]]; then
-                echo -e "${RED}No keychain profile found. Production releases require notarization.${NC}"
-            else
-                echo -e "${YELLOW}No keychain profile found. Skipping notarization.${NC}"
-            fi
-            echo -e "${YELLOW}Configure notarization with:${NC}"
-            echo -e "  xcrun notarytool store-credentials \"$NOTARY_PROFILE\" --apple-id YOUR_APPLE_ID --team-id $TEAM_ID"
-            if [[ "$required" == "true" ]]; then
-                return 1
-            fi
-            return 0
-        fi
-        local auth_args="--keychain-profile $NOTARY_PROFILE"
+    if ! can_notarize; then
+        echo -e "${YELLOW}不公证：没有 notarytool 的钥匙串配置 \"$NOTARY_PROFILE\"。发布说明里写了第一次打开怎么点「仍要打开」。${NC}"
+        echo -e "  以后要公证：xcrun notarytool store-credentials \"$NOTARY_PROFILE\" --apple-id <Apple ID> --team-id $TEAM_ID"
+        return 0
+    fi
+    local auth_args
+    if [[ -n "$APPLE_ID" ]]; then
+        auth_args="--apple-id $APPLE_ID --team-id $TEAM_ID --password @keychain:AC_PASSWORD"
     else
-        local auth_args="--apple-id $APPLE_ID --team-id $TEAM_ID --password @keychain:AC_PASSWORD"
+        auth_args="--keychain-profile $NOTARY_PROFILE"
     fi
 
-    # Submit for notarization
     echo -e "${BLUE}Submitting to Apple notary service...${NC}"
     local result
-    # A failed submit is judged below (and may be allowed for prereleases), not by set -e.
+    # Judged below, not by set -e, so the notary's own words are shown.
     result=$(xcrun notarytool submit "$dmg_path" $auth_args --wait 2>&1) || true
-
-    if echo "$result" | grep -q "status: Accepted"; then
-        echo -e "${GREEN}Notarization successful${NC}"
-
-        # Staple the ticket to the DMG
-        echo -e "${BLUE}Stapling notarization ticket...${NC}"
-        xcrun stapler staple "$dmg_path"
-        echo -e "${GREEN}Stapling complete${NC}"
-    else
+    if ! echo "$result" | grep -q "status: Accepted"; then
         echo -e "${RED}Notarization failed:${NC}"
         echo "$result"
-        if [[ "$required" == "true" ]]; then
-            return 1
-        fi
-        echo -e "${YELLOW}Continuing prerelease without notarization...${NC}"
+        return 1
     fi
+    echo -e "${GREEN}Notarization successful${NC}"
+    echo -e "${BLUE}Stapling notarization ticket...${NC}"
+    xcrun stapler staple "$dmg_path"
+    echo -e "${GREEN}Stapling complete${NC}"
 }
 
 # Create DMG
@@ -735,12 +727,11 @@ do_release() {
 
     local version_type=$(parse_version_type "$version")
     local is_prerelease="false"
-    local notarization_required="true"
-
     if [[ "$version_type" != "release" ]]; then
         is_prerelease="true"
-        notarization_required="false"
     fi
+    local notarized="no"
+    if can_notarize; then notarized="yes"; fi
 
     echo ""
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -750,6 +741,7 @@ do_release() {
     echo -e "  Version:     ${GREEN}$version${NC}"
     echo -e "  Type:        ${YELLOW}$version_type${NC}"
     echo -e "  Prerelease:  $is_prerelease"
+    echo -e "  Notarized:   $notarized"
     echo ""
 
     # For production releases, require explicit confirmation
@@ -773,27 +765,16 @@ do_release() {
     # Create release directory
     mkdir -p "$RELEASE_DIR"
 
-    # Get last tag for release notes
-    local last_tag=$(git tag --sort=-creatordate | grep -v "^v$version$" | head -1)
-
-    # Ensure all commits are pushed before generating release notes
-    # This allows GitHub API to look up the proper @username for each commit
-    local unpushed_count=$(git rev-list --count @{u}..HEAD 2>/dev/null || echo "0")
-    if [[ "$unpushed_count" -gt 0 ]]; then
-        echo -e "${BLUE}Pushing $unpushed_count unpushed commit(s) for release notes...${NC}"
-        git push || {
-            echo -e "${RED}Failed to push commits. Please push manually first.${NC}"
-            exit 1
-        }
-    fi
-
-    # Generate release notes (without changelog link - that's only for GitHub releases)
+    # Release notes since the last release (nothing is pushed or looked up on GitHub here)
+    local last_tag
+    last_tag=$(last_release_tag "$version")
     echo -e "${BLUE}Generating release notes...${NC}"
-    local release_notes=$(generate_release_notes "$last_tag")
+    local release_notes
+    release_notes=$(generate_release_notes "$last_tag")
+    if [[ "$notarized" == "no" ]]; then
+        release_notes+=$'\n\n'"$UNNOTARIZED_NOTE"
+    fi
     echo "$release_notes"
-    # Show changelog link in console for reference (but don't include in Sparkle appcast)
-    echo ""
-    echo "**Full Changelog**: https://github.com/$GITHUB_REPO/compare/$last_tag...HEAD"
     echo ""
 
     # Update version in Info.plist
@@ -819,7 +800,7 @@ do_release() {
     dmg_path=$(create_dmg "$app_path" "$version")
 
     # Notarize the DMG FIRST (stapling modifies the DMG)
-    notarize_app "$dmg_path" "$notarization_required"
+    notarize_app "$dmg_path"
 
     # Sign with Sparkle AFTER stapling (signature must be for final DMG)
     local signature
@@ -831,7 +812,7 @@ do_release() {
     # Commit version changes
     echo -e "${BLUE}Committing version changes...${NC}"
     git add "$PROJECT_ROOT/Info.plist" "$PROJECT_ROOT/appcast.xml"
-    git commit -s -S -m "chore: release v$version"
+    git commit -m "chore: release v$version"
 
     # Create git tag
     git tag -a "v$version" -m "Release v$version"
@@ -843,9 +824,8 @@ do_release() {
     echo ""
     echo -e "Next steps:"
     echo -e "  1. Review: git log -1 && git diff HEAD~1"
-    echo -e "  2. Push:   git push -u origin HEAD && git push --tags"
-    echo -e "  3. Create PR: gh pr create --title 'Release v$version' --body 'Release v$version'"
-    echo -e "  4. Merge PR, then: make release-upload VERSION=$version"
+    echo -e "  2. Push:   git push origin HEAD:main && git push origin v$version"
+    echo -e "  3. Upload: Scripts/release.sh upload $version"
     echo ""
     echo -e "DMG location: $dmg_path"
 }
@@ -868,10 +848,16 @@ do_upload() {
 
     # Get the previous tag (excluding the one we're releasing) for release notes
     # This finds the most recent tag that isn't the current version
-    local last_tag=$(git tag --sort=-creatordate | grep -v "^v$version$" | head -1)
-    local release_notes=$(generate_release_notes "$last_tag" "v$version")
+    local last_tag
+    last_tag=$(last_release_tag "$version")
+    local release_notes
+    release_notes=$(generate_release_notes "$last_tag" "v$version")
     # Add changelog link for GitHub releases (not included in Sparkle appcast)
     release_notes+=$(generate_changelog_link "$last_tag" "v$version")
+    # The DMG says whether it was notarized: a stapled ticket.
+    if ! xcrun stapler validate "$dmg_path" >/dev/null 2>&1; then
+        release_notes+=$'\n\n'"$UNNOTARIZED_NOTE"
+    fi
 
     local version_type=$(parse_version_type "$version")
     local is_prerelease="false"
@@ -906,7 +892,7 @@ usage() {
     echo "Commands:"
     echo "  release [VERSION]     Build and prepare release"
     echo "  upload [VERSION]      Upload prepared release to GitHub"
-    echo "  notes [FROM_TAG] [TO_TAG]  Generate release notes (TO_TAG defaults to HEAD)"
+    echo "  notes [FROM_TAG] [TO_TAG]  Generate release notes (no FROM_TAG: since the last v* tag, or the first-release text)"
     echo "  version               Show current version"
     echo ""
     echo "Examples:"
@@ -926,7 +912,7 @@ case "${1:-}" in
         do_upload "$2"
         ;;
     notes)
-        generate_release_notes "$2" "$3"
+        generate_release_notes "${2:-$(last_release_tag "")}" "$3"
         ;;
     version)
         echo "$(get_version) (build $(get_build))"

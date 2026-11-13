@@ -84,25 +84,14 @@ Logger.warning("Failed to get bounds for element: \(elementRole)", category: Log
 
 ## Git Workflow
 
-### Branch Protection (MANDATORY)
-
-**NEVER commit directly to `main`.** All changes must go through pull requests.
-
-1. Create a feature branch from `main` before making any changes
-2. Commit to the feature branch
-3. Push the branch and create a pull request targeting `main`
-4. Merge only after review/approval
-
-Branch naming: `<type>/<short-description>` (e.g., `feat/outlook-support`, `fix/underline-positioning`)
+TypeRight has one maintainer: there are no pull requests and no protected branch. Work on the current branch; the public repository's `main` is pushed from it.
 
 ### Commit Rules
 
 - Only commit after user validates and explicitly requests it
 - **Always run `make ci-check` and fix all findings before committing**
 - For app/runtime or dependency changes, also run the local CPU smoke gate before committing; see [CPU profiling](docs/CPU_PROFILING.md#local-regression-gate). Use the full suite for analysis, AX, timers, overlays, or performance changes. Docs-only changes are exempt. Record the baseline/candidate revisions and results; missing permissions, stale state, or noisy measurements are inconclusive, not passes. Never replace a baseline just to make the gate pass.
-- Always sign-off git commits (`-s`)
-- **All commits must be cryptographically signed (`-S`).** Never use `--no-gpg-sign` or skip signing.
-- When committing: `git commit -s -S -m "message"`
+- Commits are not signed and carry no sign-off line: `git commit -m "<type>: <description>"`
 
 ### Conventional Commits (MANDATORY)
 
@@ -128,23 +117,15 @@ make ci-check       # Run CI checks - ONLY before committing, not after every ch
 
 ## Releasing
 
-Use the makefile targets to create releases. The release process handles building, code signing, notarization, DMG creation, appcast updates, and GitHub release creation.
-
-**Releases must go through a PR** (direct pushes to `main` are blocked):
+Releases are made with `Scripts/release.sh` (the `make release*` targets call it). It builds, signs with Developer ID, makes the DMG, notarizes only when the `TypeRight` notarytool keychain profile exists (the first releases are not notarized, like GetNewWord and Ask Free, and the release notes say how to open the app the first time), signs the update for Sparkle, updates `appcast.xml` and the build number, commits `chore: release vX.Y.Z` and tags `vX.Y.Z`:
 
 ```bash
-# 1. Create a release branch from main
-git checkout -b release/vX.Y.Z main
-
-# 2. Run the release target
-make release VERSION=X.Y.Z                 # or release-alpha, release-beta, release-rc
-
-# 3. Push branch and tags, create PR, merge
-git push -u origin HEAD && git push --tags
-gh pr create --title "Release vX.Y.Z" --body "Release vX.Y.Z"
-# After PR is merged:
-make release-upload VERSION=X.Y.Z
+Scripts/release.sh release X.Y.Z            # or X.Y.Z-alpha.N / -beta.N / -rc.N
+git push origin HEAD:main && git push origin vX.Y.Z
+Scripts/release.sh upload X.Y.Z             # GitHub release with the DMG and appcast.xml
 ```
+
+Release notes list the commits since the last `v*` tag; the first release, which has no tag before it, gets a fixed text instead of TextWarden's history. `Scripts/release.sh notes` prints them without building.
 
 Version format follows semver with pre-release suffixes:
 - `0.1.0-alpha.1` → Early testing, expect breaking changes

@@ -394,7 +394,7 @@ final class MemoryKeychain: @unchecked Sendable {
     }
 }
 
-/// Item 1: a turned-down key switches the own-key AI off without moving the plan to the trial.
+/// Item 1: a turned-down key switches the own-key AI off without moving the plan to the membership.
 final class TypeRightRejectedKeyTests: TypeRightMemberTestCase {
     func testRejectedKeyTurnsOwnAIOffButKeepsThePlan() {
         let m = make(plan: nil, ownKey: .deepseek)

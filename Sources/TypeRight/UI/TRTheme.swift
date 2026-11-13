@@ -233,6 +233,8 @@ struct TRSideItem: View {
     let icon: String
     let title: String
     var count: Int?
+    /// An amber dot: something on this page waits for the user.
+    var dot = false
     let selected: Bool
     let action: () -> Void
 
@@ -243,6 +245,7 @@ struct TRSideItem: View {
                 Text(title).font(.system(size: 13)).foregroundStyle(TR.text)
                 Spacer()
                 if let count { Text("\(count)").font(.system(size: 12).monospacedDigit()).foregroundStyle(TR.text3) }
+                if dot { Circle().fill(TR.warn).frame(width: 7, height: 7) }
             }
             .padding(.horizontal, 10)
             .frame(height: 32)

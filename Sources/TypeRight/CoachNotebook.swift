@@ -215,7 +215,7 @@ final class CoachNotebook: ObservableObject {
                 add(NotebookEntry(kind: .mistake, category: MistakeCategory(aiType: change.type), from: change.from,
                                   to: change.to, why: change.why, ipa: "", context: check.corrected, app: app, date: now, how: how))
             }
-        case .thinking, .failed:
+        case .thinking, .failed, .notice, .pill:
             return
         }
         bumpToday { $0.fixes += 1 }

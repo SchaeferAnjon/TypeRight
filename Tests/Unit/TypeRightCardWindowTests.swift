@@ -108,7 +108,8 @@ final class TypeRightCardWindowTests: XCTestCase {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("tr-menu-header-\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: file) }
         let notebook = CoachNotebook(fileURL: file)
-        let menu = TypeRightMenu.shared.build(state: TRMenuState(app: nil, allPaused: false, ai: .notSet, needsAccess: false), notebook: notebook)
+        let menu = TypeRightMenu.shared.build(state: TRMenuState(app: nil, allPaused: false, ai: TRMenuAILine(tone: .off, title: "AI：没开，只在本机查拼写语法", opens: .account),
+                                                                         needsAccess: false), notebook: notebook)
         let header = try XCTUnwrap(menu.items.first?.view, "the first item is the header view")
         XCTAssertEqual(header.frame.width, TRMenuHeader.width)
         // 今天改了 N 处 (15 pt), a line of 12 pt under it, 12 of space, 24 of bars, 12 above and below.

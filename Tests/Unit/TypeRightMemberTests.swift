@@ -2,10 +2,12 @@
 //  TypeRightMemberTests.swift
 //  TypeRight
 //
-//  Membership: the backend's status and errors are read right, blocked states block, every error code
-//  has plain words; registering, a rejected token, checkout polling, the portal and license codes;
-//  AI cards through the backend: one use number per card, at most 3 requests, used up / today's limit /
-//  offline / token come back as their own kind. All against a fake backend: nothing leaves this Mac.
+//  Membership without a trial: the backend's status and errors are read right, a Mac without a
+//  membership is blocked and never registers by itself, every error code has plain words (none of
+//  them about free uses); registering when buying, a rejected token, checkout polling, the portal and
+//  license codes; AI cards through the backend: one use number per card, at most 3 requests, no
+//  membership / today's limit / offline / token come back as their own kind. All against a fake
+//  backend: nothing leaves this Mac.
 //  Ported from GetNewWord's MemberTests.swift.
 //
 
@@ -15,10 +17,12 @@ import XCTest
 
 // MARK: - What the backend sends
 
+/// What the backend says to a TypeRight Mac without a membership: it still sends the shared trial
+/// fields (always closed), which TypeRight does not read.
 private let statusJSON = #"""
-{"product":"typeright","plan":"trial","code":null,"devices":1,"maxDevices":2,"trialOnly":true,
- "trial":{"granted":true,"total":300,"used":3,"left":297},"subscription":null,"pass":null,"memberUntil":null,
- "autoRenew":false,"expiring":false,"today":null,"canUse":true,"reason":null,
+{"product":"typeright","plan":"none","code":null,"devices":1,"maxDevices":2,"trialOnly":true,
+ "trial":{"granted":false,"total":0,"used":0,"left":0},"subscription":null,"pass":null,"memberUntil":null,
+ "autoRenew":false,"expiring":false,"today":null,"canUse":false,"reason":"trial-closed","trialResult":"closed",
  "prices":{"month":{"cny":990,"usd":199},"year":{"cny":9900,"usd":1990}},"passPrices":{"month":{"cny":990},"year":{"cny":9900}},
  "now":1793232000000}
 """#
@@ -27,14 +31,13 @@ private func decodeStatus(_ json: String) throws -> MemberStatus {
     try JSONDecoder().decode(MemberStatus.self, from: Data(json.utf8))
 }
 
-/// A status: plan, reason, trial uses left, member until, today's uses.
-private func makeStatus(plan: String, left: Int = 0, granted: Bool = true, reason: String? = nil, until: Date? = nil,
+/// A status: plan, reason, member until, today's uses.
+private func makeStatus(plan: String, reason: String? = nil, until: Date? = nil,
                         autoRenew: Bool = false, expiring: Bool = false, todayLeft: Int? = nil, resetAt: Date? = nil,
                         subscription: String? = nil) -> MemberStatus
 {
     var s = MemberStatus()
     s.plan = plan
-    s.trial = .init(granted: granted, total: granted ? 300 : 0, used: granted ? 300 - left : 0, left: left)
     s.reason = reason
     s.canUse = reason == nil
     s.memberUntil = until.map { $0.timeIntervalSince1970 * 1000 }
@@ -59,13 +62,13 @@ private func caught(_ work: () async throws -> Void) async -> Error? {
 final class TypeRightMemberStatusTests: XCTestCase {
     func testDecodesTheServerShape() throws {
         let s = try decodeStatus(statusJSON)
-        XCTAssertEqual(s.plan, "trial")
-        XCTAssertEqual(s.trial, .init(granted: true, total: 300, used: 3, left: 297))
+        XCTAssertEqual(s.plan, "none")
+        XCTAssertEqual(s.reason, "trial-closed")
         XCTAssertEqual(s.prices?["year"]?["usd"], 1990)
         XCTAssertEqual(s.passPrices?["month"]?["cny"], 990)
         XCTAssertNil(s.passPrices?["month"]?["usd"])
-        XCTAssertTrue(s.canUse && !s.isMember)
-        XCTAssertTrue(s.code == nil && s.trialOnly && s.maxDevices == 2)
+        XCTAssertTrue(!s.canUse && !s.isMember)
+        XCTAssertTrue(s.code == nil && s.maxDevices == 2)
     }
 
     /// Fields missing or added by the backend do not lose the status.
@@ -73,82 +76,72 @@ final class TypeRightMemberStatusTests: XCTestCase {
         let s = try decodeStatus(#"{"plan":"member","memberUntil":1795824000000,"brandNew":{"x":1},"sync":null,"voice":null,"today":{"limit":500,"used":12,"left":488,"resetAt":1793318400000}}"#)
         XCTAssertTrue(s.isMember)
         XCTAssertEqual(s.today?.left, 488)
-        XCTAssertEqual(s.trial, .init())
         XCTAssertTrue(s.canUse)
     }
 
-    /// The registration reply: `trial` is what registering got, the counts are in trialUses.
-    func testRegistrationSplitsTrialResult() throws {
-        var obj = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(statusJSON.utf8)) as? [String: Any])
-        obj["trialUses"] = obj["trial"]
-        obj["trial"] = "granted"
-        obj["token"] = "trd_abc"
-        let r = try MemberStatus.registration(from: JSONSerialization.data(withJSONObject: obj))
+    /// The registration reply: the token and this Mac's status; its trial fields are not read.
+    func testRegistrationReadsTokenAndStatus() throws {
+        let reply = #"{"token":"trd_abc","trial":"closed","trialUses":{"granted":false,"total":0,"used":0,"left":0},"plan":"none","canUse":false,"reason":"trial-closed"}"#
+        let r = try MemberStatus.registration(from: Data(reply.utf8))
         XCTAssertEqual(r.token, "trd_abc")
-        XCTAssertEqual(r.trial, "granted")
-        XCTAssertEqual(r.status.trial.left, 297)
+        XCTAssertEqual(r.status.plan, "none")
+        XCTAssertEqual(MemberState.of(r.status, available: true, failed: false), .noMember)
         XCTAssertThrowsError(try MemberStatus.registration(from: Data(#"{"trial":"closed"}"#.utf8))) {
             XCTAssertEqual($0 as? MemberError, .badReply)
         }
     }
 
     func testDecodesLimitFields() throws {
-        let s = try decodeStatus(#"{"plan":"trial","trial":{"granted":false,"total":0,"used":0,"left":0},"canUse":false,"reason":"daily-limit","limitBy":"cost","resetAt":1793318400000,"trialResult":"ip-limit"}"#)
-        XCTAssertTrue(s.limitBy == "cost" && s.resetAt == 1_793_318_400_000 && s.trialResult == "ip-limit")
+        let s = try decodeStatus(#"{"plan":"member","canUse":false,"reason":"daily-limit","limitBy":"cost","resetAt":1793318400000}"#)
+        XCTAssertTrue(s.limitBy == "cost" && s.resetAt == 1_793_318_400_000)
         let old = try decodeStatus(statusJSON)
-        XCTAssertTrue(old.limitBy == nil && old.resetAt == nil && old.trialResult == nil)
+        XCTAssertTrue(old.limitBy == nil && old.resetAt == nil)
     }
 
-    /// The backend's trialResult beats what this Mac remembers; a cost cap past its reset time does not block.
-    func testStatesUseServerTrialResultAndCostCap() {
-        var s = makeStatus(plan: "none", granted: false, reason: "trial-closed")
-        s.trialResult = "closed"
-        XCTAssertEqual(MemberState.of(s, available: true, failed: false, trialResult: "existing"), .trialClosed(.full))
-        var c = makeStatus(plan: "trial", left: 10)
+    /// A cost cap blocks until its reset time; past it (status not asked again yet) it does not.
+    func testCostCapEndsAtItsReset() {
+        var c = makeStatus(plan: "member", until: Date().addingTimeInterval(20 * 86400), autoRenew: true, todayLeft: 400, subscription: "active")
         c.reason = "daily-limit"
         c.canUse = false
         c.limitBy = "cost"
         c.resetAt = Date().addingTimeInterval(600).timeIntervalSince1970 * 1000
-        XCTAssertEqual(MemberState.of(c, available: true, failed: false, trialResult: nil).blockCode, "daily-limit")
+        XCTAssertEqual(MemberState.of(c, available: true, failed: false).blockCode, "daily-limit")
         c.resetAt = Date().addingTimeInterval(-60).timeIntervalSince1970 * 1000
-        XCTAssertEqual(MemberState.of(c, available: true, failed: false, trialResult: nil), .trial(left: 10, total: 300))
+        XCTAssertFalse(MemberState.of(c, available: true, failed: false).blocked)
     }
 
     func testStates() {
         let later = Date().addingTimeInterval(20 * 86400)
-        func state(_ s: MemberStatus?, trialResult: String? = nil, available: Bool = true, failed: Bool = false, registered: Bool = true) -> MemberState {
-            MemberState.of(s, available: available, failed: failed, trialResult: trialResult, registered: registered)
+        func state(_ s: MemberStatus?, available: Bool = true, failed: Bool = false, registered: Bool = true) -> MemberState {
+            MemberState.of(s, available: available, failed: failed, registered: registered)
         }
         XCTAssertEqual(state(nil, available: false), .unavailable)
         XCTAssertEqual(state(nil), .connecting)
         XCTAssertEqual(state(nil, failed: true), .offline)
-        // Not registered: the first AI card registers, even after a failed try.
-        XCTAssertEqual(state(nil, registered: false), .notClaimed)
-        XCTAssertEqual(state(nil, failed: true, registered: false), .notClaimed)
-        XCTAssertFalse(MemberState.notClaimed.blocked)
+        // Not registered: nothing bought, nothing to ask about. No free uses, so it is blocked.
+        XCTAssertEqual(state(nil, registered: false), .noMember)
+        XCTAssertEqual(state(nil, failed: true, registered: false), .noMember)
+        XCTAssertTrue(MemberState.noMember.blocked)
         XCTAssertFalse(MemberState.offline.blocked)
-        XCTAssertEqual(state(makeStatus(plan: "trial", left: 297)), .trial(left: 297, total: 300))
-        XCTAssertEqual(state(makeStatus(plan: "none", reason: "trial-used-up")), .trialUsedUp)
-        XCTAssertEqual(state(makeStatus(plan: "none", granted: false, reason: "trial-closed"), trialResult: "closed"), .trialClosed(.full))
-        XCTAssertEqual(state(makeStatus(plan: "none", granted: false, reason: "trial-closed"), trialResult: "ip-limit"), .trialClosed(.network))
-        XCTAssertEqual(state(makeStatus(plan: "none", granted: false, reason: "trial-closed"), trialResult: "daily-limit"), .trialClosed(.dayFull))
-        XCTAssertEqual(state(makeStatus(plan: "none", granted: false, reason: "trial-closed")), .trialClosed(.unknown))
-        XCTAssertEqual(state(makeStatus(plan: "none", granted: false, reason: "trial-closed"), trialResult: "existing"), .trialClosed(.unknown))
+        XCTAssertFalse(MemberState.connecting.blocked)
+        XCTAssertEqual(state(makeStatus(plan: "none", reason: "trial-closed")), .noMember)
+        // Old backends' words for the same thing.
+        XCTAssertEqual(state(makeStatus(plan: "none", reason: "trial-used-up")), .noMember)
+        XCTAssertEqual(state(makeStatus(plan: "none")), .noMember)
         XCTAssertEqual(state(makeStatus(plan: "none", reason: "sub-ended")), .ended)
         XCTAssertEqual(state(makeStatus(plan: "none", reason: "payment-failed")), .paymentFailed)
         let member = state(makeStatus(plan: "member", until: later, autoRenew: true, todayLeft: 488, subscription: "active"))
-        guard case let .member(until, autoRenew, _, pastDue, left, limit) = member else {
+        guard case let .member(until, autoRenew, expiring, pastDue, left, limit) = member else {
             return XCTFail("should be a member: \(member)")
         }
         XCTAssertLessThan(abs((until ?? .distantPast).timeIntervalSince(later)), 1)
-        XCTAssertTrue(autoRenew && !pastDue && left == 488 && limit == 500)
+        XCTAssertTrue(autoRenew && !expiring && !pastDue && left == 488 && limit == 500)
         XCTAssertFalse(member.blocked)
         // Today's limit: blocked until the reset; past midnight UTC (status not refreshed yet) it is not.
         XCTAssertEqual(state(makeStatus(plan: "member", reason: "daily-limit", until: later, todayLeft: 0, resetAt: Date().addingTimeInterval(3600))).blockCode, "daily-limit")
         XCTAssertFalse(state(makeStatus(plan: "member", reason: "daily-limit", until: later, todayLeft: 0, resetAt: Date().addingTimeInterval(-60))).blocked)
         XCTAssertFalse(state(makeStatus(plan: "member", until: later, todayLeft: 3, subscription: "past_due")).blocked)
-        for (s, code) in [(makeStatus(plan: "none", reason: "trial-used-up"), "trial-used-up"),
-                          (makeStatus(plan: "none", granted: false, reason: "trial-closed"), "trial-closed"),
+        for (s, code) in [(makeStatus(plan: "none", reason: "trial-closed"), "trial-closed"),
                           (makeStatus(plan: "none", reason: "sub-ended"), "sub-ended"),
                           (makeStatus(plan: "none", reason: "payment-failed"), "payment-failed")]
         {
@@ -157,17 +150,28 @@ final class TypeRightMemberStatusTests: XCTestCase {
         }
     }
 
-    /// Renewing shows the next charge (end of the period), not the access date with its extra day.
+    /// A one-time pass (no renewal) counts as expiring for its last 7 days; a renewing one never does.
+    func testPassExpiresInItsLastWeek() {
+        func expiring(_ s: MemberStatus) -> Bool {
+            guard case let .member(_, _, expiring, _, _, _) = MemberState.of(s, available: true, failed: false) else { return false }
+            return expiring
+        }
+        XCTAssertFalse(expiring(makeStatus(plan: "member", until: Date().addingTimeInterval(20 * 86400), todayLeft: 500)))
+        XCTAssertTrue(expiring(makeStatus(plan: "member", until: Date().addingTimeInterval(6 * 86400), todayLeft: 500)))
+        XCTAssertFalse(expiring(makeStatus(plan: "member", until: Date().addingTimeInterval(2 * 86400), autoRenew: true, todayLeft: 500)))
+    }
+
+/// Renewing shows the next charge (end of the period), not the access date with its extra day.
     func testAutoRenewShowsPeriodEnd() {
         let periodEnd = Date().addingTimeInterval(30 * 86400)
         var s = makeStatus(plan: "member", until: periodEnd.addingTimeInterval(86400), autoRenew: true, todayLeft: 500, subscription: "active")
         s.subscription?.periodEnd = periodEnd.timeIntervalSince1970 * 1000
-        guard case let .member(until, _, _, _, _, _) = MemberState.of(s, available: true, failed: false, trialResult: nil) else {
+        guard case let .member(until, _, _, _, _, _) = MemberState.of(s, available: true, failed: false) else {
             return XCTFail("should be a member")
         }
         XCTAssertLessThan(abs((until ?? .distantPast).timeIntervalSince(periodEnd)), 1)
         s.autoRenew = false
-        guard case let .member(until2, _, _, _, _, _) = MemberState.of(s, available: true, failed: false, trialResult: nil) else {
+        guard case let .member(until2, _, _, _, _, _) = MemberState.of(s, available: true, failed: false) else {
             return XCTFail("should be a member")
         }
         XCTAssertLessThan(abs((until2 ?? .distantPast).timeIntervalSince(periodEnd.addingTimeInterval(86400))), 1)
@@ -201,7 +205,7 @@ final class TypeRightMemberErrorTests: XCTestCase {
     /// The kinds the coach gets: used up, today's limit, offline and a rejected token each have their own.
     func testKindsForTheCoach() {
         let kinds: [(String, Int, MemberError.Kind)] = [
-            ("trial-used-up", 402, .usedUp), ("trial-closed", 402, .usedUp), ("sub-ended", 402, .usedUp),
+            ("trial-used-up", 402, .noMember), ("trial-closed", 402, .noMember), ("sub-ended", 402, .ended),
             ("payment-failed", 402, .paymentFailed), ("daily-limit", 429, .dailyLimit),
             ("network", 0, .offline), ("bad-device", 401, .tokenExpired), ("re-register-limit", 429, .tokenExpired),
             ("upstream", 503, .busy), ("busy", 503, .busy), ("rate", 429, .busy), ("too-fast", 429, .busy),
@@ -229,6 +233,15 @@ final class TypeRightMemberErrorTests: XCTestCase {
         XCTAssertEqual(MemberText.detail(MemberError(code: "zzz", message: "后台原话")), "后台原话")
         XCTAssertEqual(MemberText.detail(MemberError(code: "re-register-limit", message: "约 3 小时后再试")), "约 3 小时后再试")
         XCTAssertTrue(MemberText.detail(MemberError(code: "bad-code")).contains("TR-"))
+        // No free uses anywhere: a Mac without a membership hears "开会员，或填自己的 Key", never the
+        // backend's "免费试用名额已经发完了".
+        for code in codes {
+            let words = MemberText.title(MemberError(code: code)) + MemberText.detail(MemberError(code: code))
+            XCTAssertFalse(words.contains("试用") || words.contains("免费次数") || words.contains("名额"), "\(code): \(words)")
+        }
+        let backend = MemberError(code: "trial-closed", message: "免费试用名额已经发完了。订阅会员，或在设置里填自己的 Key 接着用", status: 402)
+        XCTAssertFalse(MemberText.detail(backend).contains("试用"), "the backend's sentence is not shown")
+        XCTAssertEqual(MemberText.title(MemberError(code: "trial-closed")), "还没开会员")
         // The coach's error says the same words.
         XCTAssertEqual(CoachAIError.member(MemberError(code: "trial-used-up")).errorDescription, MemberText.detail(MemberError(code: "trial-used-up")))
     }
@@ -253,13 +266,13 @@ final class TypeRightMemberErrorTests: XCTestCase {
 
 final class TypeRightMemberSetupTests: XCTestCase {
     func testPlanDefaults() {
-        // Never chosen: a key filled in stays on it; a new Mac starts on the trial.
+        // Never chosen: a key filled in stays on it; a new Mac checks on this Mac only (no trial to start on).
         XCTAssertEqual(AIPlan.resolve(stored: nil, hasOwnKey: true), .own)
-        XCTAssertEqual(AIPlan.resolve(stored: nil, hasOwnKey: false), .member)
+        XCTAssertEqual(AIPlan.resolve(stored: nil, hasOwnKey: false), .local)
         XCTAssertEqual(AIPlan.resolve(stored: "local", hasOwnKey: true), .local)
         XCTAssertEqual(AIPlan.resolve(stored: "member", hasOwnKey: true), .member)
         XCTAssertEqual(AIPlan.resolve(stored: "own", hasOwnKey: false), .own)
-        XCTAssertEqual(AIPlan.resolve(stored: "zzz", hasOwnKey: false), .member)
+        XCTAssertEqual(AIPlan.resolve(stored: "zzz", hasOwnKey: false), .local)
     }
 
     func testDeviceFingerprint() throws {
@@ -296,7 +309,6 @@ final class TypeRightMemberSetupTests: XCTestCase {
         XCTAssertNil(MemberAPI.current)
         XCTAssertNil(MemberService.shared.api)
         XCTAssertEqual(MemberService.shared.state, .unavailable)
-        XCTAssertNil(UsagePing.shared.endpoint)
     }
 
     /// Through the backend every card gets a new use number; off states give no route.
@@ -306,7 +318,7 @@ final class TypeRightMemberSetupTests: XCTestCase {
             return XCTFail("member should route through the backend")
         }
         XCTAssertNotEqual(a, b)
-        for off in [CoachAIStatus.localOnly, .noKey, .memberBlocked(.trialUsedUp), .memberBlocked(.unavailable)] {
+        for off in [CoachAIStatus.localOnly, .noKey, .memberBlocked(.noMember), .memberBlocked(.unavailable)] {
             XCTAssertNil(off.route(), "\(off)")
             XCTAssertFalse(off.isOn)
         }
@@ -385,18 +397,16 @@ final class FakeTypeRightBackend: @unchecked Sendable {
     }
 }
 
-private func registration(token: String = "trd_one", trial: String = "granted", left: Int = 300) -> String {
-    #"{"token":"\#(token)","trial":"\#(trial)","trialUses":{"granted":true,"total":300,"used":\#(300 - left),"left":\#(left)},"plan":"trial","canUse":true}"#
+private func registration(token: String = "trd_one") -> String {
+    #"{"token":"\#(token)","trial":"closed","trialUses":{"granted":false,"total":0,"used":0,"left":0},"plan":"none","canUse":false,"reason":"trial-closed","prices":{"month":{"cny":990,"usd":199},"year":{"cny":9900,"usd":1990}}}"#
 }
 
-private func trialStatus(left: Int) -> String {
-    #"{"plan":"\#(left > 0 ? "trial" : "none")","trial":{"granted":true,"total":300,"used":\#(300 - left),"left":\#(left)},"canUse":\#(left > 0),"reason":\#(left > 0 ? "null" : "\"trial-used-up\""),"prices":{"month":{"cny":990,"usd":199},"year":{"cny":9900,"usd":1990}}}"#
-}
+private let noMemberStatus = #"{"plan":"none","canUse":false,"reason":"trial-closed","prices":{"month":{"cny":990,"usd":199},"year":{"cny":9900,"usd":1990}}}"#
 
 /// A member: today's uses left, a reason, the reset time.
 private func memberBody(todayLeft: Int = 500, reason: String? = nil, resetAt: Date = Date().addingTimeInterval(3600)) -> String {
     let reset = Int(resetAt.timeIntervalSince1970 * 1000)
-    return #"{"plan":"member","code":"TR-AAAA-BBBB-CCCC","trialOnly":false,"trial":{"granted":true,"total":300,"used":3,"left":297},"subscription":{"status":"active","plan":"month","currency":"cny","amount":990,"periodEnd":1795824000000,"cancelAtPeriodEnd":false,"accessUntil":1795910400000},"memberUntil":1795910400000,"autoRenew":true,"today":{"limit":500,"used":\#(500 - todayLeft),"left":\#(todayLeft),"resetAt":\#(reset)},"canUse":\#(reason == nil),"reason":\#(reason.map { "\"\($0)\"" } ?? "null")}"#
+    return #"{"plan":"member","code":"TR-AAAA-BBBB-CCCC","subscription":{"status":"active","plan":"month","currency":"cny","amount":990,"periodEnd":1795824000000,"cancelAtPeriodEnd":false,"accessUntil":1795910400000},"memberUntil":1795910400000,"autoRenew":true,"today":{"limit":500,"used":\#(500 - todayLeft),"left":\#(todayLeft),"resetAt":\#(reset)},"canUse":\#(reason == nil),"reason":\#(reason.map { "\"\($0)\"" } ?? "null")}"#
 }
 
 private let paidReply = #"{"status":"paid",\#(memberBody().dropFirst())"#
@@ -445,21 +455,33 @@ class TypeRightMemberTestCase: XCTestCase {
 }
 
 final class TypeRightMemberServiceTests: TypeRightMemberTestCase {
-    /// Not registered: status, start and coming back to the front never register (no trial taken for
-    /// someone who has not used the membership); claiming does, once.
-    func testRegistersOnlyWhenClaimed() async throws {
+    /// Not registered: status, start, coming back to the front and choosing the member plan never
+    /// register (there is nothing to get without buying); the state is "no membership", blocked.
+    func testNeverRegistersByItself() async throws {
         server.on("POST", "/v1/typeright/device", .init(body: registration()))
-        server.on("GET", "/v1/typeright/status", .init(body: trialStatus(left: 300)))
-        let m = make()
+        server.on("GET", "/v1/typeright/status", .init(body: noMemberStatus))
+        let m = make(plan: .local)
         m.start()
+        m.choose(.member)
         await m.refresh()
+        m.recheckWhileBlocked()
         try await Task.sleep(for: .milliseconds(50))
         XCTAssertTrue(server.requests.isEmpty)
-        XCTAssertEqual(m.state, .notClaimed)
         XCTAssertFalse(m.registered)
+        XCTAssertEqual(m.plan, .member)
+        XCTAssertEqual(m.state, .noMember)
+        XCTAssertEqual(m.aiStatus, .memberBlocked(.noMember))
+    }
 
-        await m.claimTrial()
-        XCTAssertEqual(server.paths, ["POST /v1/typeright/device"])
+    /// Buying registers this Mac first (an anonymous device id, no Authorization), then opens the checkout.
+    func testBuyingRegistersFirst() async throws {
+        server.on("POST", "/v1/typeright/device", .init(body: registration()))
+        server.on("POST", "/v1/typeright/checkout", .init(body: #"{"url":"https://checkout.stripe.test/cs_0","claim":"trc_0"}"#))
+        server.on("GET", "/v1/typeright/checkout/trc_0", .init(body: #"{"status":"pending"}"#))
+        let m = make()
+        m.pollInterval = .seconds(60)
+        try await m.buy(plan: "month", currency: "cny", mode: "sub")
+        XCTAssertEqual(server.paths, ["POST /v1/typeright/device", "POST /v1/typeright/checkout"])
         let register = try XCTUnwrap(server.requests.first)
         XCTAssertNil(register.value(forHTTPHeaderField: "Authorization"))
         let body = try XCTUnwrap(try JSONSerialization.jsonObject(with: register.httpBody ?? Data()) as? [String: String])
@@ -467,23 +489,24 @@ final class TypeRightMemberServiceTests: TypeRightMemberTestCase {
         XCTAssertEqual(body["platform"], "darwin")
         XCTAssertTrue(["arm64", "x64"].contains(body["arch"] ?? ""))
         XCTAssertNotNil(body["version"])
-        XCTAssertTrue(m.registered && m.trialResult == "granted")
-        XCTAssertEqual(m.state, .trial(left: 300, total: 300))
-
+        XCTAssertEqual(server.requests[1].value(forHTTPHeaderField: "Authorization"), "Bearer trd_one")
+        XCTAssertTrue(m.registered)
+        XCTAssertEqual(m.state, .noMember)
+        XCTAssertEqual(m.purchase?.claim, "trc_0")
         // Registered: the status carries the token, 20 s timeout; within a minute it is not asked again.
+        server.on("GET", "/v1/typeright/status", .init(body: noMemberStatus))
         await m.refresh()
         XCTAssertEqual(server.paths.last, "GET /v1/typeright/status")
-        XCTAssertEqual(server.requests[1].value(forHTTPHeaderField: "Authorization"), "Bearer trd_one")
-        XCTAssertEqual(server.requests[1].timeoutInterval, 20)
+        XCTAssertEqual(server.requests.last?.timeoutInterval, 20)
+        let count = server.requests.count
         await m.refresh(maxAge: 60)
-        XCTAssertEqual(server.requests.count, 2)
-        await m.claimTrial()
-        XCTAssertEqual(server.paths.filter { $0.hasSuffix("/device") }.count, 1)
+        XCTAssertEqual(server.requests.count, count)
+        m.cancelPurchase()
     }
 
     /// Own key or on-device only, registered before: launch asks nothing. Member and registered: one status.
     func testStartOnlyAsksForMembers() async throws {
-        server.on("GET", "/v1/typeright/status", .init(body: trialStatus(left: 5)))
+        server.on("GET", "/v1/typeright/status", .init(body: memberBody()))
         make(token: "trd_one", plan: .own).start()
         make(token: "trd_one", plan: .local).start()
         try await Task.sleep(for: .milliseconds(50))
@@ -491,6 +514,19 @@ final class TypeRightMemberServiceTests: TypeRightMemberTestCase {
         make(token: "trd_one").start()
         try await wait { !self.server.requests.isEmpty }
         XCTAssertEqual(server.paths, ["GET /v1/typeright/status"])
+    }
+
+    /// Back on the member plan, a Mac that registered before asks for its status at once.
+    func testChoosingMemberAgainAsks() async throws {
+        server.on("GET", "/v1/typeright/status", .init(body: memberBody(todayLeft: 400)))
+        let m = make(token: "trd_one", plan: .local)
+        m.choose(.own)
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertTrue(server.requests.isEmpty)
+        m.choose(.member)
+        try await wait { m.isMember }
+        XCTAssertEqual(server.paths, ["GET /v1/typeright/status"])
+        XCTAssertTrue(m.planChosen)
     }
 
     /// Own key, on-device only, and a debug build without a backend send nothing at all.
@@ -504,62 +540,63 @@ final class TypeRightMemberServiceTests: TypeRightMemberTestCase {
         XCTAssertTrue(server.requests.isEmpty)
         let dev = make(api: nil)
         await dev.refresh()
-        await dev.claimTrial()
         XCTAssertEqual(dev.state, .unavailable)
         XCTAssertEqual(dev.aiStatus, .memberBlocked(.unavailable))
         let error = await caught { _ = try await dev.chatData(Data(), use: UUID(), timeout: 15) }
         XCTAssertEqual(error as? MemberError, .unavailable)
+        let buy = await caught { try await dev.buy(plan: "month", currency: "cny", mode: "sub") }
+        XCTAssertEqual(buy as? MemberError, .unavailable)
         XCTAssertTrue(server.requests.isEmpty)
     }
 
-    /// No trial: the reason comes from the first registration and survives registering again (existing).
-    func testTrialMissSurvivesReRegistering() async throws {
-        server.on("POST", "/v1/typeright/device",
-                  .init(body: #"{"token":"trd_one","trial":"ip-limit","trialUses":{"granted":false,"total":0,"used":0,"left":0},"plan":"none","canUse":false,"reason":"trial-closed"}"#),
-                  .init(body: #"{"token":"trd_two","trial":"existing","trialUses":{"granted":false,"total":0,"used":0,"left":0},"plan":"none","canUse":false,"reason":"trial-closed"}"#))
-        let m = make()
-        await m.claimTrial()
-        XCTAssertEqual(m.state, .trialClosed(.network))
-        let renewed = await m.renewToken("trd_one")
-        XCTAssertTrue(renewed)
-        XCTAssertEqual(m.trialResult, "ip-limit")
-        XCTAssertEqual(m.state, .trialClosed(.network))
-        XCTAssertEqual(m.aiStatus, .memberBlocked(.trialClosed(.network)))
-        let e = m.explain(MemberError(code: "trial-closed", message: "免费试用名额已经发完了。", status: 402))
-        XCTAssertEqual(e.miss, .network)
-        XCTAssertNotEqual(MemberText.detail(e), MemberText.detail(MemberError(code: "trial-closed", miss: .full)))
+    /// The backend says this Mac has no membership (402 trial-closed is its shared code for it): the
+    /// words are TypeRight's own, never the backend's sentence about free uses.
+    func testNoMembershipInOurWords() async throws {
+        server.on("GET", "/v1/typeright/status", .init(body: noMemberStatus))
+        let m = make(token: "trd_one")
+        await m.refresh()
+        XCTAssertEqual(m.state, .noMember)
+        let e = m.explain(MemberError(code: "trial-closed", message: "免费试用名额已经发完了。订阅会员，或在设置里填自己的 Key 接着用", status: 402))
+        XCTAssertEqual(MemberText.title(e), "还没开会员")
+        XCTAssertFalse(MemberText.detail(e).contains("试用"))
     }
 
     /// Last time's status shows at launch, for the backend it came from only.
     func testRemembersLastStatus() async throws {
-        server.on("GET", "/v1/typeright/status", .init(body: trialStatus(left: 12)))
+        server.on("GET", "/v1/typeright/status", .init(body: memberBody(todayLeft: 12)))
         await make(token: "trd_one").refresh()
-        XCTAssertEqual(make(token: "trd_one").status?.trial.left, 12)
+        XCTAssertEqual(make(token: "trd_one").status?.today?.left, 12)
         XCTAssertNil(make(api: URL(string: "http://127.0.0.1:10"), token: "trd_one").status)
     }
 
     /// A rejected token (backend reset, a backup from another Mac): register again once and resend.
     func testBadDeviceRegistersAgain() async throws {
         server.on("GET", "/v1/typeright/status", .init(status: 401, body: #"{"error":{"code":"bad-device","message":"设备令牌无效"}}"#),
-                  .init(body: trialStatus(left: 20)))
-        server.on("POST", "/v1/typeright/device", .init(body: registration(token: "trd_two", trial: "existing", left: 20)))
+                  .init(body: memberBody(todayLeft: 20)))
+        server.on("POST", "/v1/typeright/device", .init(body: registration(token: "trd_two")))
         let m = make(token: "trd_old")
         await m.refresh()
         XCTAssertEqual(server.paths, ["GET /v1/typeright/status", "POST /v1/typeright/device", "GET /v1/typeright/status"])
         XCTAssertEqual(server.requests[2].value(forHTTPHeaderField: "Authorization"), "Bearer trd_two")
-        XCTAssertEqual(m.state, .trial(left: 20, total: 300))
+        XCTAssertTrue(m.isMember)
         XCTAssertNil(m.lastError)
     }
 
+    /// No network keeps the last status and says so (offline); the next answer clears it.
     func testOfflineKeepsOldStatus() async throws {
-        server.on("GET", "/v1/typeright/status", .init(body: trialStatus(left: 9)))
+        server.on("GET", "/v1/typeright/status", .init(body: memberBody(todayLeft: 9)))
         await make(token: "trd_one").refresh()
         let failing = MemberService(api: URL(string: "http://127.0.0.1:9"), defaults: defaults, tokens: .memory("trd_one"),
                                     send: { _ in throw URLError(.notConnectedToInternet) })
         failing.ownKey = { nil }
         await failing.refresh()
         XCTAssertEqual(failing.lastError, .network)
-        XCTAssertEqual(failing.state, .trial(left: 9, total: 300))
+        XCTAssertTrue(failing.offline)
+        XCTAssertTrue(failing.isMember)
+        XCTAssertEqual(failing.status?.today?.left, 9)
+        let back = make(token: "trd_one")
+        await back.refresh()
+        XCTAssertFalse(back.offline)
     }
 
     /// Checkout: the browser opens the page, the app asks until paid, then it is a member.
@@ -677,7 +714,7 @@ final class TypeRightMemberServiceTests: TypeRightMemberTestCase {
     func testActivateAndUnbind() async throws {
         server.on("POST", "/v1/typeright/license/activate", .init(status: 404, body: #"{"error":{"code":"bad-code","message":"不是 TypeRight 的授权码"}}"#),
                   .init(body: memberBody()))
-        server.on("POST", "/v1/typeright/license/unbind", .init(body: trialStatus(left: 297)))
+        server.on("POST", "/v1/typeright/license/unbind", .init(body: noMemberStatus))
         let m = make(token: "trd_one")
         let bad = await caught { try await m.activate(code: "GW-1234-5678-ABCD") }
         XCTAssertEqual((bad as? MemberError)?.code, "bad-code")
@@ -687,29 +724,19 @@ final class TypeRightMemberServiceTests: TypeRightMemberTestCase {
         let body = try XCTUnwrap(try JSONSerialization.jsonObject(with: server.requests[1].httpBody ?? Data()) as? [String: String])
         XCTAssertEqual(body["code"], "tr-aaaa-bbbb-cccc")
         try await m.unbind()
-        XCTAssertEqual(m.state, .trial(left: 297, total: 300))
+        XCTAssertEqual(m.state, .noMember)
+        XCTAssertNil(m.status?.code)
     }
 
-    /// The backend's trialResult explains a missing trial even when this Mac forgot.
-    func testServerTrialResultExplainsMiss() async throws {
-        server.on("GET", "/v1/typeright/status",
-                  .init(body: #"{"plan":"none","trial":{"granted":false,"total":0,"used":0,"left":0},"canUse":false,"reason":"trial-closed","trialResult":"closed"}"#))
-        let m = make(token: "trd_one")
-        await m.refresh()
-        XCTAssertNil(m.trialResult)
-        XCTAssertEqual(m.state, .trialClosed(.full))
-        XCTAssertEqual(m.explain(MemberError(code: "trial-closed", status: 402)).miss, .full)
-    }
-
-    /// The cost cap (limitBy cost) blocks a trial too and says "用量到上限"; a used-up count says "次数用完".
+    /// The cost cap (limitBy cost) blocks with uses left and says "用量到上限"; a used-up count says "次数用完".
     func testCostCapFromStatus() async throws {
-        let reset = Int(Date().addingTimeInterval(3600).timeIntervalSince1970 * 1000)
-        server.on("GET", "/v1/typeright/status",
-                  .init(body: #"{"plan":"trial","trial":{"granted":true,"total":300,"used":5,"left":295},"canUse":false,"reason":"daily-limit","limitBy":"cost","resetAt":\#(reset)}"#))
+        let reset = Date().addingTimeInterval(3600)
+        server.on("GET", "/v1/typeright/status", .init(body: memberBody(todayLeft: 495, reason: "daily-limit", resetAt: reset)
+                .replacingOccurrences(of: #""reason":"daily-limit""#, with: #""reason":"daily-limit","limitBy":"cost","resetAt":\#(Int(reset.timeIntervalSince1970 * 1000))"#)))
         let m = make(token: "trd_one")
         await m.refresh()
-        guard case let .dailyLimit(at) = m.state else { return XCTFail("a trial's cost cap blocks too: \(m.state)") }
-        XCTAssertEqual(at.map { Int($0.timeIntervalSince1970 * 1000) }, reset)
+        guard case let .dailyLimit(at) = m.state else { return XCTFail("the cost cap blocks: \(m.state)") }
+        XCTAssertEqual(at.map { Int($0.timeIntervalSince1970) }, Int(reset.timeIntervalSince1970))
         XCTAssertEqual(m.aiStatus, .memberBlocked(m.state))
         let e = m.explain(MemberError(code: "daily-limit", status: 429))
         XCTAssertTrue(e.costCap)
@@ -743,16 +770,18 @@ final class TypeRightMemberServiceTests: TypeRightMemberTestCase {
         XCTAssertFalse(m.explain(MemberError(code: "daily-limit", status: 429)).costCap)
     }
 
-    /// The uses left come with every card: the count follows at once; 0 is used up.
+    /// Today's uses left come with every card: the count follows at once; 0 is today's limit. A
+    /// "trial" count (old backends) is not read.
     func testUsageHeadersUpdateCounts() async throws {
-        server.on("GET", "/v1/typeright/status", .init(body: trialStatus(left: 2)))
+        server.on("GET", "/v1/typeright/status", .init(body: memberBody(todayLeft: 2)))
         let m = make(token: "trd_one")
         await m.refresh()
-        m.noteResponse(headers: ["x-uses-kind": "trial", "X-Uses-Left": "1", "X-Use-Charged": "1"], error: nil)
-        XCTAssertEqual(m.state, .trial(left: 1, total: 300))
+        m.noteResponse(headers: ["x-uses-kind": "sub", "X-Uses-Left": "1", "X-Use-Charged": "1"], error: nil)
+        XCTAssertEqual(m.status?.today?.left, 1)
         m.noteResponse(headers: ["X-Uses-Kind": "trial", "X-Uses-Left": "0"], error: nil)
-        XCTAssertEqual(m.state, .trialUsedUp)
-        XCTAssertEqual(m.aiStatus, .memberBlocked(.trialUsedUp))
+        XCTAssertEqual(m.status?.today?.left, 1)
+        m.noteResponse(headers: ["X-Uses-Kind": "sub", "X-Uses-Left": "0"], error: nil)
+        guard case .dailyLimit = m.state else { return XCTFail("0 left is today's limit: \(m.state)") }
     }
 
     /// Used up yesterday, first card today works: "used up" goes; 0 again is used up with tonight's reset.
@@ -774,8 +803,9 @@ final class TypeRightMemberServiceTests: TypeRightMemberTestCase {
     /// The plan the page binds to: never chosen follows the key; a choice sticks and tells the page.
     func testPlanAndAIStatus() throws {
         let fresh = make(plan: nil)
-        XCTAssertEqual(fresh.plan, .member)
-        XCTAssertEqual(fresh.aiStatus, .member) // not registered yet: the first card claims the trial
+        XCTAssertEqual(fresh.plan, .local)
+        XCTAssertEqual(fresh.aiStatus, .localOnly) // a new Mac: spelling and grammar on this Mac, no AI
+        XCTAssertFalse(fresh.planChosen)
         XCTAssertNil(defaults.string(forKey: AIPlan.key)) // reading never writes
 
         let keyed = make(plan: nil, ownKey: .deepseek)
@@ -808,9 +838,9 @@ final class TypeRightMemberChatTests: TypeRightMemberTestCase {
 
     /// To our backend, with the device token and the card's use number; the uses left go into the status.
     func testCardGoesToOurServer() async throws {
-        server.on("GET", "/v1/typeright/status", .init(body: trialStatus(left: 300)))
+        server.on("GET", "/v1/typeright/status", .init(body: memberBody(todayLeft: 500)))
         server.on("POST", "/v1/typeright/chat/completions",
-                  .init(body: chatOK, headers: ["X-Use-Charged": "1", "X-Uses-Kind": "trial", "X-Uses-Left": "299"]))
+                  .init(body: chatOK, headers: ["X-Use-Charged": "1", "X-Uses-Kind": "sub", "X-Uses-Left": "499"]))
         let m = make(token: "trd_one")
         await m.refresh()
         let use = UUID()
@@ -825,10 +855,10 @@ final class TypeRightMemberChatTests: TypeRightMemberTestCase {
         XCTAssertEqual(json["model"] as? String, "deepseek-flash")
         XCTAssertNil(json["thinking"])
         XCTAssertEqual(json["max_tokens"] as? Int, 300)
-        XCTAssertEqual(m.state, .trial(left: 299, total: 300))
+        XCTAssertEqual(m.status?.today?.left, 499)
     }
 
-    /// The first card on the member plan registers this Mac (and claims the trial).
+    /// A card sent without a token (the token was lost) registers first: same Mac, same account.
     func testFirstCardRegisters() async throws {
         server.on("POST", "/v1/typeright/device", .init(body: registration(token: "trd_new")))
         server.on("POST", "/v1/typeright/chat/completions", .init(body: chatOK))
@@ -865,7 +895,7 @@ final class TypeRightMemberChatTests: TypeRightMemberTestCase {
     func testBadDeviceRenewsTokenForTheSameCard() async throws {
         server.on("POST", "/v1/typeright/chat/completions",
                   .init(status: 401, body: #"{"error":{"code":"bad-device","message":"设备令牌无效"}}"#), .init(body: chatOK))
-        server.on("POST", "/v1/typeright/device", .init(body: registration(token: "trd_two", trial: "existing")))
+        server.on("POST", "/v1/typeright/device", .init(body: registration(token: "trd_two")))
         let m = make(token: "trd_one")
         let use = UUID()
         _ = try await m.chatData(body(use), use: use, timeout: 15)
@@ -887,16 +917,28 @@ final class TypeRightMemberChatTests: TypeRightMemberTestCase {
         XCTAssertEqual(server.paths, ["POST /v1/typeright/chat/completions", "POST /v1/typeright/device"])
     }
 
-    /// Trial used up: one request, no retry, the status is asked for, and the next card is not tried.
-    func testUsedUpComesBackAtOnce() async throws {
-        server.on("POST", "/v1/typeright/chat/completions", .init(status: 402, body: #"{"error":{"code":"trial-used-up","message":"300 次的免费试用用完了"}}"#))
-        server.on("GET", "/v1/typeright/status", .init(body: trialStatus(left: 0)))
+    /// No membership: one request, no retry, the status is asked for, and the next card is not tried.
+    func testNoMembershipComesBackAtOnce() async throws {
+        server.on("POST", "/v1/typeright/chat/completions", .init(status: 402, body: #"{"error":{"code":"trial-closed","message":"免费试用名额已经发完了。订阅会员，或在设置里填自己的 Key 接着用"}}"#))
+        server.on("GET", "/v1/typeright/status", .init(body: noMemberStatus))
         let m = make(token: "trd_one")
         let use = UUID()
         let error = await caught { _ = try await m.chatData(body(use), use: use, timeout: 15) }
-        XCTAssertEqual((error as? MemberError)?.kind, .usedUp)
+        XCTAssertEqual((error as? MemberError)?.kind, .noMember)
         XCTAssertEqual(server.paths, ["POST /v1/typeright/chat/completions", "GET /v1/typeright/status"])
-        XCTAssertEqual(m.aiStatus, .memberBlocked(.trialUsedUp))
+        XCTAssertEqual(m.aiStatus, .memberBlocked(.noMember))
+        XCTAssertFalse((error as? LocalizedError)?.errorDescription?.contains("试用") ?? true)
+    }
+
+    /// The membership ended: its own kind (the coach says "会员到期了", not "还没开会员").
+    func testEndedComesBackAsEnded() async throws {
+        server.on("POST", "/v1/typeright/chat/completions", .init(status: 402, body: #"{"error":{"code":"sub-ended","message":"会员到期了"}}"#))
+        server.on("GET", "/v1/typeright/status", .init(body: #"{"plan":"none","canUse":false,"reason":"sub-ended","code":"TR-AAAA-BBBB-CCCC","memberUntil":1795910400000}"#))
+        let m = make(token: "trd_one")
+        let use = UUID()
+        let error = await caught { _ = try await m.chatData(body(use), use: use, timeout: 15) }
+        XCTAssertEqual((error as? MemberError)?.kind, .ended)
+        XCTAssertEqual(m.state, .ended)
     }
 
     /// Today's 500 used: one request, the reset time comes along.
@@ -922,6 +964,7 @@ final class TypeRightMemberChatTests: TypeRightMemberTestCase {
         let error = await caught { _ = try await m.chatData(body(use), use: use, timeout: 15) }
         XCTAssertEqual((error as? MemberError)?.kind, .offline)
         XCTAssertEqual(server.requests.count, 1)
+        XCTAssertTrue(m.offline)
     }
 
     /// Too many requests with a long Retry-After: the card gives up rather than arrive late.

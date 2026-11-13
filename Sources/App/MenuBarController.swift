@@ -6,6 +6,7 @@
 //
 
 import Cocoa
+import Combine
 import SwiftUI
 
 @MainActor
@@ -15,6 +16,10 @@ class MenuBarController: NSObject, NSMenuDelegate {
     private var statusItem: NSStatusItem?
     private(set) var menu: NSMenu?
     private var previousIconState: IconState = .active
+    /// The menu's AI line wants a look (TRAccountFacts.needsAttention): the icon carries an amber dot.
+    private(set) var attention = false
+    private var memberWatch: AnyCancellable?
+    private var keyWatch: NSObjectProtocol?
 
     /// The app to show in the menu - captured when button is clicked (BEFORE menu opens)
     private var menuTargetApp: NSRunningApplication?
@@ -46,7 +51,15 @@ class MenuBarController: NSObject, NSMenuDelegate {
         }
 
         // Set initial icon state based on whether grammar checking is enabled
+        attention = TRAccountFacts.current().needsAttention
         setIconState(UserPreferences.shared.isEnabled ? .active : .inactive)
+        // The membership, the plan or the own key changed: the dot follows.
+        memberWatch = MemberService.shared.objectWillChange.sink { [weak self] _ in
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.refreshAttention() } }
+        }
+        keyWatch = NotificationCenter.default.addObserver(forName: .typeRightAIChanged, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshAttention() }
+        }
 
         // IMPORTANT: Do NOT set statusItem.menu here, as it prevents button.action from firing
         // Instead, we handle the click manually and show the menu programmatically
@@ -166,24 +179,33 @@ class MenuBarController: NSObject, NSMenuDelegate {
         }
     }
 
+    /// Recomputes the amber dot; the icon is redrawn only when it changes.
+    func refreshAttention() {
+        let now = TRAccountFacts.current().needsAttention
+        guard now != attention else { return }
+        attention = now
+        setIconState(previousIconState)
+    }
+
+    /// The look for an icon state: paused fades it with two bars, an error with a "!".
+    static func look(for state: IconState) -> MenuBarIcon.Look {
+        switch state {
+        case .active, .restarting: .normal
+        case .inactive: .paused
+        case .error: .error
+        }
+    }
+
     /// Update menu bar icon state (e.g., to show error/disabled state)
     func setIconState(_ state: IconState) {
         guard let button = statusItem?.button else { return }
 
         previousIconState = state
-
-        // Keep the feather recognizable and add a compact pause badge when inactive.
-        let icon: NSImage = switch state {
-        case .inactive:
-            TextWardenIcon.createPaused()
-        case .active, .error, .restarting:
-            TextWardenIcon.create()
-        }
-        button.image = icon
+        button.image = MenuBarIcon.image(Self.look(for: state), attention: attention)
 
         switch state {
         case .active:
-            button.toolTip = "TypeRight 英文打字助手"
+            button.toolTip = attention ? "TypeRight · \(TRAccountFacts.current().menuLine.text)" : "TypeRight 英文打字助手"
         case .inactive:
             button.toolTip = "TypeRight 已暂停"
         case .error:

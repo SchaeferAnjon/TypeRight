@@ -93,6 +93,8 @@ enum TRAppActivation {
 struct TRMainView: View {
     @ObservedObject var controller: TRMainWindowController
     @ObservedObject var notebook: CoachNotebook = .shared
+    /// Screenshots: the membership the plan card goes by.
+    var sampleFacts: TRAccountFacts?
 
     var body: some View {
         HStack(spacing: 0) {
@@ -130,7 +132,7 @@ struct TRMainView: View {
                 }
             }
             Spacer()
-            TRStatusCard()
+            TRStatusCard(sampleFacts: sampleFacts)
             TRSideItem(icon: "gearshape", title: "设置", selected: false) { TRSettingsWindowController.shared.show() }
                 .padding(.bottom, 12)
         }
@@ -171,28 +173,21 @@ struct TRMainView: View {
     }
 }
 
-/// Bottom of the sidebar: is TypeRight watching, and which AI it uses.
+/// Bottom of the sidebar: is TypeRight watching, and the plan card (which way the AI works now).
 struct TRStatusCard: View {
+    var sampleFacts: TRAccountFacts?
     @ObservedObject private var preferences = UserPreferences.shared
+    @ObservedObject private var member = MemberService.shared
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
                 Circle().fill(preferences.isEnabled ? TR.ok : TR.warn).frame(width: 7, height: 7)
                 Text(preferences.isEnabled ? "正在帮你看" : "已暂停").font(.system(size: 12, weight: .medium)).foregroundStyle(TR.text)
             }
-            Text(aiLine).font(.system(size: 12)).foregroundStyle(TR.text2).fixedSize(horizontal: false, vertical: true)
+            .padding(.leading, 4)
+            TRPlanCard(info: (sampleFacts ?? .current(member)).planCard) { TRSettingsWindowController.shared.show(.account) }
         }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(TR.card, in: RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(TR.line, lineWidth: 0.5))
         .padding(.bottom, 8)
-    }
-
-    private var aiLine: String {
-        CoachSettings.isAIReady
-            ? "拼写在本机查 · AI 用 \(CoachSettings.provider.displayName)"
-            : "只查拼写；选好 AI 后，中文变英文和整句检查才会出来"
     }
 }

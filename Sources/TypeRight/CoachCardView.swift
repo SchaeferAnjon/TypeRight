@@ -21,6 +21,10 @@ enum CoachCardContent: Equatable {
     case thinking
     /// `keyRejected`: the provider turned the saved key down, so the card carries a `danger` dot.
     case failed(String, keyRejected: Bool = false)
+    /// The membership cannot be used (said once, CoachNotice): no Tab, Esc closes, buttons for the mouse.
+    case notice(CoachNotice)
+    /// The same thing after that: a small capsule under the Chinese word that goes by itself.
+    case pill(String)
 
     /// The text Tab writes into the field, if this card has one.
     var acceptText: String? {
@@ -28,7 +32,7 @@ enum CoachCardContent: Equatable {
         case let .spelling(_, fixes): fixes.first
         case let .translate(_, result): result.english
         case let .sentence(_, check): check.ok ? nil : check.corrected
-        case .thinking, .failed: nil
+        case .thinking, .failed, .notice, .pill: nil
         }
     }
 
@@ -37,7 +41,7 @@ enum CoachCardContent: Equatable {
         case let .spelling(_, fixes): "改成 \(fixes.first ?? "")"
         case let .translate(_, result): "换成 \(result.english)"
         case .sentence: "整句换掉"
-        case .thinking, .failed: ""
+        case .thinking, .failed, .notice, .pill: ""
         }
     }
 
@@ -60,10 +64,24 @@ enum CoachCardContent: Equatable {
         case let .sentence(original, check):
             CoachText.placements(of: check.changes, in: original).forEach { add($0.to, always: true) }
             check.changes.forEach { add($0.why, always: false) }
-        case .thinking, .failed:
+        case .thinking, .failed, .notice, .pill:
             break
         }
         return words
+    }
+}
+
+/// The prototype's small button on a notice card (24 high, 12 font, hairline).
+private struct NoticeButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 12))
+            .foregroundStyle(TR.text)
+            .padding(.horizontal, 10)
+            .frame(height: 24)
+            .background(configuration.isPressed ? TR.sel : TR.fill, in: RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(TR.line2, lineWidth: 0.5))
+            .contentShape(Rectangle())
     }
 }
 
@@ -114,6 +132,9 @@ struct CoachFollow: Equatable {
     var wrongAt: Int?
     /// An input method holds letters it has not committed.
     var composing = false
+    /// The app does not say whether an input method composes, and a Chinese one is on: the letters
+    /// count, and the card reminds that syllables only count once they are committed.
+    var inputMethodOn = false
     /// Sentence cards: which change is being typed.
     var step = 0
 }
@@ -143,6 +164,8 @@ struct CoachCardView: View {
     var onSpeak: (String) -> Void = { _ in }
     /// Every word the mouse can stop on, whenever the layout changes.
     var onWords: ([CoachWordSpot]) -> Void = { _ in }
+    /// A notice card's button.
+    var onNotice: (CoachNotice.Action) -> Void = { _ in }
 
     @Environment(\.colorScheme) private var scheme
 
@@ -176,11 +199,22 @@ struct CoachCardView: View {
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
+            case let .pill(text):
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.circle").font(.system(size: 11)).foregroundStyle(TR.warn)
+                    Text(text).font(.system(size: 12)).foregroundStyle(TR.text2).lineLimit(1)
+                }
+                .padding(.leading, 8).padding(.trailing, 9).frame(height: 24)
+            case let .notice(notice):
+                CardWidth(maxWidth: Self.noticeWidth, minWidth: 0) {
+                    noticeBody(notice)
+                        .padding(.horizontal, 12).padding(.top, 10).padding(.bottom, 9)
+                }
             default:
                 CardWidth(maxWidth: Self.maxWidth, minWidth: minWidth) {
                     VStack(alignment: .leading, spacing: 8) {
                         main
-                        if follow?.composing == true, follow?.phase == .typing { composingHint }
+                        if follow?.composing == true || follow?.inputMethodOn == true, follow?.phase == .typing { composingHint }
                         if keys != .readOnly { keysRow }
                     }
                     .padding(.horizontal, 14)
@@ -189,14 +223,55 @@ struct CoachCardView: View {
             }
         }
         .background(
-            RoundedRectangle(cornerRadius: content == .thinking ? 999 : 12, style: .continuous)
+            RoundedRectangle(cornerRadius: isCapsule ? 999 : 12, style: .continuous)
                 .fill(CoachPalette.pop(scheme))
                 .shadow(color: .black.opacity(scheme == .dark ? 0.45 : 0.16), radius: 10, y: 4)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: content == .thinking ? 999 : 12, style: .continuous)
+            RoundedRectangle(cornerRadius: isCapsule ? 999 : 12, style: .continuous)
                 .strokeBorder(CoachPalette.line(scheme), lineWidth: 0.5)
         )
+    }
+
+    /// The prototype's notice card is at most 380 wide.
+    static let noticeWidth: CGFloat = 380
+
+    private var isCapsule: Bool {
+        switch content {
+        case .thinking, .pill: true
+        default: false
+        }
+    }
+
+    /// Title, what happened, the buttons, and Esc 知道了 (no Tab: there is nothing to write).
+    private func noticeBody(_ notice: CoachNotice) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.circle").font(.system(size: 13)).foregroundStyle(TR.warn)
+                Text(notice.title).font(.system(size: 13, weight: .medium)).foregroundStyle(TR.text)
+            }
+            Text(notice.body).font(.system(size: 12)).foregroundStyle(TR.text2).lineSpacing(3)
+                .fixedSize(horizontal: false, vertical: true).padding(.top, 4)
+            if !notice.links.isEmpty {
+                HStack(spacing: 6) {
+                    ForEach(notice.links, id: \.label) { link in
+                        Button(link.label) { onNotice(link.action) }
+                            .buttonStyle(NoticeButtonStyle())
+                    }
+                }
+                .padding(.top, 9)
+            }
+            if keys != .readOnly {
+                HStack(spacing: 5) {
+                    KeyCap(label: "Esc")
+                    Text("知道了")
+                    Spacer(minLength: 12)
+                    Text("接着打字它就走开").foregroundStyle(TR.text3)
+                }
+                .font(.system(size: 12)).foregroundStyle(TR.text2).lineLimit(1)
+                .padding(.top, 8)
+            }
+        }
     }
 
     // MARK: Main part of each card
@@ -258,7 +333,7 @@ struct CoachCardView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-        case .thinking:
+        case .thinking, .notice, .pill:
             EmptyView()
         }
     }
@@ -571,7 +646,8 @@ struct CoachCardView: View {
     private var composingHint: some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             Image(systemName: "info.circle").font(.system(size: 12)).foregroundStyle(TR.warn)
-            Text("输入法在拼字：上屏的字才算。中文输入法下按 ⇧ 切到英文再打。")
+            Text(follow?.composing == true ? "输入法在拼字：上屏的字才算。中文输入法下按 ⇧ 切到英文再打。"
+                : "中文输入法开着：拼音上屏才算。打英文请按 ⇧ 切到英文再打。")
                 .font(.system(size: 12)).foregroundStyle(TR.text2)
                 .fixedSize(horizontal: false, vertical: true)
         }

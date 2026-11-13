@@ -2,9 +2,12 @@
 //  MemberStatus.swift
 //  TypeRight
 //
-//  What the membership backend says (meetcaption-server docs/multi-product.md §4, product `typeright`),
-//  its errors in plain Chinese, and the state the settings page and the coach go by.
-//  Ported from GetNewWord's MemberService.swift (same author, GPL-3.0); the sync parts are left out.
+//  What the membership backend says (meetcaption-server docs/multi-product.md §4 and §7, product
+//  `typeright`), its errors in plain Chinese, and the state the settings page and the coach go by.
+//  TypeRight gives no free uses: a Mac without a membership gets 402 trial-closed for every AI card,
+//  and the words here say "开会员，或填自己的 Key" rather than the backend's message, which is the
+//  sibling apps' "免费试用名额已经发完了".
+//  Ported from GetNewWord's MemberService.swift (same author, GPL-3.0); the trial and sync parts are left out.
 //
 
 import Foundation
@@ -12,13 +15,6 @@ import Foundation
 // MARK: - GET /v1/typeright/status
 
 struct MemberStatus: Codable, Equatable, Sendable {
-    struct Trial: Codable, Equatable, Sendable {
-        var granted = false
-        var total = 0
-        var used = 0
-        var left = 0
-    }
-
     struct Subscription: Codable, Equatable, Sendable {
         var status: String
         var plan: String?
@@ -48,14 +44,12 @@ struct MemberStatus: Codable, Equatable, Sendable {
     /// {"month": {"cny": 990, "usd": 199}, "year": {…}}; amounts in fen / cents.
     typealias Prices = [String: [String: Int]]
 
-    /// trial (trial uses left) / member (subscription or one-time pass running) / none
+    /// member (subscription or one-time pass running) / none
     var plan = "none"
-    /// The license code (TR-XXXX-XXXX-XXXX); nil while this Mac only has its own trial.
+    /// The license code (TR-XXXX-XXXX-XXXX); nil while this Mac has never bought one or entered one.
     var code: String?
     var devices = 1
     var maxDevices = 2
-    var trialOnly = true
-    var trial = Trial()
     var subscription: Subscription?
     var pass: Pass?
     /// Milliseconds; when membership (subscription and passes together) runs out.
@@ -66,14 +60,13 @@ struct MemberStatus: Codable, Equatable, Sendable {
     /// Members only: today's uses (UTC day, 500 a day).
     var today: Today?
     var canUse = true
-    /// When canUse is false: trial-used-up / trial-closed / sub-ended / payment-failed / daily-limit
+    /// When canUse is false: trial-closed (no membership: TypeRight has no trial, the code is the
+    /// backend's shared one) / sub-ended / payment-failed / daily-limit
     var reason: String?
     /// With daily-limit: uses (today's count used up) or cost (this license's cost cap for today).
     var limitBy: String?
     /// With daily-limit: when it resets (milliseconds, next UTC midnight).
     var resetAt: Double?
-    /// What this Mac got when it registered: granted / closed / ip-limit / daily-limit / none.
-    var trialResult: String?
     var prices: Prices?
     var passPrices: Prices?
     var now: Double = 0
@@ -89,8 +82,6 @@ struct MemberStatus: Codable, Equatable, Sendable {
         code = opt(.code)
         devices = get(.devices, 1)
         maxDevices = get(.maxDevices, 2)
-        trialOnly = get(.trialOnly, true)
-        trial = get(.trial, Trial())
         subscription = opt(.subscription)
         pass = opt(.pass)
         memberUntil = opt(.memberUntil)
@@ -101,7 +92,6 @@ struct MemberStatus: Codable, Equatable, Sendable {
         reason = opt(.reason)
         limitBy = opt(.limitBy)
         resetAt = opt(.resetAt)
-        trialResult = opt(.trialResult)
         prices = opt(.prices)
         passPrices = opt(.passPrices)
         now = get(.now, 0)
@@ -111,17 +101,13 @@ struct MemberStatus: Codable, Equatable, Sendable {
 
     static func date(_ ms: Double?) -> Date? { ms.map { Date(timeIntervalSince1970: $0 / 1000) } }
 
-    /// The registration reply: `trial` is what this registration got (granted / existing / closed /
-    /// ip-limit / daily-limit); the counts are in `trialUses`.
-    static func registration(from data: Data) throws -> (token: String, trial: String, status: MemberStatus) {
-        guard var obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let token = obj["token"] as? String, !token.isEmpty else { throw MemberError.badReply }
-        let result = obj["trial"] as? String ?? ""
-        obj["trial"] = obj["trialUses"]
-        guard let status = try? JSONDecoder().decode(MemberStatus.self, from: JSONSerialization.data(withJSONObject: obj)) else {
-            throw MemberError.badReply
-        }
-        return (token, result, status)
+    /// The registration reply: the device token and this Mac's status. Its trial fields (always
+    /// closed for TypeRight) are not read.
+    static func registration(from data: Data) throws -> (token: String, status: MemberStatus) {
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let token = obj["token"] as? String, !token.isEmpty,
+              let status = try? JSONDecoder().decode(MemberStatus.self, from: data) else { throw MemberError.badReply }
+        return (token, status)
     }
 }
 
@@ -136,9 +122,8 @@ struct MemberError: LocalizedError, Equatable, Sendable {
     var status = 0
     var resetAt: Date?
     var retryAfter: Double?
-    /// Filled in from this Mac's status before showing (MemberService.explain): why no trial was
-    /// granted, until when a one-time pass runs, and whether a daily limit is the cost cap.
-    var miss: TrialMiss?
+    /// Filled in from this Mac's status before showing (MemberService.explain): until when a
+    /// one-time pass runs, and whether a daily limit is the cost cap.
     var until: Date?
     var costCap = false
 
@@ -146,11 +131,13 @@ struct MemberError: LocalizedError, Equatable, Sendable {
     static let unavailable = MemberError(code: "unavailable")
     static let badReply = MemberError(code: "bad-reply")
 
-    /// What an AI card gets back when it cannot use the trial or membership; the coach logs it and,
-    /// for now, shows nothing.
+    /// What an AI card gets back when it cannot use the membership; the coach says so once (a
+    /// notice card) and after that with a small capsule.
     enum Kind: Equatable, Sendable {
-        /// No uses left: trial used up, no trial granted, or membership ended. Subscribe or use an own key.
-        case usedUp
+        /// This Mac has no membership. Subscribe, enter a code or use an own key.
+        case noMember
+        /// The membership ended (not renewed, or the last pass ran out).
+        case ended
         /// Renewal could not be charged; fixing the card in the customer portal brings it back.
         case paymentFailed
         /// Today's 500 are used, or this license reached today's cost cap; `resetAt` says when it comes back.
@@ -170,7 +157,8 @@ struct MemberError: LocalizedError, Equatable, Sendable {
 
     var kind: Kind {
         switch code {
-        case "trial-used-up", "trial-closed", "sub-ended": .usedUp
+        case "trial-used-up", "trial-closed": .noMember
+        case "sub-ended": .ended
         case "payment-failed": .paymentFailed
         case "daily-limit": .dailyLimit
         case "network": .offline
@@ -206,7 +194,7 @@ struct MemberError: LocalizedError, Equatable, Sendable {
         }
     }
 
-    /// The trial or today's count changed: ask for the status again.
+    /// The membership or today's count changed: ask for the status again.
     var changesStatus: Bool {
         ["trial-used-up", "trial-closed", "sub-ended", "payment-failed", "daily-limit"].contains(code)
     }
@@ -219,8 +207,7 @@ struct MemberError: LocalizedError, Equatable, Sendable {
 enum MemberText {
     static func title(_ e: MemberError) -> String {
         switch e.code {
-        case "trial-used-up": "免费次数用完了"
-        case "trial-closed": e.miss == .full ? "免费名额已经发完了" : "这台 Mac 没领到免费次数"
+        case "trial-used-up", "trial-closed": "还没开会员"
         case "sub-ended": "会员到期了"
         case "payment-failed": "续费没扣成"
         case "daily-limit": e.costCap ? "今天的用量到上限了" : "今天的次数用完了"
@@ -250,15 +237,8 @@ enum MemberText {
 
     static func detail(_ e: MemberError) -> String {
         switch e.code {
-        case "trial-used-up": return "订阅会员接着用；也可以填自己的 AI Key，永久免费。拼写照样在本机查。"
-        case "trial-closed":
-            switch e.miss {
-            case .full: return "前 100 台新 Mac 的免费次数已经发完，这台没领到。订阅会员，或者填自己的 AI Key 免费用。"
-            case .network: return "登记那天同一个网络里领的人太多，这台 Mac 没领到。订阅会员，或者填自己的 AI Key 免费用。"
-            case .dayFull: return "登记那天领的人太多，当天的份数发完了，这台 Mac 没领到。订阅会员，或者填自己的 AI Key 免费用。"
-            default: return "这台 Mac 登记时没领到免费次数。订阅会员，或者填自己的 AI Key 免费用。"
-            }
-        case "sub-ended": return "续订或再买一段就能接着用；也可以填自己的 AI Key 免费用。"
+        case "trial-used-up", "trial-closed": return "开会员就能用中文变英文和整句讲解；也可以填自己的 AI Key，永久免费。拼写照样在本机查。"
+        case "sub-ended": return "续上会员就能接着用，授权码不变；也可以填自己的 AI Key，永久免费。"
         case "payment-failed": return "上一期的续费没扣成。打开「管理订阅」换一张卡，换好马上恢复。"
         case "daily-limit":
             let when = e.resetAt.map { "\($0.formatted(date: .omitted, time: .shortened)) 恢复（你这里的时间）" } ?? "北京时间早上 8 点恢复"
@@ -303,86 +283,64 @@ enum MemberText {
 
 // MARK: - The state the settings page and the coach go by
 
-/// Why no trial was granted: what the backend said at registration (closed / ip-limit / daily-limit).
-enum TrialMiss: Equatable, Sendable {
-    /// The first 100 Macs already got theirs.
-    case full
-    /// Too many from the same network that day (ip-limit).
-    case network
-    /// Too many everywhere that day (daily-limit).
-    case dayFull
-    /// Not known, for example after registering again (the backend then only says existing).
-    case unknown
-
-    static func of(_ trialResult: String?) -> TrialMiss {
-        switch trialResult {
-        case "closed": .full
-        case "ip-limit": .network
-        case "daily-limit": .dayFull
-        default: .unknown
-        }
-    }
-}
-
 enum MemberState: Equatable, Sendable {
     /// A debug build not pointed at a backend.
     case unavailable
-    /// Not registered yet: the first AI card (or choosing the member plan, buying, entering a code) registers and claims the trial.
-    case notClaimed
+    /// This Mac has no membership: never bought or entered a code (it may not even be registered),
+    /// or the backend says it has none.
+    case noMember
     /// Registered, no status yet, asking.
     case connecting
     /// Registered, no status yet, and the backend could not be reached.
     case offline
-    case trial(left: Int, total: Int)
-    case trialUsedUp
-    /// No trial was granted.
-    case trialClosed(TrialMiss)
+    /// `expiring`: not renewing by itself and less than 7 days left (offer to buy again).
     case member(until: Date?, autoRenew: Bool, expiring: Bool, pastDue: Bool, todayLeft: Int?, limit: Int?)
     case dailyLimit(reset: Date?)
+    /// The renewal could not be charged and its grace ran out.
     case paymentFailed
     case ended
 
-    /// registered: this Mac has a device token (or is getting one). trialResult: what this Mac
-    /// remembers from registering; the backend's own trialResult wins when /status has it.
-    static func of(_ status: MemberStatus?, available: Bool, failed: Bool, trialResult: String?, registered: Bool = true, now: Date = Date()) -> MemberState {
+    /// A pass or a cancelled subscription this close to its end counts as expiring.
+    static let expiringWithin: TimeInterval = 7 * 86400
+
+    /// registered: this Mac has a device token (or is getting one).
+    static func of(_ status: MemberStatus?, available: Bool, failed: Bool, registered: Bool = true, now: Date = Date()) -> MemberState {
         guard available else { return .unavailable }
-        guard let s = status else { return !registered ? .notClaimed : failed ? .offline : .connecting }
-        // Daily limits (members' 500, or this license's cost cap, which trials hit too) end at their reset time.
+        guard let s = status else { return !registered ? .noMember : failed ? .offline : .connecting }
+        guard s.isMember else {
+            switch s.reason {
+            case "payment-failed": return .paymentFailed
+            case "sub-ended": return .ended
+            default: return .noMember
+            }
+        }
+        // Today's 500 (or this license's cost cap) end at their reset time.
         let reset = MemberStatus.date(s.resetAt ?? s.today?.resetAt)
-        if s.reason == "daily-limit", s.isMember || s.limitBy == "cost", (reset ?? .distantFuture) > now { return .dailyLimit(reset: reset) }
-        if s.isMember {
-            // Renewing: the next charge (end of the period). Otherwise: until when it runs (with the grace of a failed renewal).
-            let until = s.autoRenew ? MemberStatus.date(s.subscription?.periodEnd ?? s.memberUntil) : MemberStatus.date(s.memberUntil)
-            return .member(until: until, autoRenew: s.autoRenew, expiring: s.expiring,
-                           pastDue: s.subscription?.status == "past_due", todayLeft: s.today?.left, limit: s.today?.limit)
-        }
-        if s.plan == "trial", s.trial.left > 0 { return .trial(left: s.trial.left, total: s.trial.total) }
-        switch s.reason {
-        case "payment-failed": return .paymentFailed
-        case "sub-ended": return .ended
-        case "trial-closed": return .trialClosed(.of(s.trialResult ?? trialResult))
-        default: return s.trial.granted ? .trialUsedUp : .trialClosed(.of(s.trialResult ?? trialResult))
-        }
+        if s.reason == "daily-limit", (reset ?? .distantFuture) > now { return .dailyLimit(reset: reset) }
+        // Renewing: the next charge (end of the period). Otherwise: until when it runs (with the grace of a failed renewal).
+        let until = s.autoRenew ? MemberStatus.date(s.subscription?.periodEnd ?? s.memberUntil) : MemberStatus.date(s.memberUntil)
+        let soon = !s.autoRenew && until.map { $0.timeIntervalSince(now) < expiringWithin } == true
+        return .member(until: until, autoRenew: s.autoRenew, expiring: s.expiring || soon,
+                       pastDue: s.subscription?.status == "past_due", todayLeft: s.today?.left, limit: s.today?.limit)
     }
 
     /// AI cards cannot go through the backend now (the backend has the last word; this only avoids asking in vain).
     var blocked: Bool {
         switch self {
-        case .trialUsedUp, .trialClosed, .dailyLimit, .paymentFailed, .ended, .unavailable: true
-        case .notClaimed, .connecting, .offline, .trial, .member: false
+        case .noMember, .dailyLimit, .paymentFailed, .ended, .unavailable: true
+        case .connecting, .offline, .member: false
         }
     }
 
     /// The error code a blocked state stands for (to show the same words as the backend's error).
     var blockCode: String? {
         switch self {
-        case .trialUsedUp: "trial-used-up"
-        case .trialClosed: "trial-closed"
+        case .noMember: "trial-closed"
         case .dailyLimit: "daily-limit"
         case .paymentFailed: "payment-failed"
         case .ended: "sub-ended"
         case .unavailable: "unavailable"
-        case .notClaimed, .connecting, .offline, .trial, .member: nil
+        case .connecting, .offline, .member: nil
         }
     }
 }

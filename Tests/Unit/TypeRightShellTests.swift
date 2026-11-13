@@ -118,18 +118,25 @@ final class TypeRightShellTests: XCTestCase {
     // MARK: Status menu
 
     func testMenuSaysWhenTheProviderTurnedTheKeyDown() throws {
-        let line = TRMenuAILine.keyRejected(.deepseek)
-        XCTAssertEqual(line.title, "AI：DeepSeek 的 Key 失效了")
-        XCTAssertTrue(line.opensSettings)
+        let line = TRMenuAILine.of(TRAccountFacts(plan: .own, state: .noMember, own: .rejected(.deepseek)))
+        XCTAssertEqual(line.title, "AI：DeepSeek 的 Key 用不了")
+        XCTAssertEqual(line.opens, .ai)
         XCTAssertEqual(line.dotColor, TR.dangerNS)
-        XCTAssertEqual(TRMenuAILine.ready(.deepseek).title, "AI：DeepSeek")
-        XCTAssertFalse(TRMenuAILine.ready(.deepseek).opensSettings)
-        XCTAssertEqual(TRMenuAILine.notSet.title, "AI：还没选，只查拼写")
+        let ready = TRMenuAILine.of(TRAccountFacts(plan: .own, state: .noMember, own: .ready(.deepseek)))
+        XCTAssertEqual(ready.title, "AI：自带 Key（DeepSeek）")
+        XCTAssertEqual(ready.dotColor, TR.fixNS)
+        let local = TRMenuAILine.of(TRAccountFacts(plan: .local, state: .noMember, own: .missing(.deepseek)))
+        XCTAssertEqual(local.title, "AI：没开，只在本机查拼写语法")
+        XCTAssertEqual(local.opens, .account)
 
         let notebook = CoachNotebook(fileURL: FileManager.default.temporaryDirectory.appendingPathComponent("tr-menu-\(UUID().uuidString).json"))
         let menu = TypeRightMenu.shared.build(state: TRMenuState(app: nil, allPaused: false, ai: line, needsAccess: false), notebook: notebook)
         let item = try XCTUnwrap(menu.items.first { $0.title == line.title })
         XCTAssertNotNil(item.action, "Clicking the line opens 设置 › AI 服务商")
+        XCTAssertEqual(item.representedObject as? String, TRSettingsPage.ai.rawValue)
+        let ok = try XCTUnwrap(TypeRightMenu.shared.build(state: TRMenuState(app: nil, allPaused: false, ai: ready, needsAccess: false), notebook: notebook)
+            .items.first { $0.title == ready.title })
+        XCTAssertNotNil(ok.action, "Every AI line opens its settings page")
     }
 
     /// The line follows the key store: a 401 / 403 marks the key, saving a new one clears it.
@@ -146,26 +153,19 @@ final class TypeRightShellTests: XCTestCase {
         CoachSettings.defaults = defaults
         CoachKeyStore.shared = CoachKeyStore(read: { _ in .found("sk-test-0000") }, write: { _, _ in true })
         CoachSettings.provider = .deepseek
+        let member = MemberService(api: nil, defaults: defaults, tokens: .memory())
+        member.plan = .own
 
-        XCTAssertEqual(TRMenuAILine.current(), .ready(.deepseek))
+        XCTAssertEqual(TRMenuAILine.of(.current(member)).title, "AI：自带 Key（DeepSeek）")
         CoachKeyStore.shared.markRejected(.deepseek)
-        XCTAssertEqual(TRMenuAILine.current(), .keyRejected(.deepseek))
+        XCTAssertEqual(TRMenuAILine.of(.current(member)).title, "AI：DeepSeek 的 Key 用不了")
+        XCTAssertTrue(TRAccountFacts.current(member).needsAttention)
         CoachKeyStore.shared.save("sk-test-1111", for: .deepseek)
-        XCTAssertEqual(TRMenuAILine.current(), .ready(.deepseek))
+        XCTAssertEqual(TRMenuAILine.of(.current(member)).title, "AI：自带 Key（DeepSeek）")
+        XCTAssertFalse(TRAccountFacts.current(member).needsAttention)
     }
 
     // MARK: Words the user reads
-
-    /// The privacy row names every field UsagePing sends, and still says why.
-    func testPrivacyNoteMatchesThePingBody() throws {
-        let body = UsagePing.Body(id: "x", version: "1", platform: "darwin", arch: "arm64", plan: "own", lang: "zh", product: "typeright")
-        XCTAssertEqual(Mirror(reflecting: body).children.count, 7, "A new field in the ping needs a word in the privacy note")
-        let note = TRPrivacySettings.pingNote
-        for word in ["前 100 位用户", "随机", "版本号", "darwin", "arm64", "x64", "会员", "自带 Key", "只用本机", "系统语言", "产品名"] {
-            XCTAssertTrue(note.contains(word), "missing \(word): \(note)")
-        }
-        XCTAssertFalse(note.contains("界面语言"))
-    }
 
     func testDiagnosticsExportIsNamedTypeRight() throws {
         let name = DiagnosticsView.exportFileName(at: Date(timeIntervalSince1970: 0))

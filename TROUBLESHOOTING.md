@@ -1,205 +1,133 @@
-# TextWarden Troubleshooting
+# TypeRight 常见问题和排查
 
-Use this guide when the macOS grammar checker does not launch, cannot read a text field, shows stale suggestions, or places underlines incorrectly.
+TypeRight 打不开、看不到你打的字、不弹小卡、改错了地方，或者 AI 那一块用不了，按下面一条条查。
 
-## TextWarden Does Not Launch
+## 打不开
 
-TextWarden is a menu bar app and does not show a Dock icon. After opening it, look for the feather icon in the menu bar.
+TypeRight 只在菜单栏里，没有 Dock 图标。打开后看屏幕右上角的菜单栏：一个勾，长的一笔是羽毛。
 
-### Open the downloaded app once
+### 第一次打开被拦住
 
-1. Move `TextWarden.app` to `/Applications`.
-2. Control-click the app and choose **Open**.
-3. Confirm **Open** in the macOS dialog.
+第一版没有经过苹果公证，第一次打开时 macOS 会说无法验证开发者：
 
-Official release DMGs are signed with Developer ID and notarized by Apple. Check the installed copy:
+1. 把 `TypeRight.app` 拖进「应用程序」。
+2. 打开一次，看到提示后点「完成」。
+3. 打开「系统设置 › 隐私与安全性」，拉到最下面，点「仍要打开」，再确认一次。
 
-```bash
-spctl --assess --type execute --verbose=4 /Applications/TextWarden.app
-codesign --verify --deep --strict --verbose=2 /Applications/TextWarden.app
-```
-
-Gatekeeper should report that the app is accepted and identify a notarized Developer ID source. If verification fails, delete the copy through Finder and download the latest DMG again from [GitHub Releases](https://github.com/PhilipSchmid/textwarden/releases/latest).
-
-### Check launch logs
+之后自动更新不会再弹。核对装着的这一份是不是我们签的名：
 
 ```bash
-log show \
-  --predicate 'process == "TextWarden" OR subsystem == "io.textwarden.TextWarden"' \
-  --last 5m
+codesign --verify --deep --strict --verbose=2 /Applications/TypeRight.app
+codesign -dv /Applications/TypeRight.app 2>&1 | grep -E 'Authority=Developer ID|TeamIdentifier'
 ```
 
-For a local development build, use [BUILD.md](BUILD.md) and make sure the build completed before launching.
+签名核对没过，就在访达里删掉这一份，从 [GitHub Releases](https://github.com/SchaeferAnjon/TypeRight/releases/latest) 重新下载 DMG。
 
-## Accessibility Permission
-
-TextWarden needs Accessibility permission to monitor and edit text in other apps.
-
-1. Open **System Settings → Privacy & Security → Accessibility**.
-2. Enable TextWarden.
-3. Restart the host app whose text you want to check.
-
-If permission remains stuck, remove TextWarden from the list, launch `/Applications/TextWarden.app` again, and grant access to that exact copy. Rebuilt or differently signed apps can appear as a new identity to macOS.
-
-## Text Is Not Being Checked
-
-Check these in order:
-
-1. Confirm TextWarden is active in its menu bar menu.
-2. Open **Preferences → Diagnostics** and check **Runtime Health** for the current app and any suggested recovery action.
-3. Open **Preferences → Applications** and check the current app. **Always Excluded** means checking is intentionally unavailable and cannot be enabled. For other unrecognized apps, choose **Try Safely** to use the indicator and copy-only fixes, or leave them paused.
-4. In a browser, open **Preferences → Websites** and make sure the current domain is not excluded.
-5. Type into an editable field, not rendered page text, a PDF, or a non-editable preview.
-6. Try a deliberate error such as `This are wrong.`
-
-The application lists show only apps found on this Mac. Apps marked Paused by default can be enabled; built-in exclusions cannot.
-
-Some editors expose their text incompletely through macOS Accessibility APIs. The [supported-app matrix](README.md#supported-apps) and [application notes](docs/applications/README.md) describe known exceptions.
-
-## The Floating Indicator Is Missing
-
-By default, the indicator appears only when TextWarden has something to show. If you want a constant status marker, enable **Preferences → General → Always show indicator**.
-
-If it still does not appear:
-
-- Confirm global and per-app checking are active.
-- Confirm the current website is not excluded.
-- Check that Accessibility permission is granted.
-- Try an obvious spelling or grammar error.
-- Switch focus to another field and back.
-
-## Suggestions or Underlines Are Stale
-
-TextWarden validates the source text, focused app, Accessibility element, and analysis generation before applying asynchronous grammar results. If old results remain visible:
-
-1. Move focus to another editable field and back.
-2. Pause and resume TextWarden from the menu bar.
-3. Restart TextWarden.
-4. Export diagnostics and report the host app, the field type, and the sequence that left stale UI behind.
-
-Do not apply a correction when the suggestion's quoted source no longer matches the field.
-
-## Browser Extension (Preview)
-
-- **No extension or Browser settings:** Use a TextWarden build that includes the preview. Installation steps are under **Preferences → Browser → Install Extension**; it is not in extension stores yet.
-- **No underlines:** Click the feather on the current page, leave **Check this page** and **Show underlines** enabled, then focus a supported editor. Repeat after navigating to another website or port. Without the extension, browser checking uses the floating indicator.
-- **Disconnected:** Open TextWarden and choose **Open TextWarden & reconnect** in the toolbar menu. If needed, use **Try Again** in Browser settings. Writing actions are disabled while disconnected; reopen the menu after reconnection.
-- **Paused:** Check the page/site controls, **Preferences → Websites**, and global/per-app pauses. A wildcard website rule must be changed in Website settings.
-- **After an update or restart:** Reload Chrome/Brave’s unpacked extension and affected pages. Reload Firefox/Zen’s temporary add-on after every browser restart. Safari’s extension updates with the app.
-- **Still unavailable:** Browser settings pages, private windows, sensitive fields, Google Docs, and complex editors are excluded from the preview.
-
-See the [browser extension guide](https://github.com/PhilipSchmid/textwarden/blob/main/BrowserExtension/README.md) for installation and scope.
-
-## Visual Underlines Are Missing or Misaligned
-
-Underlines depend on character bounds exposed by the host app. Grammar checking and the floating indicator can work even when precise bounds do not.
-
-TextWarden has dedicated positioning support for the apps listed in [Supported Apps](README.md#supported-apps). Notion is partial because some virtualized blocks are absent from its Accessibility tree. PowerPoint support is limited to speaker notes because slide text boxes are not exposed.
-
-For an offset in a supported editor:
-
-1. Note the app version, field type, display arrangement, and display scaling.
-2. Test on the primary display and an external display if available.
-3. Open **Preferences → Diagnostics** and enable the relevant bounds overlay.
-4. Set logging to Trace only long enough to reproduce the problem.
-5. Export diagnostics, return logging to Info, and inspect the ZIP before sharing it.
-
-You can disable underlines for one app under **Preferences → Applications** while keeping grammar suggestions in the floating indicator.
-
-## A Correction Changes Formatting or the Wrong Text
-
-Text replacement differs by app. Native editors may allow a direct Accessibility range replacement; browser, Electron, and WebKit editors may require selection and paste.
-
-If formatting changes or the wrong range is selected:
-
-1. Undo with `⌘Z` immediately.
-2. Copy the suggestion instead of applying it if the popover offers that fallback.
-3. Record whether the field contains links, mentions, lists, emoji, or rich formatting.
-4. File a bug with a minimal example and diagnostic export.
-
-TextWarden aborts a replacement when its selection validation fails. A recurring failure usually means the host editor needs an app-specific replacement strategy.
-
-## Apple Intelligence Features Are Unavailable
-
-AI Style Suggestions, AI Compose, sentence simplification, and AI readability tips require:
-
-- macOS 26 or later
-- A supported Apple Silicon Mac
-- Apple Intelligence enabled under **System Settings → Apple Intelligence & Siri**
-- The on-device model downloaded and ready
-
-Open **Preferences → Style** to see the current availability state. **Model Not Ready** is temporary; wait for macOS to finish preparing the model, then choose **Check Again**.
-
-Style suggestions are off by default. After you enable them, automatic analysis waits for at least 50 characters, a three-second typing pause, and the 30-second rate limit. Press `⌥⌃S` for a manual style check.
-
-Harper grammar and spelling, language detection, and Flesch readability scoring do not require Apple Intelligence.
-
-## High CPU or Memory Use
-
-1. Open **Preferences → Statistics** to inspect recorded resource usage.
-2. Pause AI Style Suggestions and compare usage.
-3. Return Debug or Trace logging to Info.
-4. Restart TextWarden.
-5. If the problem returns in one host app, export diagnostics and include that app and field type in the report.
-
-## Reset Settings or Onboarding
-
-From **Preferences → Diagnostics**, you can reset all settings, clear the custom dictionary, clear ignored rules or error text, and reset milestone prompts. Statistics have a separate reset control under **Preferences → Statistics**. **Reset All Settings** relaunches the app and shows onboarding.
-
-To review onboarding without resetting anything, choose **Preferences → About → Replay Tutorial**.
-
-Developers can reset onboarding only:
+### 看启动日志
 
 ```bash
-defaults delete io.textwarden.TextWarden hasCompletedOnboarding
+log show --predicate 'subsystem == "com.typeright.app"' --last 5m
 ```
 
-Or remove all TextWarden preferences:
+自己编的开发版见 [BUILD.md](BUILD.md)，先确认编译成功了再打开。
+
+## 辅助功能权限
+
+TypeRight 要靠辅助功能权限读到你正在打的那一句，并在你按 Tab 时把改法写回去。
+
+1. 打开「系统设置 › 隐私与安全性 › 辅助功能」。
+2. 把 TypeRight 的开关打开（引导里可以直接把图标从右往左拖进这个列表）。
+3. 重开你要打字的那个 App。
+
+开关打开了还是不行：在列表里删掉 TypeRight，重新打开「应用程序」里的那一份，再给一次权限。重新编译或换了签名的 App，macOS 会当成另一个 App。
+
+## 不弹小卡
+
+按顺序查：
+
+1. 菜单栏菜单里没有写「已暂停」，「设置 › 通用 › 边打边弹框」开着。
+2. 「设置 › App」里当前这个 App 的开关开着。终端这类 App 默认关着；密码管理器、钥匙串访问这类一直不看。
+3. 浏览器里：「设置 › 高级 › 网站」里没有当前这个网站。
+4. 打在能编辑的输入框里，不是网页正文、PDF 或预览。
+5. 故意打一个错词加空格试试，比如 `tomorow `。
+6. 「设置 › 高级 › 诊断」最上面写着 TypeRight 在当前 App 里能不能用，不能用时可以怎么办。
+
+有的 App 通过辅助功能给出的文字不全或给不出词的位置：小卡会改放在输入框右上角，或者只让你复制改法再自己粘贴。
+
+## 用中文输入法打字时
+
+- 输入法正在拼字时（拼音还没上屏），TypeRight 不查这些字母，也不弹卡；上屏以后才看。
+- Chrome 这类浏览器不告诉 TypeRight 输入法在不在拼字。用中文输入法时，TypeRight 等你按了空格或标点、或者拼音变成了汉字，才查刚打的那些字母；跟着小卡打英文时，卡上会提示「中文输入法开着」。
+- 想在中文输入法里直接打英文，按 ⇧ 切到英文再打。
+
+## 中文没变成英文，或整句没查
+
+- 菜单里「AI」那一行写着现在的情况。灰点是没开 AI（只用本机检查）；琥珀点是 AI 停了、要你看一下；红点是自带 Key 用不了。
+- 只用本机检查时只查拼写和基础语法。要中文变英文和整句检查，在「设置 › 账号与会员」里开会员，或改用自带 Key。
+- 自带 Key：在「设置 › AI 服务商」里点「试一下」。Key 被服务商拒绝时，菜单那一行是红点，换一个 Key 存好就恢复。
+- 会员：没开会员、到期、续费没扣成、今天 500 次用完、没连上网，都只停 AI，拼写和基础语法照样查。打中文时第一次出一张说明小卡，之后只出一颗小胶囊。今天 500 次按 UTC 零点恢复（北京时间早上 8 点）。
+- 整句都是中文时不会自己弹，按你在「设置 › 快捷键」里选的「整句翻译」键。
+
+## 付款和授权码
+
+- 付完款回到 TypeRight，几秒内自己变成会员；微信付款到账有时要一两分钟。付款页关掉了，在「账号与会员」里点「重新打开付款页」。
+- 授权码在付款成功页和收据邮件里，一个最多用在 2 台 Mac 上。第 3 台会被拒：先在不用的那台上点「解绑这台」。
+- 换卡、取消自动续费、看发票：「账号与会员」里的「管理订阅」，在浏览器里打开。
+
+## 改错了地方，或者格式变了
+
+不同 App 写回文字的办法不一样：原生 App 能直接替换那几个字，浏览器、Electron 这类有时要选中再粘贴。
+
+1. 马上按 `⌘Z` 撤销。
+2. 记下输入框里有没有链接、@、列表、表情或富文本格式。
+3. 在一个 App 里写回出过错，之后在这个 App 里按 Tab 只复制改法，不直接改，你自己粘贴。
+4. 带一个最小的例子和诊断包报问题。
+
+## 很占 CPU 或内存
+
+1. 「设置 › 高级 › 诊断」里看资源占用。
+2. 日志级别从「调试」或「追踪」调回默认。
+3. 退出 TypeRight 再打开。
+4. 只在某一个 App 里出现：导出诊断包，报问题时写上是哪个 App、什么样的输入框。
+
+## 恢复设置
+
+「设置 › 高级 › 诊断」里能恢复全部高级设置（之后 TypeRight 会重新打开），也能清空自定义词典。错题本、生词本和 Key 不受影响；要清空错题本和生词本，在「设置 › 隐私」里点「清空…」。
+
+开发时只想重看一遍引导：
 
 ```bash
-defaults delete io.textwarden.TextWarden
+defaults delete com.typeright.app hasCompletedOnboarding
 ```
 
-Restart TextWarden after using either command. Deleting the full preferences domain resets user choices; it does not remove the application.
+## 日志
 
-## Logs
-
-TextWarden always uses macOS Unified Logging. Optional file logging writes to:
+TypeRight 一直写 macOS 的统一日志；在「设置 › 高级 › 诊断」里可以另外写进文件，默认是：
 
 ```text
-~/Library/Logs/TextWarden/textwarden.log
+~/Library/Logs/TypeRight/typeright.log
 ```
 
-Stream live unified logs with:
+实时看：
 
 ```bash
-log stream \
-  --predicate 'subsystem == "io.textwarden.TextWarden"' \
-  --style compact
+log stream --predicate 'subsystem == "com.typeright.app"' --style compact
 ```
 
-Info is the default level and most Info messages record metadata. Warning and error diagnostics for failed or stale replacements can include short text fragments, while Debug and Trace may include more analyzed text. Review logs before sharing them.
+默认级别不记你打的字；调到「调试」或「追踪」后，日志里可能有你打的字。发给别人之前先看一眼。
 
-## Export Diagnostics
+## 导出诊断包
 
-Open **Preferences → Diagnostics → Export Diagnostics**. The ZIP can include:
+「设置 › 高级 › 诊断 › 导出诊断包」生成一个 ZIP：系统、权限、设置和性能的信息，清理过的日志，最近几份崩溃记录。导出时会把用户目录的路径换掉、删掉看起来像密钥的行，但不能保证一个不漏，上传前解开看一下。
 
-- System, permission, configuration, app-state, usage, performance, and Apple Intelligence metadata
-- Sanitized TextWarden file logs, including rotated logs
-- Up to ten recent TextWarden crash reports
+## 报问题
 
-The exporter anonymizes user-directory paths in logs and removes log lines containing common secret keywords. This is a safeguard, not a guarantee. Logs and macOS crash reports can contain sensitive context. Extract and inspect the archive before uploading it.
+在 [GitHub Issues](https://github.com/SchaeferAnjon/TypeRight/issues) 报问题，写上：
 
-## Report a Bug
+- TypeRight 的版本（「设置 › 高级 › 关于」）
+- macOS 版本和 Mac 型号
+- 在哪个 App 里、哪个版本
+- 一步步怎么复现，想要的结果和实际的结果
+- 看得见的问题附截图；需要时附看过的诊断包
 
-[Open the bug report form](https://github.com/PhilipSchmid/textwarden/issues/new/choose) and include:
-
-- TextWarden version from **Preferences → About**
-- macOS version and Mac model
-- Host application and version
-- Exact reproduction steps
-- Expected and actual behavior
-- Screenshots for visual problems
-- A reviewed diagnostic export when relevant
-
-Use [GitHub Discussions](https://github.com/PhilipSchmid/textwarden/discussions) for feature requests and questions.
+建议和提问请到 [GitHub Discussions](https://github.com/SchaeferAnjon/TypeRight/discussions)。

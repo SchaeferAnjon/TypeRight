@@ -278,16 +278,30 @@ extension AnalysisCoordinator: TypingCoachHost {
     }
 
     /// AppKit text views (and WebKit since 2023) report the input method's uncommitted text as
-    /// AXTextInputMarkedRange; apps that do not report it count as not composing.
-    var coachIsComposing: Bool {
+    /// AXTextInputMarkedRange. Chromium-based apps have no such attribute: there, and in an app that
+    /// has never answered it, this is nil and the coach guesses (CoachComposition).
+    var coachMarkedText: Bool? {
         guard let element = textMonitor.monitoredElement, let bundleID = monitoredContext?.bundleIdentifier else { return false }
-        let call = AXClient.perform(bundleID: bundleID, attribute: "AXTextInputMarkedRange") { () -> CFRange? in
+        let call = AXClient.perform(bundleID: bundleID, attribute: "AXTextInputMarkedRange") { () -> (AXError, CFRange?) in
             var value: CFTypeRef?
-            guard AXUIElementCopyAttributeValue(element, "AXTextInputMarkedRange" as CFString, &value) == .success,
-                  let value else { return nil }
-            return safeAXValueGetRange(value)
+            let error = AXUIElementCopyAttributeValue(element, "AXTextInputMarkedRange" as CFString, &value)
+            return (error, error == .success ? value.flatMap { safeAXValueGetRange($0) } : nil)
         }
-        guard let marked = call?.value else { return false }
-        return marked.location != kCFNotFound && marked.length > 0
+        guard let (error, marked) = call?.value else { return false }
+        if error == .success {
+            CoachMarkedTextApps.reported.insert(bundleID)
+            guard let marked else { return false }
+            return marked.location != kCFNotFound && marked.length > 0
+        }
+        // An app that answered before and has no marked text now may say so with an error.
+        return CoachMarkedTextApps.reported.contains(bundleID) ? false : nil
     }
+
+    var coachInputMethodComposesLetters: Bool { CoachInputSource.current?.composesLetters ?? false }
+}
+
+/// Apps that answered AXTextInputMarkedRange at least once since TypeRight started.
+@MainActor
+enum CoachMarkedTextApps {
+    static var reported = Set<String>()
 }

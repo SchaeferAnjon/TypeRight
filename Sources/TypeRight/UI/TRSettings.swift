@@ -2,8 +2,8 @@
 //  TRSettings.swift
 //  TypeRight
 //
-//  Settings in a System Settings style window: 通用、App、快捷键、AI 服务商、隐私,
-//  plus 高级 for TextWarden's own settings.
+//  Settings in a System Settings style window: 通用、App、快捷键、AI 服务商、账号与会员、隐私,
+//  plus 高级 for TextWarden's own settings. The plan card at the bottom of the sidebar shows on every page.
 //
 
 import AppKit
@@ -18,7 +18,7 @@ extension KeyboardShortcuts.Name {
 }
 
 enum TRSettingsPage: String, CaseIterable {
-    case general, apps, keys, ai, privacy, advanced
+    case general, apps, keys, ai, account, privacy, advanced
 
     var title: String {
         switch self {
@@ -26,6 +26,7 @@ enum TRSettingsPage: String, CaseIterable {
         case .apps: "App"
         case .keys: "快捷键"
         case .ai: "AI 服务商"
+        case .account: "账号与会员"
         case .privacy: "隐私"
         case .advanced: "高级"
         }
@@ -37,6 +38,7 @@ enum TRSettingsPage: String, CaseIterable {
         case .apps: "square.grid.2x2"
         case .keys: "keyboard"
         case .ai: "sparkles"
+        case .account: "person"
         case .privacy: "hand.raised"
         case .advanced: "slider.horizontal.3"
         }
@@ -81,6 +83,11 @@ struct TRSettingsView: View {
     @ObservedObject var controller: TRSettingsWindowController
     /// Screenshots put pages with made-up data here; the window shows the real pages.
     var samplePage: ((TRSettingsPage) -> AnyView?)? = nil
+    /// Screenshots: the membership the sidebar card, the dot and the page header go by.
+    var sampleFacts: TRAccountFacts? = nil
+    @ObservedObject private var member: MemberService = .shared
+
+    private var facts: TRAccountFacts { sampleFacts ?? .current(member) }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -88,17 +95,24 @@ struct TRSettingsView: View {
                 Text("TypeRight 设置").font(.system(size: 12)).foregroundStyle(TR.text2)
                     .padding(.top, 48).padding(.bottom, 10).padding(.leading, 6)
                 ForEach(TRSettingsPage.allCases, id: \.self) { p in
-                    TRSideItem(icon: p.icon, title: p.title, selected: controller.page == p) { controller.page = p }
+                    TRSideItem(icon: p.icon, title: p.title, dot: p == .account && facts.needsAttention, selected: controller.page == p) {
+                        controller.page = p
+                    }
                 }
                 Spacer()
+                TRPlanCard(info: facts.planCard) { controller.page = .account }
+                    .padding(.bottom, 12)
             }
             .padding(.horizontal, 10)
             .frame(width: 218)
             .background(TR.side)
             Rectangle().fill(TR.line).frame(width: 0.5)
             VStack(spacing: 0) {
-                HStack {
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
                     Text(controller.page.title).font(.system(size: 17, weight: .semibold)).foregroundStyle(TR.text)
+                    if let subtitle {
+                        subtitle.font(.system(size: 12)).foregroundStyle(TR.text2).lineLimit(1)
+                    }
                     Spacer()
                 }
                 .padding(.horizontal, Self.gutter).frame(height: 52)
@@ -119,12 +133,22 @@ struct TRSettingsView: View {
         .ignoresSafeArea()
     }
 
+    /// 现在：… beside 账号与会员, 自带 Key 时用哪一家 beside AI 服务商.
+    private var subtitle: Text? {
+        switch controller.page {
+        case .account: Text("现在：") + Text(facts.nowLine).foregroundColor(TR.text).fontWeight(.medium)
+        case .ai: Text("自带 Key 时用哪一家")
+        default: nil
+        }
+    }
+
     @ViewBuilder private var page: some View {
         switch controller.page {
         case .general: TRGeneralSettings()
         case .apps: TRAppSettings()
         case .keys: TRKeySettings()
         case .ai: TRAISettings()
+        case .account: TRAccountSettings()
         case .privacy: TRPrivacySettings()
         case .advanced: EmptyView()
         }
@@ -335,14 +359,21 @@ struct TRAISettings: View {
 
     /// The setup step says this in its own words above the list.
     private let showsIntro: Bool
+    /// Screenshots: the plan the callout goes by.
+    private let samplePlan: AIPlan?
+    @ObservedObject private var member: MemberService = .shared
 
-    init(initialTest: TestState = .idle, showsIntro: Bool = true) {
+    init(initialTest: TestState = .idle, showsIntro: Bool = true, samplePlan: AIPlan? = nil) {
         self.initialTest = initialTest
         self.showsIntro = showsIntro
+        self.samplePlan = samplePlan
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
+            if showsIntro, (samplePlan ?? member.plan) != .own {
+                TRProviderCallout(plan: samplePlan ?? member.plan) { member.choose($0) }
+            }
             if showsIntro {
                 Text("中文变英文、整句检查要用 AI；拼写在这台 Mac 上查，不用 AI。Key 存在钥匙串里，请求从你的 Mac 直接发给你选的那家。")
                     .font(.system(size: 12)).foregroundStyle(TR.text2).fixedSize(horizontal: false, vertical: true)
@@ -489,27 +520,21 @@ struct TRProviderList: View {
 // MARK: - 隐私
 
 struct TRPrivacySettings: View {
-    /// Matches UsagePing.Body field by field: id, version, platform, arch, plan, lang, product.
-    static let pingNote = "我们会给前 100 位用户免费额度，所以需要知道有多少人在用。只发这几样：一个这台 Mac 上随机生成的编号、版本号、系统（darwin）、芯片（arm64 或 x64）、用哪种用法（会员、自带 Key 或只用本机）、系统语言和产品名。不含你打的字、Key、名字或邮箱。"
-
-    @State private var report = CoachSettings.anonymousReport
     @State private var confirmClear = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
             TRGroup(title: "你打的字去了哪里") {
                 TRRow(title: "拼写和基础语法", note: "在这台 Mac 上查，不联网") { EmptyView() }
-                TRRow(title: "中文变英文、整句检查", note: "只把当前这一句发给你选的 AI，不发前后文、不发聊天记录") { EmptyView() }
+                TRRow(title: "中文变英文、整句检查",
+                      note: "只发正在打的这一句，不发前后文、不发聊天记录：自带 Key 时直接发给那一家；会员时经我们的服务器转给 DeepSeek，只记次数，不存内容") { EmptyView() }
                 TRRow(title: "密码框", note: "系统不让读，TypeRight 也不读") { EmptyView() }
                 TRRow(title: "错题本、生词本、Key", note: "只存在这台 Mac 上", last: true) { EmptyView() }
             }
-            TRGroup(title: "匿名报到") {
-                TRRow(title: "每天匿名报到一次",
-                      note: TRPrivacySettings.pingNote,
-                      last: true) {
-                    Toggle("", isOn: $report).toggleStyle(SquareToggleStyle()).labelsHidden()
-                        .onChange(of: report) { UsagePing.shared.answer($0) }
-                }
+            TRGroup(title: "会员服务器") {
+                TRRow(title: "开会员、用授权码、管理订阅时",
+                      note: "发这台 Mac 的一个匿名编号和授权码，用来记次数和到期日；不发名字和邮箱。只用本机检查和自带 Key 时一次都不连",
+                      last: true) { EmptyView() }
             }
             TRGroup(title: "数据") {
                 TRRow(title: "清空错题本和生词本", note: "删掉这台 Mac 上记下的全部改动和生词，删了找不回来", last: true) {

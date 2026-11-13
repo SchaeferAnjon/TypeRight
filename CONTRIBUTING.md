@@ -1,6 +1,6 @@
-# Contributing to TextWarden
+# Contributing to TypeRight
 
-TextWarden is a Swift and Rust macOS grammar checker. Contributions are welcome, especially focused fixes for Accessibility behavior, app compatibility, grammar quality, and tests.
+TypeRight is an English typing assistant for the Mac menu bar, written in Swift and Rust and based on [TextWarden](https://github.com/PhilipSchmid/textwarden). While you type, it shows a small card next to a misspelled word, a Chinese word, or a finished sentence; Tab takes the fix. Contributions are welcome, especially focused fixes for Accessibility behavior, app compatibility, card placement, and tests.
 
 ## Prerequisites
 
@@ -34,22 +34,23 @@ swiftlint --version
 ## Set Up the Project
 
 ```bash
-git clone https://github.com/PhilipSchmid/textwarden.git
-cd textwarden
+git clone https://github.com/SchaeferAnjon/TypeRight.git
+cd TypeRight
 make build
 make test
 open TextWarden.xcodeproj
 ```
 
-`make build` compiles the Rust grammar engine for Intel and Apple Silicon, creates a universal static library, and builds the Swift app. See [BUILD.md](BUILD.md) for individual targets and troubleshooting.
+`make build` compiles the Rust grammar engine for Intel and Apple Silicon, creates a universal static library, and builds the Swift app (the Xcode project and scheme keep TextWarden's names; the app is `TypeRight.app`). See [BUILD.md](BUILD.md) for individual targets and troubleshooting.
 
 Harper is pinned to a [small security patch on top of 3.0.0](https://github.com/PhilipSchmid/harper/commit/ae6acb45fd6cf10708728bb9e82289dea38154df). It upgrades `zip` to a patched 9.x version, validates archive header consistency, and uses the same Burn inference components directly to remove unused vulnerable backends. Grammar rules and model data are unchanged. Return to an official Harper release once it includes these fixes and no longer resolves `zip` below 9.0.5; rerun the grammar tests, archive security regression, and CPU gate before changing the pin.
 
 ## Repository Layout
 
 ```text
-textwarden/
+TypeRight/
 ├── Sources/                # Swift app
+│   ├── TypeRight/          # The cards, the coach, notebooks, membership and TypeRight's own windows
 │   ├── Accessibility/      # Focused-element monitoring and AX helpers
 │   ├── App/                # Coordination, Foundation Models, updates, lifecycle
 │   ├── AppConfiguration/   # Per-app strategies and behavior
@@ -69,16 +70,14 @@ Read [ARCHITECTURE.md](ARCHITECTURE.md) before changing module boundaries, depen
 
 ## Development Workflow
 
-Never commit directly to `main`.
-
-1. Create a branch from the current `main` using `<type>/<short-description>`, such as `fix/outlook-positioning` or `feat/app-support`.
-2. Make one focused change at a time.
+1. Make one focused change at a time (outside contributors: on a branch of your fork).
+2. Keep the commit history readable: one commit per finished change.
 3. Run `make run` after a code change so you test the installed app, not a stale build.
 4. Test the affected host apps manually when Accessibility behavior changes.
 5. Run `make ci-check` before committing. App/runtime and dependency changes also
    require the [local CPU gate](docs/CPU_PROFILING.md#local-regression-gate); use its
    full suite for analysis, AX, timers, overlays, and performance changes.
-6. Create a pull request targeting `main`.
+6. Outside contributors open a pull request targeting `main`; the maintainer commits directly.
 
 Useful commands:
 
@@ -96,7 +95,7 @@ counter captures, Instruments flame graphs, and repeatable Mail comparisons.
 
 ## Accessibility Permission
 
-TextWarden needs Accessibility permission to inspect and update text in other apps. Enable the exact build you are testing under **System Settings → Privacy & Security → Accessibility**. A build at a different path or with a different signature may need permission again.
+TypeRight needs Accessibility permission to inspect and update text in other apps. Enable the exact build you are testing under **System Settings → Privacy & Security → Accessibility**. A build at a different path or with a different signature may need permission again.
 
 ## Adding or Fixing App Support
 
@@ -106,11 +105,11 @@ Most app-specific behavior lives in three places:
 - `Sources/AppConfiguration/AppBehaviorRegistry.swift` registers isolated overlay, timing, scrolling, coordinate, and text-index behavior.
 - `Sources/ContentParsers/` handles editors whose exposed text needs app-specific parsing.
 
-Unknown apps are profiled through Accessibility probes and cached in `~/Library/Application Support/TextWarden/strategy-profiles.json`. Profiles expire after seven days. Add explicit support when automatic detection cannot capture an app's quirks or when it needs dedicated parsing, replacement, or positioning.
+Unknown apps are profiled through Accessibility probes and cached in `strategy-profiles.json` in TypeRight's Application Support folder. Profiles expire after seven days. Add explicit support when automatic detection cannot capture an app's quirks or when it needs dedicated parsing, replacement, or positioning.
 
 When adding an app:
 
-1. Find its bundle identifier in **Preferences → Applications**, with `osascript -e 'id of app "AppName"'`, or with `mdls -name kMDItemCFBundleIdentifier /Applications/AppName.app`.
+1. Find its bundle identifier in **设置 › 高级 › 全部 App**, with `osascript -e 'id of app "AppName"'`, or with `mdls -name kMDItemCFBundleIdentifier /Applications/AppName.app`.
 2. Inspect the editor with Xcode's Accessibility Inspector. Check `AXValue`, selection attributes, range bounds, text-marker support, focus behavior, and what changes while typing or scrolling.
 3. Add the narrowest configuration or behavior needed. Do not copy another app's quirks without confirming them.
 4. Register any new `AppBehavior` and `AppConfiguration` explicitly.
@@ -119,7 +118,7 @@ When adding an app:
 
 `AppRegistry` resolves application policy from the exact bundle IDs in [`ApplicationPolicy.defaults`](Sources/AppConfiguration/ApplicationPolicy.swift). Edit that single list to add a default exclusion. Terminal apps remain resumable; ignored utilities cannot be enabled by user overrides. Other unknown apps require safe-trial consent before TextWarden reads their text. `UserPreferences` stores the user's choices.
 
-Before excluding an app, check the [exclusion policy](docs/APPLICATION_EXCLUSIONS.md). Review writing features before excluding an entire app; use a default pause when users should retain the option to enable it. Users can suggest additions from **Preferences → Applications → More → Suggest Default Exclusion…** or the [exclusion report form](https://github.com/PhilipSchmid/textwarden/issues/new?template=application_exclusion.yml).
+Before excluding an app, check the [exclusion policy](docs/APPLICATION_EXCLUSIONS.md). Review writing features before excluding an entire app; use a default pause when users should retain the option to enable it. Users can suggest additions in [GitHub Issues](https://github.com/SchaeferAnjon/TypeRight/issues) with the app name and bundle identifier.
 
 ## Code Style
 
@@ -165,47 +164,38 @@ Use [Conventional Commits](https://www.conventionalcommits.org/) with one of the
 Write an imperative subject with no period:
 
 ```text
-fix: Correct underline positioning in Slack
+fix: Keep the card under the word in Slack
 ```
 
-Every commit must be cryptographically signed and include the Developer Certificate of Origin sign-off created by Git:
+Commits are not signed and carry no sign-off line:
 
 ```bash
-git commit -s -S -m "fix: Correct underline positioning in Slack"
+git commit -m "fix: Keep the card under the word in Slack"
 ```
 
-Do not type a `Signed-off-by`, `Co-Authored-By`, or other trailer manually.
-
 ## Pull Requests
+
+TypeRight has one maintainer, who commits directly. Pull requests from others are welcome:
 
 - Keep the pull request focused and describe the user-visible result.
 - Link the issue when one exists.
 - Include manual test context for app-specific behavior.
 - Make sure `make ci-check` passes.
-- Keep history linear; maintainers use rebase merge.
 
 ## Bug Reports and Feature Requests
 
-Use the [bug report template](https://github.com/PhilipSchmid/textwarden/issues/new/choose) for defects. Include the TextWarden version, macOS version, host app, exact steps, expected behavior, actual behavior, and a diagnostic export when appropriate.
+Report defects in [GitHub Issues](https://github.com/SchaeferAnjon/TypeRight/issues). Include the TypeRight version (设置 › 高级 › 关于), macOS version, host app, exact steps, expected behavior, actual behavior, and a diagnostic export when appropriate.
 
-Use [GitHub Discussions](https://github.com/PhilipSchmid/textwarden/discussions) for feature requests and questions.
+Use [GitHub Discussions](https://github.com/SchaeferAnjon/TypeRight/discussions) for feature requests and questions.
 
 ## Releases
 
-Releases are maintainer-only because production builds require Developer ID signing, notarization credentials, and the Sparkle signing key. Releases still go through a pull request.
+Releases are maintainer-only because they need the Developer ID certificate and the Sparkle signing key. They are made with `Scripts/release.sh` on the current branch, without a pull request. The first releases are not notarized; the release notes tell users how to open the app the first time.
 
 ```bash
-git switch -c release/vX.Y.Z main
-make release VERSION=X.Y.Z
-git push -u origin HEAD
-git push --tags
-gh pr create --title "Release vX.Y.Z" --body "Release vX.Y.Z"
-```
-
-After the release pull request is merged:
-
-```bash
-make release-upload VERSION=X.Y.Z
+Scripts/release.sh release X.Y.Z
+git push origin HEAD:main && git push origin vX.Y.Z
+Scripts/release.sh upload X.Y.Z
 ```
 
 Versions follow Semantic Versioning, including `alpha`, `beta`, and `rc` prerelease identifiers.

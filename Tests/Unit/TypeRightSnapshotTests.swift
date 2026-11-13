@@ -55,20 +55,22 @@ final class TypeRightSnapshotTests: XCTestCase {
     func testDrawScreens() throws {
         let notebook = try sampleNotebook()
         let main = TRMainWindowController.shared
+        let own = facts(.own, nil, registered: false)
         for page in TRPage.allCases {
             main.page = page
-            draw(TRMainView(controller: main, notebook: notebook), NSSize(width: 1180, height: 760), "main-\(page.rawValue)")
+            draw(TRMainView(controller: main, notebook: notebook, sampleFacts: own), NSSize(width: 1180, height: 760), "main-\(page.rawValue)")
         }
         let settings = TRSettingsWindowController.shared
-        let pages = try samplePages()
+        let pages = try samplePages(facts: own)
         // Tall enough for the whole page (通用 ends with 启动, AI 服务商 with the Key box).
         let heights: [TRSettingsPage: CGFloat] = [.general: 1000, .ai: 880]
         for page in TRSettingsPage.allCases where page != .advanced {
             settings.page = page
-            draw(TRSettingsView(controller: settings, samplePage: pages), NSSize(width: 940, height: heights[page] ?? 680), "settings-\(page.rawValue)")
+            draw(TRSettingsView(controller: settings, samplePage: pages, sampleFacts: own), NSSize(width: 940, height: heights[page] ?? 680),
+                 "settings-\(page.rawValue)")
         }
         for step in TROnboardingStep.allCases {
-            draw(TROnboardingView(start: step, accessGranted: false, translateKey: unsetName(), onFinish: {}),
+            draw(TROnboardingView(start: step, accessGranted: false, translateKey: unsetName(), sampleFacts: facts(.local, nil, registered: false), onFinish: {}),
                  NSSize(width: 980, height: 680), "onboarding-\(step.rawValue)-\(step.title)")
         }
         // Cards and the menu header are sized and placed by the app's own code, as on screen.
@@ -82,7 +84,7 @@ final class TypeRightSnapshotTests: XCTestCase {
         }
         drawTypingAlong()
         for dark in [false, true] {
-            let state = TRMenuState(app: nil, allPaused: false, ai: .ready(.deepseek), needsAccess: false)
+            let state = TRMenuState(app: nil, allPaused: false, ai: .of(own), needsAccess: false)
             let header = try XCTUnwrap(TypeRightMenu.shared.build(state: state, notebook: notebook).items.first?.view)
             let window = NSWindow(contentRect: header.frame, styleMask: [.borderless], backing: .buffered, defer: false)
             window.contentView = header
@@ -164,11 +166,12 @@ final class TypeRightSnapshotTests: XCTestCase {
         }
 
         settings.page = .privacy
-        draw(TRSettingsView(controller: settings), NSSize(width: 940, height: 680), "settings-privacy", appearances: [false])
+        draw(TRSettingsView(controller: settings, sampleFacts: facts(.own, nil, registered: false)), NSSize(width: 940, height: 680),
+             "settings-privacy", appearances: [false])
 
         let notebook = try sampleNotebook()
         let rejected = TRMenuState(app: .init(id: "com.apple.mail", name: "邮件", paused: false), allPaused: false,
-                                   ai: .keyRejected(.deepseek), needsAccess: false)
+                                   ai: .of(facts(.own, nil, registered: false, own: .rejected(.deepseek))), needsAccess: false)
         draw(MenuReplica(menu: TypeRightMenu.shared.build(state: rejected, notebook: notebook), notebook: notebook),
              nil, "menu-key-rejected", appearances: [false, true])
 
@@ -184,23 +187,195 @@ final class TypeRightSnapshotTests: XCTestCase {
 
     func testDrawGuideShots() throws {
         let settings = TRSettingsWindowController.shared
-        let pages = try samplePages(aiTest: .ok("I have a question."))
+        let own = facts(.own, nil, registered: false)
+        let pages = try samplePages(aiTest: .ok("I have a question."), facts: own)
 
         useKeys(deepseek: false)
-        drawGuide(TROnboardingView(start: .access, accessGranted: false, translateKey: unsetName(), onFinish: {}),
+        drawGuide(TROnboardingView(start: .access, accessGranted: false, translateKey: unsetName(), sampleFacts: facts(.local, nil, registered: false), onFinish: {}),
                   NSSize(width: 980, height: 680), "guide-access")
         useKeys(deepseek: true)
 
         let notebook = try sampleNotebook()
         let state = TRMenuState(app: .init(id: "com.apple.mail", name: "邮件", paused: false), allPaused: false,
-                                ai: .ready(.deepseek), needsAccess: false)
+                                ai: .of(own), needsAccess: false)
         drawGuide(MenuReplica(menu: TypeRightMenu.shared.build(state: state, notebook: notebook), notebook: notebook, highlight: "设置…"),
                   nil, "guide-menu")
 
         for (page, name, height) in [(TRSettingsPage.ai, "guide-ai-provider", 800.0), (.keys, "guide-shortcuts", 680), (.apps, "guide-apps", 680)] {
             settings.page = page
-            drawGuide(TRSettingsView(controller: settings, samplePage: pages), NSSize(width: 940, height: height), name)
+            drawGuide(TRSettingsView(controller: settings, samplePage: pages, sampleFacts: own), NSSize(width: 940, height: height), name)
         }
+    }
+
+    // MARK: Membership, the icon and the notice cards (design/membership/redesign, direction B; design/icon/redesign, B)
+
+    /// Every membership state on 账号与会员 with the sidebar's plan card, the price window, the AI
+    /// provider page's note, the setup step, the menu's AI line, the notice card and capsule, the
+    /// menu bar icon's looks and the About page with the app icon; light and dark.
+    func testDrawMembership() throws {
+        let settings = TRSettingsWindowController.shared
+        settings.page = .account
+        let states: [(String, TRAccountFacts)] = [
+            ("no-member", facts(.member, status("none"))),
+            ("month", facts(.member, status("month"))),
+            ("year", facts(.member, status("year"))),
+            ("pass", facts(.member, status("pass"))),
+            ("daily-limit", facts(.member, status("limit"))),
+            ("past-due", facts(.member, status("pastdue"))),
+            ("payment-failed", facts(.member, status("paymentFailed"))),
+            ("ended", facts(.member, status("ended"))),
+            ("offline", facts(.member, status("month"), offline: true)),
+            ("paying", facts(.member, status("none"), paying: true)),
+            ("own", facts(.own, status("month"))),
+            ("local", facts(.local, nil, registered: false)),
+        ]
+        for (name, sample) in states {
+            let pages = try samplePages(facts: sample)
+            draw(TRSettingsView(controller: settings, samplePage: pages, sampleFacts: sample), NSSize(width: 940, height: 680), "account-\(name)")
+        }
+        draw(TRAccountPage(facts: facts(.member, status("month")), justPaid: true, handler: .preview).padding(28).frame(width: 720).background(TR.bg),
+             nil, "account-just-paid")
+
+        for (name, sample) in [("no-member", facts(.member, status("none"))), ("month", facts(.member, status("month"))),
+                               ("pass", facts(.member, status("pass"))), ("paying", facts(.member, status("none"), paying: true)),
+                               ("offline", facts(.member, status("month"), offline: true))]
+        {
+            draw(TRPricingView(facts: sample, handler: .preview, onClose: {}), NSSize(width: 880, height: 1060), "pricing-\(name)")
+        }
+
+        settings.page = .ai
+        let member = facts(.member, status("none"))
+        draw(TRSettingsView(controller: settings, samplePage: try samplePages(facts: member), sampleFacts: member), NSSize(width: 940, height: 880),
+             "ai-provider-member")
+
+        for (name, sample) in [("local", facts(.local, nil, registered: false)), ("member", facts(.member, status("none"))),
+                               ("own", facts(.own, nil, registered: false))]
+        {
+            draw(TROnboardingView(start: .ai, accessGranted: true, translateKey: unsetName(), sampleFacts: sample, onFinish: {}),
+                 NSSize(width: 980, height: 680), "onboarding-ai-\(name)")
+        }
+        draw(TROnboardingView(start: .done, accessGranted: true, translateKey: unsetName(), sampleFacts: member, onFinish: {}),
+             NSSize(width: 980, height: 680), "onboarding-done")
+
+        let notebook = try sampleNotebook()
+        for (name, sample) in [("no-member", facts(.member, status("none"))), ("month", facts(.member, status("month"))),
+                               ("daily-limit", facts(.member, status("limit"))), ("offline", facts(.member, status("month"), offline: true)),
+                               ("paying", facts(.member, status("none"), paying: true)), ("local", facts(.local, nil, registered: false))]
+        {
+            let state = TRMenuState(app: .init(id: "com.apple.mail", name: "邮件", paused: false), allPaused: false, ai: .of(sample), needsAccess: false)
+            draw(MenuReplica(menu: TypeRightMenu.shared.build(state: state, notebook: notebook), notebook: notebook), nil, "menu-ai-\(name)")
+        }
+        draw(TRMainView(controller: TRMainWindowController.shared, notebook: notebook, sampleFacts: facts(.member, status("month"))),
+             NSSize(width: 1180, height: 760), "main-plan-card")
+
+        let word = try TypeRightCardSamples.word()
+        let notices: [(String, CoachCardContent)] = [
+            ("notice-no-member", .notice(.of(.noMember, word: "预约", facts: member))),
+            ("notice-daily-limit", .notice(.of(.dailyLimit, word: "预约", facts: facts(.member, status("limit"))))),
+            ("notice-offline", .notice(.of(.offline, word: "预约", facts: member))),
+            ("notice-ended", .notice(.of(.ended, word: "预约", facts: facts(.member, status("ended"))))),
+            ("pill-no-member", .pill(CoachNotice.of(.noMember, word: "会议室", facts: member).pill)),
+        ]
+        for (name, content) in notices {
+            for dark in [false, true] {
+                let window = CoachCardPanel().place(content, keys: .normal, anchor: word)
+                save(window, dark: dark, backdrop: NSColor(white: 0.5, alpha: 0.15), to: dir.appendingPathComponent("card-\(name)-\(dark ? "dark" : "light").png"))
+            }
+        }
+        draw(CoachCardView(content: .translate(source: "预约", result: CoachTranslation(english: "book", ipa: "/bʊk/", note: "")),
+                           tail: CoachTailPlacement(pointsUp: true, x: 20), follow: CoachFollow(target: "book", right: 2, inputMethodOn: true)),
+             nil, "follow-input-method-on")
+
+        draw(MenuBarIconSheet(), nil, "menubar-icons")
+        settings.page = .advanced
+        PreferencesWindowController.shared.selectTab(.about)
+        let preferences = try samplePreferences()
+        let vocabulary = try sampleVocabulary()
+        let sample = PreferencesView.Sample(
+            appBundleIDs: [],
+            health: RuntimeHealthSnapshot(state: .active, reason: nil, capabilities: [.textReading, .grammar, .safeReplacement],
+                                          applicationName: "邮件", bundleIdentifier: "com.apple.mail", lastSuccessfulCheck: Date(), action: nil),
+            fixAllName: unsetName(), rewriteName: unsetName()
+        )
+        draw(TRSettingsView(controller: settings, samplePage: { page in
+            page == .advanced ? AnyView(PreferencesView(preferences: preferences, vocabulary: vocabulary, sample: sample)) : nil
+        }, sampleFacts: own(member)), NSSize(width: 940, height: 800), "about")
+    }
+
+    private func own(_ facts: TRAccountFacts) -> TRAccountFacts {
+        var f = facts
+        f.plan = .own
+        return f
+    }
+
+    // MARK: Membership samples (11 November 2026, 15:42 in Berlin, as in the prototype)
+
+    private static let now = Date(timeIntervalSince1970: 1_794_408_120)
+
+    private func facts(_ plan: AIPlan, _ status: MemberStatus?, registered: Bool = true, offline: Bool = false, paying: Bool = false,
+                       own: TRAccountFacts.OwnKey = .ready(.deepseek)) -> TRAccountFacts
+    {
+        let state = MemberState.of(status, available: true, failed: offline && status == nil, registered: registered, now: Self.now)
+        var f = TRAccountFacts(plan: plan, state: state, status: status, offline: offline, checkedAt: Self.now.addingTimeInterval(-5 * 3600),
+                               paying: paying, own: own, now: Self.now)
+        f.timeZone = TimeZone(identifier: "Europe/Berlin") ?? .current
+        return f
+    }
+
+    /// The backend's status for each sample (amounts in fen, times in milliseconds).
+    private func status(_ kind: String) -> MemberStatus {
+        var s = MemberStatus()
+        s.prices = TRPrices.subscription
+        s.passPrices = TRPrices.pass
+        s.now = Self.now.timeIntervalSince1970 * 1000
+        let reset = 1_794_441_600.0 * 1000
+        func member(plan: String, amount: Int, periodEnd: Double, status: String = "active") {
+            s.plan = "member"
+            s.code = "TR-7KQ2-M9XD-4HPA"
+            s.autoRenew = true
+            s.subscription = .init(status: status, plan: plan, currency: "cny", amount: amount, periodEnd: periodEnd * 1000,
+                                   cancelAtPeriodEnd: false, accessUntil: (periodEnd + 86400) * 1000)
+            s.memberUntil = (periodEnd + 86400) * 1000
+            s.today = .init(limit: 500, used: 37, left: 463, resetAt: reset)
+        }
+        switch kind {
+        case "month": member(plan: "month", amount: 990, periodEnd: 1_796_947_200)
+        case "year": member(plan: "year", amount: 9900, periodEnd: 1_803_945_600)
+        case "limit":
+            member(plan: "month", amount: 990, periodEnd: 1_796_947_200)
+            s.today = .init(limit: 500, used: 500, left: 0, resetAt: reset)
+            s.canUse = false
+            s.reason = "daily-limit"
+            s.limitBy = "uses"
+            s.resetAt = reset
+        case "pastdue":
+            member(plan: "month", amount: 990, periodEnd: 1_794_408_120 - 3600, status: "past_due")
+            s.memberUntil = 1_794_960_000 * 1000
+        case "pass":
+            s.plan = "member"
+            s.code = "TR-7KQ2-M9XD-4HPA"
+            s.pass = .init(plan: "month", currency: "cny", amount: 990, status: "paid", startAt: (1_796_860_800 - 30 * 86400) * 1000,
+                           until: 1_796_860_800 * 1000)
+            s.memberUntil = 1_796_860_800 * 1000
+            s.today = .init(limit: 500, used: 37, left: 463, resetAt: reset)
+        case "ended":
+            s.plan = "none"
+            s.code = "TR-7KQ2-M9XD-4HPA"
+            s.canUse = false
+            s.reason = "sub-ended"
+            s.memberUntil = 1_794_182_400 * 1000
+        case "paymentFailed":
+            s.plan = "none"
+            s.code = "TR-7KQ2-M9XD-4HPA"
+            s.canUse = false
+            s.reason = "payment-failed"
+            s.memberUntil = 1_794_182_400 * 1000
+        default:
+            s.plan = "none"
+            s.canUse = false
+            s.reason = "trial-closed"
+        }
+        return s
     }
 
     // MARK: Sample data
@@ -244,8 +419,8 @@ final class TypeRightSnapshotTests: XCTestCase {
         return vocabulary
     }
 
-    /// Settings pages that would otherwise show this Mac's apps or shortcuts.
-    private func samplePages(aiTest: TRAISettings.TestState = .idle) throws -> (TRSettingsPage) -> AnyView? {
+    /// Settings pages that would otherwise show this Mac's apps, shortcuts or membership.
+    private func samplePages(aiTest: TRAISettings.TestState = .idle, facts: TRAccountFacts) throws -> (TRSettingsPage) -> AnyView? {
         let preferences = try samplePreferences()
         let apps: [TRAppSettings.App] = [
             ("com.apple.mail", "邮件", "/System/Applications/Mail.app"),
@@ -260,7 +435,8 @@ final class TypeRightSnapshotTests: XCTestCase {
             switch page {
             case .apps: AnyView(TRAppSettings(preferences: preferences, sampleApps: apps))
             case .keys: AnyView(TRKeySettings(translate: translate, pause: pause))
-            case .ai: AnyView(TRAISettings(initialTest: aiTest))
+            case .ai: AnyView(TRAISettings(initialTest: aiTest, samplePlan: facts.plan))
+            case .account: AnyView(TRAccountPage(facts: facts, handler: .preview))
             default: nil
             }
         }
@@ -473,5 +649,34 @@ private struct MenuBarReplica: View {
             }
         }
         .background(Color(nsColor: .underPageBackgroundColor))
+    }
+}
+
+// MARK: - The menu bar icon
+
+/// Every look of the menu bar icon, at its size and 4×, on the menu bar of the drawing's appearance.
+private struct MenuBarIconSheet: View {
+    @Environment(\.colorScheme) private var scheme
+    private let looks: [(String, MenuBarIcon.Look, Bool)] = [
+        ("平时", .normal, false), ("要看一下", .normal, true), ("暂停", .paused, false),
+        ("暂停且要看", .paused, true), ("出错", .error, false),
+    ]
+
+    var body: some View {
+        let dark = scheme == .dark
+        HStack(spacing: 28) {
+            ForEach(looks.indices, id: \.self) { i in
+                VStack(spacing: 8) {
+                    HStack(spacing: 14) {
+                        Image(nsImage: MenuBarIcon.image(looks[i].1, attention: looks[i].2))
+                        Image(nsImage: MenuBarIcon.image(looks[i].1, attention: looks[i].2)).resizable().frame(width: 72, height: 72)
+                    }
+                    .foregroundStyle(dark ? Color.white : Color.black)
+                    Text(looks[i].0).font(.system(size: 11)).foregroundStyle(dark ? Color.white.opacity(0.7) : Color.black.opacity(0.6))
+                }
+            }
+        }
+        .padding(20)
+        .background(dark ? Color(white: 0.16) : Color(white: 0.93))
     }
 }

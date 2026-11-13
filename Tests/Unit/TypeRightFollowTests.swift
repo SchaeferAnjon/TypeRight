@@ -328,6 +328,28 @@ final class TypeRightFollowTests: TypeRightCoachTestCase {
         XCTAssertEqual(follow?.right, 1)
     }
 
+    /// Chrome and other apps that do not report composing, with a Chinese input method on: the
+    /// letters count (it may be in its English mode), the card reminds that pinyin only counts once
+    /// committed, and Tab and Esc stay the card's.
+    func testInputMethodOnInAnAppThatDoesNotSayKeepsTheKeys() async {
+        await showTranslation()
+        await pressTab()
+        host.reportsMarkedText = false
+        host.lettersCompose = true
+        coach.letterKeyPressed()
+        typeAlong("a")
+        XCTAssertEqual(follow?.composing, false)
+        XCTAssertEqual(follow?.inputMethodOn, true)
+        XCTAssertEqual(follow?.right, 1, "the letter counts")
+        coach.wordEndKeyPressed()
+        typeAlong(" ")
+        XCTAssertEqual(follow?.inputMethodOn, false, "a space typed by a key ends the syllables")
+        coach.letterKeyPressed()
+        typeAlong("m")
+        XCTAssertEqual(follow?.inputMethodOn, true)
+        XCTAssertTrue(keys.press(.tab), "Tab still fills in")
+    }
+
     /// Copying the card is not remembering the word: it gets the 自己打的 tag, not a use without help.
     func testTypingAlongIsNotAUseWithoutHelp() async {
         ai.translation = .success(CoachTranslation(english: "book", ipa: "", note: ""))

@@ -2,8 +2,10 @@
 //  TROnboarding.swift
 //  TypeRight
 //
-//  First run in five side-bar steps: 欢迎、辅助功能、选一个 AI、整句翻译键、好了.
-//  Accessibility is granted by dragging the app icon into System Settings' list.
+//  First run in five side-bar steps: 欢迎、辅助功能、怎么用 AI、整句翻译键、好了.
+//  Accessibility is granted by dragging the app icon into System Settings' list. Step 3 picks how
+//  the AI cards work (membership, own key, or on-device only); nothing is asked of our backend
+//  there, and not picking means on-device only.
 //
 
 import AppKit
@@ -17,7 +19,7 @@ enum TROnboardingStep: Int, CaseIterable {
         switch self {
         case .welcome: "欢迎"
         case .access: "辅助功能"
-        case .ai: "选一个 AI"
+        case .ai: "怎么用 AI"
         case .key: "整句翻译键"
         case .done: "好了"
         }
@@ -27,7 +29,7 @@ enum TROnboardingStep: Int, CaseIterable {
         switch self {
         case .welcome: "看它做什么"
         case .access: "把图标拖进列表"
-        case .ai: "填 Key"
+        case .ai: "三种选一种"
         case .key: "自己选一个"
         case .done: "去打一句试试"
         }
@@ -39,10 +41,15 @@ struct TROnboardingView: View {
     /// Screenshots fix these instead of reading this Mac's permission and shortcut.
     var accessGranted: Bool?
     var translateKey: KeyboardShortcuts.Name = .typeRightTranslate
+    /// Screenshots: the membership step 3 goes by.
+    var sampleFacts: TRAccountFacts?
     let onFinish: () -> Void
 
     @State private var step: TROnboardingStep = .welcome
     @ObservedObject private var permission = PermissionManager.shared
+    @ObservedObject private var member = MemberService.shared
+
+    private var facts: TRAccountFacts { sampleFacts ?? .current(member) }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -122,7 +129,7 @@ struct TROnboardingView: View {
     private func isDone(_ s: TROnboardingStep) -> Bool {
         switch s {
         case .access: isAccessGranted
-        case .ai: CoachSettings.isAIReady
+        case .ai: member.planChosen || CoachSettings.isAIReady
         case .key: KeyboardShortcuts.getShortcut(for: translateKey) != nil
         default: s.rawValue < step.rawValue
         }
@@ -223,11 +230,73 @@ struct TROnboardingView: View {
     }
 
     private var ai: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            heading("选一个 AI",
-                    "中文变英文、整句检查要用 AI。自带 Key 永久免费，请求从你的 Mac 直接发给你选的那家。不填也能用：拼写照样查。")
-            TRAISettings(showsIntro: false)
+        VStack(alignment: .leading, spacing: 16) {
+            heading("中文变英文、整句讲解要用 AI",
+                    "拼写和基础语法在这台 Mac 上查，不花钱，也不算次数。中文变英文和整句讲解要用 AI：选一种，以后在 设置 › 账号与会员 里随时换；不选就先只在本机查。")
+            memberChoice.padding(.top, 6)
+            VStack(spacing: 0) {
+                choiceRow(.own, "我有自己的 AI Key", "永久免费、不限次数，\(CoachProvider.allCases.count) 家可选", opens: true)
+                if facts.plan == .own {
+                    TRAISettings(showsIntro: false).padding(.horizontal, 12).padding(.bottom, 12)
+                }
+                Rectangle().fill(TR.line).frame(height: 0.5)
+                choiceRow(.local, "先不用 AI，只在本机查", "打中文时不弹，拼写和基础语法照样查", opens: false)
+            }
+            .background(TR.card, in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(TR.line, lineWidth: 0.5))
         }
+    }
+
+    /// The membership as the big card: picking it chooses the plan; 看看会员… opens the price window.
+    private var memberChoice: some View {
+        let picked = facts.plan == .member
+        return HStack(spacing: 16) {
+            Image(systemName: "sparkles").font(.system(size: 17)).foregroundStyle(TR.fix)
+                .frame(width: 40, height: 40).background(TR.fixSoft, in: RoundedRectangle(cornerRadius: 10))
+            VStack(alignment: .leading, spacing: 2) {
+                Text("会员：¥9.9 / 月起").font(.system(size: 15, weight: .semibold)).foregroundStyle(TR.text)
+                Text("不用申请 Key，每天 500 次，一次 = 一个用到 AI 的弹框；在浏览器里付款，付完自动生效")
+                    .font(.system(size: 12)).foregroundStyle(TR.text2).fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 12)
+            if picked {
+                TRStatusDot(color: facts.isMember ? TR.ok : TR.text3, text: facts.isMember ? "已是会员" : "还没开")
+            }
+            Button("看看会员…") {
+                member.choose(.member)
+                TRPricingWindowController.shared.show()
+            }
+            .buttonStyle(TRPlainButtonStyle())
+        }
+        .padding(.horizontal, 20).padding(.vertical, 18)
+        .background(TR.card, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(picked ? TR.text : TR.line, lineWidth: picked ? 1.5 : 0.5))
+        .contentShape(Rectangle())
+        .onTapGesture { member.choose(.member) }
+    }
+
+    private func choiceRow(_ plan: AIPlan, _ title: String, _ note: String, opens: Bool) -> some View {
+        let on = facts.plan == plan
+        return Button { member.choose(plan) } label: {
+            HStack(spacing: 10) {
+                ZStack {
+                    Circle().strokeBorder(on ? TR.text : TR.line2, lineWidth: 1).frame(width: 16, height: 16)
+                    if on { Circle().fill(TR.text).frame(width: 16, height: 16).overlay(Circle().fill(TR.card).frame(width: 7, height: 7)) }
+                }
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title).font(.system(size: 13)).foregroundStyle(TR.text)
+                    Text(note).font(.system(size: 12)).foregroundStyle(TR.text2)
+                }
+                Spacer()
+                if opens {
+                    Image(systemName: "chevron.right").font(.system(size: 11, weight: .medium)).foregroundStyle(TR.text3)
+                        .rotationEffect(.degrees(on ? 90 : 0))
+                }
+            }
+            .padding(.horizontal, 14).padding(.vertical, 11)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private var key: some View {
@@ -245,7 +314,7 @@ struct TROnboardingView: View {
     private var done: some View {
         VStack(alignment: .leading, spacing: 22) {
             heading("好了，去打一句试试",
-                    "打开微信、邮件或者备忘录，照常打英文。拼错一个词、打一个中文词、打完一句，都会弹出来。TypeRight 平时只在菜单栏里，点羽毛图标能打开错题本和设置。")
+                    "打开微信、邮件或者备忘录，照常打英文。拼错一个词、打一个中文词、打完一句，都会弹出来。TypeRight 平时只在菜单栏里，点右上角那个勾形图标（长的一笔是一支羽毛）能打开错题本和设置。")
             VStack(alignment: .leading, spacing: 8) {
                 Text("可以先打这句，标出来的三处都会弹：").font(.system(size: 12)).foregroundStyle(TR.text2)
                 Text(TRMarked.text([("I want to ", false), ("预约", true), (" a meeting room ", false), ("tomorow", true),
@@ -296,9 +365,17 @@ struct TROnboardingView: View {
         switch step {
         case .welcome: "接下来 3 步，大约 2 分钟"
         case .access: isAccessGranted ? "这一步好了" : "没给权限也能先往下走，弹框要等开好才出来"
-        case .ai: CoachSettings.isAIReady ? "AI 连上了" : "不填也行，只查拼写"
+        case .ai: aiNote
         case .key: "不设也行"
         case .done: ""
+        }
+    }
+
+    private var aiNote: String {
+        switch facts.plan {
+        case .member: facts.isMember ? "已是会员" : "开会员在浏览器里付款，付完自动生效；以后在 设置 › 账号与会员 里换"
+        case .own: CoachSettings.isAIReady ? "用你自己的 Key" : "填好 Key 才有中文变英文和整句讲解"
+        case .local: "先只用本机检查，以后在 设置 › 账号与会员 里换"
         }
     }
 

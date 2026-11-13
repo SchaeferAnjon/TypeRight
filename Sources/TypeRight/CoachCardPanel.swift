@@ -21,6 +21,8 @@ import SwiftUI
 protocol CoachCardDisplay: AnyObject {
     /// Called when the user clicks anywhere outside the card.
     var onClickOutside: (() -> Void)? { get set }
+    /// Called when the user clicks a button on a notice card.
+    var onNoticeAction: ((CoachNotice.Action) -> Void)? { get set }
     /// - Parameter anchor: the word's bounds in Cocoa screen coordinates (origin bottom left).
     /// - Returns: true when the card is really on screen at its size. On false nothing is shown,
     ///   and the coach must not take Tab or Esc for a card nobody can see.
@@ -69,6 +71,7 @@ final class CoachCardPanel: CoachCardDisplay {
     private var listShown = false
 
     var onClickOutside: (() -> Void)?
+    var onNoticeAction: ((CoachNotice.Action) -> Void)?
 
     var isVisible: Bool { panel?.isVisible ?? false }
 
@@ -221,7 +224,8 @@ final class CoachCardPanel: CoachCardDisplay {
         CoachCardView(content: content, tail: CoachTailPlacement(pointsUp: pointsUp, x: tailX), keys: keys,
                       follow: followState, hot: hot?.id, minWidth: minWidth,
                       onSpeak: { CoachSpeaker.speak($0) },
-                      onWords: { [weak self] in self?.spots = $0 })
+                      onWords: { [weak self] in self?.spots = $0 },
+                      onNotice: { [weak self] in self?.onNoticeAction?($0) })
     }
 
     // MARK: Words under the mouse

@@ -25,6 +25,10 @@
 //  replace), Esc or Backspace at the start puts the original back, return, an arrow, a click or
 //  another field ends it and keeps what was typed. Set to 直接换, Tab writes the fix at once.
 //
+//  On the member plan without a usable membership (none, ended, renewal not charged, today's 500
+//  used, no network twice in a row) a Chinese word gets a notice card the first time and a small
+//  capsule after that (CoachNotice); spelling and sentence checks go on as before.
+//
 //  What was offered is remembered per field (app and text field), by text and position: a piece
 //  offered (taken, turned down, clicked away, failed, or typed past after a stop) is not offered or
 //  sent to the AI again until the text at that spot changes. Only what the user typed or edited
@@ -57,8 +61,12 @@ protocol TypingCoachHost: AnyObject {
     var coachFieldID: String? { get }
     /// A field is monitored in an app that is not paused.
     var coachIsWatching: Bool { get }
-    /// An input method is composing in the field (marked text not yet committed).
-    var coachIsComposing: Bool { get }
+    /// Whether an input method is composing in the field (marked text not yet committed), as the
+    /// app says; nil when the app does not say (Chrome and other Chromium-based apps).
+    var coachMarkedText: Bool? { get }
+    /// The current input source turns typed Latin letters into Chinese or Japanese (Pinyin and the
+    /// like, not their Roman mode): letters in the field may be its uncommitted syllables.
+    var coachInputMethodComposesLetters: Bool { get }
     /// Reading the field right after a key does not slow this app down.
     var coachReadsOnKeys: Bool { get }
     /// The caret can be put somewhere in the field (a sentence card is typed along only then).
@@ -94,6 +102,10 @@ struct CoachAIService {
                               _ partial: @escaping CoachAI.Partial<CoachTranslation>) async throws -> CoachTranslation
     var check: @Sendable (_ sentence: String, _ mayBeUnfinished: Bool, _ route: CoachAIRoute,
                           _ partial: @escaping CoachAI.Partial<CoachSentenceCheck>) async throws -> CoachSentenceCheck
+    /// The membership in the words the notice cards use (nil: no dates, in tests).
+    var facts: @MainActor () -> TRAccountFacts? = { nil }
+    /// A notice card's button was clicked.
+    var act: @MainActor (CoachNotice.Action) -> Void = { _ in }
 
     static let live = CoachAIService(
         status: { MemberService.shared.aiStatus },
@@ -106,7 +118,15 @@ struct CoachAIService {
             }
         },
         translate: { try await CoachAI.translate(fragment: $0, in: $1, via: $2, partial: $3) },
-        check: { try await CoachAI.check(sentence: $0, mayBeUnfinished: $1, via: $2, partial: $3) }
+        check: { try await CoachAI.check(sentence: $0, mayBeUnfinished: $1, via: $2, partial: $3) },
+        facts: { .current() },
+        act: { action in
+            switch action {
+            case .pricing: TRPricingWindowController.shared.show()
+            case .ownKey: TRSettingsWindowController.shared.show(.ai)
+            case .account: TRSettingsWindowController.shared.show(.account)
+            }
+        }
     )
 }
 
@@ -170,13 +190,18 @@ final class TypingCoach {
                                 copy: { text in
                                     NSPasteboard.general.clearContents()
                                     NSPasteboard.general.setString(text, forType: .string)
-                                })
+                                },
+                                notices: .defaults(CoachSettings.defaults))
         coach.startLive()
         return coach
     }()
 
     /// A failed card stays this long.
     static let failureSeconds: TimeInterval = 4
+    /// The «没翻：…» capsule goes by itself after this long.
+    static let pillSeconds: TimeInterval = 2.6
+    /// This many AI requests in a row without network before the notice says so (a blip is not news).
+    static let offlineTries = 2
     /// A card without keys (no tap, Secure Event Input) stays this long.
     static let readOnlySeconds: TimeInterval = 5
     /// A card that came up while the user was typing, or after a wait for the AI, ignores Tab this long.
@@ -211,6 +236,10 @@ final class TypingCoach {
     private let clock: CoachClock
     private let behavior: () -> CoachBehavior
     private let copy: (String) -> Void
+    private let notices: CoachNoticeLedger
+    /// AI requests in a row that found no network, and whether that stretch was told.
+    private var offlineFailures = 0
+    private var offlineTold = false
 
     private struct Card {
         let id = UUID()
@@ -237,6 +266,24 @@ final class TypingCoach {
         var unfinished = false
 
         var isThinking: Bool { content == .thinking }
+
+        /// "想一下" or «没翻：…»: a capsule, not a card; a real card takes its place.
+        var isCapsule: Bool {
+            switch content {
+            case .thinking, .pill: true
+            default: false
+            }
+        }
+
+        var isPill: Bool {
+            if case .pill = content { return true }
+            return false
+        }
+
+        var isNotice: Bool {
+            if case .notice = content { return true }
+            return false
+        }
 
         var isFailure: Bool {
             if case .failed = content { return true }
@@ -371,7 +418,7 @@ final class TypingCoach {
         var before: [Unicode.Scalar] = []
         var after: [Unicode.Scalar] = []
         var typed: [Unicode.Scalar] = []
-        var composing = false
+        var composing = CoachComposing.no
         /// The stretch TypeRight works in lies between `head` scalars at the start of the field and
         /// `tail` at its end: Esc writes `original` over it, Tab writes `filled` over it.
         var head: Int
@@ -407,6 +454,9 @@ final class TypingCoach {
 
     private var follow: Follow?
     private var heldTimer: CoachTimer?
+    /// When the user last pressed a Latin letter key, and a key that ends a word (space, punctuation).
+    private var lastLetterKeyAt: TimeInterval = -.infinity
+    private var lastWordEndKeyAt: TimeInterval = -.infinity
     private var allWordsShown = false
 
     private var active: Card?
@@ -443,7 +493,8 @@ final class TypingCoach {
     var runningAI: [Task<Void, Never>] { jobs.compactMap(\.task) }
 
     init(ai: CoachAIService, notebook: CoachNotebook, display: CoachCardDisplay, keys: CoachKeyInput,
-         clock: CoachClock, behavior: @escaping () -> CoachBehavior, copy: @escaping (String) -> Void)
+         clock: CoachClock, behavior: @escaping () -> CoachBehavior, copy: @escaping (String) -> Void,
+         notices: CoachNoticeLedger = .memory())
     {
         self.ai = ai
         self.notebook = notebook
@@ -452,8 +503,10 @@ final class TypingCoach {
         self.clock = clock
         self.behavior = behavior
         self.copy = copy
+        self.notices = notices
         keys.onKey = { [weak self] key, swallowed in self?.keyArrived(key, swallowed: swallowed) }
         display.onClickOutside = { [weak self] in self?.clickedOutside() }
+        display.onNoticeAction = { [weak self] in self?.noticeActed($0) }
     }
 
     private func startLive() {
@@ -463,15 +516,21 @@ final class TypingCoach {
         PinyinDetector.warmUp()
         CoachDictionary.shared.warmUp()
         MemberService.shared.start()
-        UsagePing.shared.start()
+        Logger.info("TypeRight: AI at launch: \(MemberService.shared.aiStatus) (plan \(MemberService.shared.plan.rawValue)\(MemberService.shared.planChosen ? "" : ", not chosen"))",
+                    category: Logger.llm)
         KeyboardShortcuts.onKeyUp(for: .typeRightTranslate) { [weak self] in self?.translateWholeSentence() }
         // Only whether a key ends a word is looked at; no key is kept. Secure Event Input (password
         // fields) sends nothing here.
+        // Only whether a key is a letter is kept besides (no key itself): with Chinese input methods
+        // in apps that do not report composing, letters typed since the last word end may be syllables.
         keyWatch = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            let ends = event.modifierFlags.intersection([.command, .control, .option]).isEmpty
-                && (event.characters?.unicodeScalars.first.map { CoachText.wordEnds.contains($0) } ?? false)
-            guard ends else { return }
-            MainActor.assumeIsolated { self?.wordEndKeyPressed() }
+            guard event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
+                  let first = event.characters?.unicodeScalars.first else { return }
+            if CoachText.wordEnds.contains(first) {
+                MainActor.assumeIsolated { self?.wordEndKeyPressed() }
+            } else if CoachText.isLatinLetter(first) {
+                MainActor.assumeIsolated { self?.letterKeyPressed() }
+            }
         }
     }
 
@@ -532,11 +591,20 @@ final class TypingCoach {
             followTextChanged(text)
             return
         }
-        if host.coachIsComposing {
+        switch composing {
+        case .yes:
             // An input method is composing: nothing pops up and no key is taken until it commits.
-            if let card = active, !card.isThinking { close(.typedOn) }
+            if let card = active, !card.isCapsule { close(.typedOn) }
             scheduleTimers(behavior)
             return
+        case .maybe:
+            // Letters that may be an input method's syllables: none of them is looked at until a
+            // word end is typed or they turn into Chinese. A card up stays until typed past.
+            if let card = active { recheck(card) }
+            scheduleTimers(behavior)
+            return
+        case .no:
+            break
         }
         if let card = active { recheck(card) }
         let scalars = Array(text.unicodeScalars)
@@ -568,8 +636,24 @@ final class TypingCoach {
     /// A space or punctuation key went down somewhere: read the field shortly, in case the app is
     /// late to say (or never says) its text changed.
     func wordEndKeyPressed() {
+        lastWordEndKeyAt = clock.now
         guard behavior().cardsEnabled, let host, host.coachIsWatching else { return }
         readSoon()
+    }
+
+    /// A Latin letter key went down somewhere.
+    func letterKeyPressed() {
+        lastLetterKeyAt = clock.now
+    }
+
+    /// Whether an input method is composing now: what the app says, or when it does not say, a
+    /// guess from the input source and the keys (CoachComposition).
+    private var composing: CoachComposing {
+        guard let host else { return .no }
+        let scalars = Array(latestText.unicodeScalars)
+        return CoachComposition.state(marked: host.coachMarkedText, lettersCompose: host.coachInputMethodComposesLetters,
+                                      lettersSinceWordEnd: lastLetterKeyAt > lastWordEndKeyAt && clock.now - lastLetterKeyAt < CoachComposition.recent,
+                                      scalars: scalars, caret: min(host.coachCaret(in: latestText) ?? scalars.count, scalars.count))
     }
 
     /// Reads the field shortly after a key (an app may be late to say its text changed).
@@ -671,7 +755,7 @@ final class TypingCoach {
     /// Whether the card on screen still fits what is typed now.
     private func recheck(_ card: Card) {
         let typed = CoachText.edit(from: card.analyzedText, to: latestText)?.size ?? 0
-        if card.isThinking {
+        if card.isCapsule {
             if typed >= Self.typedAway {
                 // The request goes on; its answer waits for the user to stop.
                 if let job = card.job, let index = jobs.firstIndex(where: { $0.id == job }) { jobs[index].capsuleTypedAway = true }
@@ -731,10 +815,14 @@ final class TypingCoach {
               !ChineseText.hanRuns(in: scalars, from: range.lowerBound, to: range.upperBound).isEmpty else { return }
         let status = ai.status()
         guard status.isOn else {
-            // Trial used up, today's limit and the like: no card until the account page is designed.
-            if case let .memberBlocked(state) = status {
-                Logger.info("TypeRight: translate shortcut without AI, member \(state)", category: Logger.llm)
-                ai.blocked()
+            if case .memberBlocked = status {
+                Logger.info("TypeRight: translate shortcut without AI (\(status))", category: Logger.llm)
+                let sentence = CoachText.substring(scalars, range)
+                withoutAI(CoachMark(text: sentence, range: range), status: status, explicit: true)
+                return
+            }
+            if status == .localOnly {
+                showFailed("整句翻译要用 AI：现在只用本机检查。在设置 › 账号与会员里开会员，或改用自带 Key。", at: range)
                 return
             }
             showFailed("整句翻译要用 AI：先在设置 › AI 服务商里选一家、填 Key。", at: range)
@@ -769,7 +857,7 @@ final class TypingCoach {
         }
         guard let last = found.last else { return }
         skipped += found.dropLast().map { Skipped(mark: $0.mark, fixes: $0.fixes) }
-        guard active?.isThinking ?? true else {
+        guard active?.isCapsule ?? true else {
             skipped.append(Skipped(mark: last.mark, fixes: last.fixes))
             return
         }
@@ -787,7 +875,8 @@ final class TypingCoach {
     /// What this edit ended: a sentence (its . ? ! or the character right after it was typed) or a
     /// Chinese run (something was typed right after it). Those go to the AI now.
     private func aiTriggers(after edit: CoachText.Edit, in scalars: [Unicode.Scalar], behavior: CoachBehavior) {
-        guard ai.status().isOn, follow == nil else { return }
+        let status = ai.status()
+        guard follow == nil else { return }
         let typedEnd = edit.start + edit.inserted
         let sentences = CoachText.sentences(in: scalars)
         if behavior.autoTranslateMixed, edit.inserted > 0 {
@@ -795,10 +884,16 @@ final class TypingCoach {
                 for run in ChineseText.hanRuns(in: scalars, from: sentence.range.lowerBound, to: sentence.range.upperBound)
                     where run.upperBound < scalars.count && run.upperBound >= edit.start && run.upperBound < typedEnd
                 {
-                    translate(CoachMark(text: CoachText.substring(scalars, run), range: run), sentence: CoachText.substring(scalars, sentence.range))
+                    let mark = CoachMark(text: CoachText.substring(scalars, run), range: run)
+                    if status.isOn {
+                        translate(mark, sentence: CoachText.substring(scalars, sentence.range))
+                    } else {
+                        withoutAI(mark, status: status)
+                    }
                 }
             }
         }
+        guard status.isOn else { return }
         for sentence in sentences where sentence.finished {
             let tail = Self.terminatorStart(of: sentence.range, in: scalars)
             guard edit.start <= sentence.range.upperBound, typedEnd >= tail else { continue }
@@ -821,7 +916,7 @@ final class TypingCoach {
 
     /// The user stopped for a moment: a period at the end ends its sentence; "想一下" may show.
     private func userStoppedBriefly() {
-        guard let host, !host.coachIsComposing, follow == nil else { return }
+        guard host != nil, composing == .no, follow == nil else { return }
         let scalars = Array(latestText.unicodeScalars)
         let finished = Set(CoachText.sentences(in: scalars).filter(\.finished).map(\.range))
         let confirmed = unconfirmed.filter { finished.contains($0) }
@@ -837,7 +932,7 @@ final class TypingCoach {
     /// After a pause: Chinese at the end, pinyin, and every finished sentence typed or edited here
     /// that was not checked yet; the sentence at the caret without . ? ! after a longer one.
     private func userPaused() {
-        guard let host, !host.coachIsComposing, follow == nil else { return }
+        guard let host, composing == .no, follow == nil else { return }
         let status = ai.status()
         let text = latestText
         let scalars = Array(text.unicodeScalars)
@@ -847,9 +942,14 @@ final class TypingCoach {
         Logger.info("TypeRight: pause check (AI \(status), pinyin waiting \(waitingPinyin != nil), \(jobs.count) requests, \(pending.count) waiting)", category: Logger.ui)
 
         guard status.isOn else {
-            // With the trial used up, today's limit reached and the like, this line is all there is
-            // for now: no AI card until the account page is designed.
-            if case .memberBlocked = status { ai.blocked() }
+            // No membership, today's limit and the like: the Chinese gets a notice or a capsule.
+            if case .memberBlocked = status, behavior().autoTranslateMixed {
+                for sentence in sentences where memory.isTouched(sentence.range) && CoachText.shouldAutoTranslate(scalars, in: sentence.range) {
+                    for run in ChineseText.hanRuns(in: scalars, from: sentence.range.lowerBound, to: sentence.range.upperBound) {
+                        withoutAI(CoachMark(text: CoachText.substring(scalars, run), range: run), status: status)
+                    }
+                }
+            }
             countWithoutAI(sentences, scalars: scalars)
             showNext()
             return
@@ -883,7 +983,7 @@ final class TypingCoach {
 
     private func userLingered() {
         // A card is up: the sentence waits until the user is done with it and stops again.
-        guard let host, ai.status().isOn, active?.isThinking ?? true, follow == nil else { return }
+        guard let host, ai.status().isOn, active?.isCapsule ?? true, follow == nil else { return }
         let scalars = Array(latestText.unicodeScalars)
         let caret = min(host.coachCaret(in: latestText) ?? scalars.count, scalars.count)
         // Only when the caret sits at the end of what was typed.
@@ -1006,6 +1106,9 @@ final class TypingCoach {
     /// is (on screen, or waiting its turn).
     private func answer(_ id: UUID, _ content: CoachCardContent, final: Bool) {
         guard let index = jobs.firstIndex(where: { $0.id == id }) else { return }
+        // An answer came: the network is back, and the next stretch without it is told again.
+        offlineFailures = 0
+        offlineTold = false
         let job = jobs[index]
         let clean: Bool
         if case let .sentence(_, check) = content {
@@ -1045,12 +1148,18 @@ final class TypingCoach {
     }
 
     private func requestFailed(_ id: UUID, _ error: Error) {
-        let range = jobFor(id)?.range
+        let job = jobFor(id)
+        let range = job?.range
         finish(id)
         if case let CoachAIError.member(memberError) = error {
-            // Through our backend the trial or membership could not be used (used up, today's limit,
-            // offline, device token …). For now that is one info line and no card; the account page is being designed.
+            // Through our backend the membership could not be used (none, ended, today's limit,
+            // offline, device token …): a Chinese word gets the notice once, then the capsule.
             Logger.info("TypeRight: member AI gave no card: \(memberError.kind) (\(memberError.code), HTTP \(memberError.status))", category: Logger.llm)
+            if memberError.kind == .offline { offlineFailures += 1 }
+            guard let job, case .translate = job.kind, let issue = CoachNotice.issue(for: memberError),
+                  latestTextStill(has: job.piece, at: job.range) else { return }
+            if issue == .offline, offlineFailures < Self.offlineTries { return }
+            tell(issue, about: CoachMark(text: job.piece, range: job.range), explicit: job.explicit)
             return
         }
         let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
@@ -1081,17 +1190,56 @@ final class TypingCoach {
                 now: true)
     }
 
+    // MARK: - No AI on the member plan
+
+    /// Chinese that would have gone to the AI, on the member plan while it cannot be used: told once
+    /// with a notice card, after that with a capsule. Each piece only once, like a card.
+    private func withoutAI(_ mark: CoachMark, status: CoachAIStatus, explicit: Bool = false) {
+        guard case let .memberBlocked(state) = status, !memory.wasOffered(mark) else { return }
+        memory.offer(mark)
+        ai.blocked()
+        guard let issue = CoachNotice.issue(for: state) else {
+            Logger.info("TypeRight: no AI for 「…」 (\(state)), nothing to tell", category: Logger.llm)
+            return
+        }
+        tell(issue, about: mark, explicit: explicit)
+    }
+
+    /// The notice the first time (per issue, see CoachNoticeLedger), the capsule after that.
+    private func tell(_ issue: CoachNotice.Issue, about mark: CoachMark, explicit: Bool) {
+        let facts = ai.facts()
+        let notice = CoachNotice.of(issue, word: mark.text, facts: facts)
+        let key = notices.key(issue, facts: facts)
+        let told = issue == .offline ? offlineTold : notices.wasTold(key)
+        if told {
+            // Like a card it waits for a stop, so it is seen; it never pushes a card away.
+            Logger.info("TypeRight: no English (\(issue.rawValue)), capsule", category: Logger.ui)
+            deliver(Card(content: .pill(notice.pill), range: mark.range, piece: mark.text, analyzedText: latestText), now: explicit)
+            return
+        }
+        if issue == .offline { offlineTold = true } else { notices.told(key) }
+        Logger.info("TypeRight: no English (\(issue.rawValue)), notice card", category: Logger.ui)
+        deliver(Card(content: .notice(notice), range: mark.range, piece: mark.text, analyzedText: latestText), now: explicit)
+    }
+
+    /// A notice card's button: the card goes, the window opens.
+    private func noticeActed(_ action: CoachNotice.Action) {
+        guard let card = active, card.isNotice else { return }
+        close(.declined)
+        ai.act(action)
+    }
+
     /// A card from the AI (or a failure) waits its turn: it comes when no other card is up and the
     /// user is not typing, after the cards before it in the text. `now`: the user asked for it.
     private func deliver(_ card: Card, now: Bool) {
         pending.append(card)
         pending.sort { $0.range.lowerBound < $1.range.lowerBound }
-        if active?.isThinking ?? true, now || !userIsTyping { showNext() }
+        if active?.isCapsule ?? true, now || !userIsTyping { showNext() }
     }
 
     /// What waited comes now: the first card in the text, a misspelling typed past, or "想一下".
     private func showNext() {
-        guard active?.isThinking ?? true, follow == nil, let host, !host.coachIsComposing else { return }
+        guard active?.isCapsule ?? true, follow == nil, host != nil, composing == .no else { return }
         let card = nextWaiting()
         guard let card else {
             if active == nil { showCapsule() }
@@ -1104,7 +1252,7 @@ final class TypingCoach {
     /// still running (cards go in sentence order); a misspelling waits for the check of its sentence
     /// and goes when a sentence card covers it.
     private func nextWaiting() -> Card? {
-        pending.removeAll { !latestTextStill(has: $0.piece, at: $0.range) && !$0.isFailure }
+        pending.removeAll { !latestTextStill(has: $0.piece, at: $0.range) && !$0.isFailure && !$0.isNotice }
         let scalars = Array(latestText.unicodeScalars)
         let sentences = CoachText.sentences(in: scalars)
         let sentenceCards = pending.filter(\.isSentence) + [active].compactMap { $0 }.filter(\.isSentence)
@@ -1125,7 +1273,7 @@ final class TypingCoach {
         }
         choices.sort { $0.position < $1.position }
         guard let first = choices.first,
-              !running.contains(where: { !$0.gotCard && $0.range.upperBound <= first.position && !$0.explicit }) || first.card.isFailure
+              !running.contains(where: { !$0.gotCard && $0.range.upperBound <= first.position && !$0.explicit }) || first.card.isFailure || first.card.isNotice || first.card.isPill
         else { return nil }
         if let index = first.skippedIndex {
             memory.offer(skipped[index].mark)
@@ -1151,7 +1299,7 @@ final class TypingCoach {
         }
         let anchorDone = clock.now
         closeTimer?.cancel()
-        let interactive = card.isThinking || keys.canIntercept
+        let interactive = card.isCapsule || keys.canIntercept
         if !interactive {
             card.keys = .readOnly
         } else if card.content.acceptText != nil, let app = host.coachAppID, copyOnlyApps.contains(app) {
@@ -1174,8 +1322,9 @@ final class TypingCoach {
         keys.set(policy(for: card, async: async))
         logShown(card, anchorAt: wordAnchor == nil ? "fallback" : "word", anchorMs: anchorDone - anchorStart, showMs: shown - anchorDone, at: anchor)
         let id = card.id
-        if card.isFailure || (card.keys == .readOnly && !card.isThinking) {
-            closeTimer = clock.after(card.isFailure ? Self.failureSeconds : Self.readOnlySeconds) { [weak self] in
+        if card.isFailure || card.isPill || (card.keys == .readOnly && !card.isThinking) {
+            let seconds = card.isPill ? Self.pillSeconds : card.isFailure ? Self.failureSeconds : Self.readOnlySeconds
+            closeTimer = clock.after(seconds) { [weak self] in
                 guard let self, self.active?.id == id else { return }
                 self.close(.timeUp)
                 self.showNext()
@@ -1213,7 +1362,7 @@ final class TypingCoach {
     /// ignores Tab for a moment: that Tab was meant for the app (next form field, completion).
     /// A failed card takes no key; keys are only watched so typing or Esc closes it.
     private func policy(for card: Card, async: Bool) -> CoachKeyPolicy? {
-        if card.isThinking || card.keys == .readOnly { return nil }
+        if card.isCapsule || card.keys == .readOnly { return nil }
         if card.isFailure { return CoachKeyPolicy(tab: false, tabFrom: 0, esc: false) }
         let typing = clock.secondsSinceLastKey < Self.tabGrace
         let tabFrom = async || typing ? clock.now + Self.tabGrace : clock.now
@@ -1227,6 +1376,8 @@ final class TypingCoach {
         case .sentence: "sentence"
         case .thinking: "thinking"
         case .failed: "failed"
+        case .notice: "notice"
+        case .pill: "capsule"
         }
     }
 
@@ -1362,7 +1513,7 @@ final class TypingCoach {
             return true
         case let .sentence(original, check):
             return host.coachCanMoveCaret && !CoachText.placements(of: check.changes, in: original).isEmpty
-        case .thinking, .failed:
+        case .thinking, .failed, .notice, .pill:
             return false
         }
     }
@@ -1486,9 +1637,10 @@ final class TypingCoach {
             close(.leftFollow)
             return
         }
-        // An input method's letters are not typed yet: only what it commits counts.
-        follow.composing = host.coachIsComposing
-        if !follow.composing { follow.typed = Array(scalars[follow.before.count ..< scalars.count - follow.after.count]) }
+        // An input method's letters are not typed yet: only what it commits counts. When the app does
+        // not say (maybe), the letters count, and the card reminds that a Chinese input method is on.
+        follow.composing = composing
+        if follow.composing != .yes { follow.typed = Array(scalars[follow.before.count ..< scalars.count - follow.after.count]) }
         var moved: CGRect?
         let end = follow.before.count + follow.typed.count
         if !follow.isSentence, !follow.typed.isEmpty, let pinned = follow.anchor, let last = host.coachAnchor(for: end - 1 ..< end, in: text),
@@ -1501,7 +1653,7 @@ final class TypingCoach {
         self.follow = follow
         keys.set(followPolicy())
         let progress = follow.progress()
-        if !follow.composing, progress.wrongAt == nil, progress.right == follow.target.unicodeScalars.count {
+        if follow.composing != .yes, progress.wrongAt == nil, progress.right == follow.target.unicodeScalars.count {
             stepDone()
             return
         }
@@ -1663,7 +1815,7 @@ final class TypingCoach {
 
     private func followPolicy() -> CoachKeyPolicy {
         CoachKeyPolicy(tab: true, tabFrom: 0, esc: true,
-                       follow: CoachFollowKeys(typed: follow?.typed.count ?? 0, composing: follow?.composing ?? false))
+                       follow: CoachFollowKeys(typed: follow?.typed.count ?? 0, composing: follow?.composing == .yes))
     }
 
     private func followView(_ follow: Follow) -> CoachFollow {
@@ -1673,7 +1825,7 @@ final class TypingCoach {
         }
         let progress = follow.progress()
         return CoachFollow(phase: .typing, target: follow.target, right: progress.right, wrongAt: progress.wrongAt,
-                           composing: follow.composing, step: follow.step)
+                           composing: follow.composing == .yes, inputMethodOn: follow.composing == .maybe, step: follow.step)
     }
 
     /// Where the caret at `offset` sits on screen: the right edge of the character before it.
@@ -1703,7 +1855,7 @@ final class TypingCoach {
     // MARK: - The card's word list (a modifier held alone)
 
     private func heldKeysChanged(_ held: CoachModifiers) {
-        guard behavior().allWordsKey.matches(held), let card = active, !card.isThinking, !card.isFailure else {
+        guard behavior().allWordsKey.matches(held), let card = active, !card.isCapsule, !card.isFailure, !card.isNotice else {
             cancelAllWords()
             return
         }

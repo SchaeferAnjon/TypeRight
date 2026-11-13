@@ -1,295 +1,72 @@
-# TextWarden Configuration Guide
+# TypeRight 设置说明
 
-Open **Preferences** from the TextWarden menu bar icon to change grammar checking, app support, appearance, Apple Intelligence features, and diagnostics.
+点菜单栏右上角的 TypeRight 图标（一个勾，长的一笔是羽毛），选「设置…」。设置窗口左边是侧栏：通用、App、快捷键、AI 服务商、账号与会员、隐私、高级；侧栏底部的用法卡写着现在 AI 用的是哪一种、今天用了几次，点它打开「账号与会员」。
 
-## General
+## 通用
 
-### Grammar checking state
+- **边打边弹框**：关掉后 TypeRight 只在菜单栏里待着，什么都不弹。
+- **停下多久后弹**：0.5、0.8 或 1.5 秒。拼错的词、打完的句子马上查；中文后面没再打字、句子没打句号时，等你停这么久。
+- **中英混打时，中文自动变英文**：整句都是中文时不弹，按「整句翻译」键才翻。
+- **英文状态下打的拼音也认**：打 `yuyue` 也会提示 book。
+- **发音**：美音或英音，音标和读音都跟着换。
+- **讲解用**：简体中文、繁體中文、English、Deutsch、日本語、한국어、Français、Español、Italiano。
+- **开机时打开**、**在菜单栏显示图标**：图标关掉后，再打开 TypeRight 就进主窗口。
 
-The global **Grammar checking** menu has four states:
+## App
 
-- **Active**
-- **Paused for 1 Hour**
-- **Paused for 24 Hours**
-- **Paused Until Resumed**
+列出这台 Mac 上正在用的 App，每个一个开关。关掉的 App 里 TypeRight 完全不看。终端这类 App 默认关着，密码管理器、钥匙串访问这类一直不看。
 
-The same pause durations are available per app under **Preferences → Applications**.
+## 快捷键
 
-### Launch at login
+- **按 Tab**：「先跟着打」（默认）是把原来的字拿掉，照着卡上的英文打一遍，打对一个亮一个，再按 Tab 补全；「直接换」是一按就把改法写进去。
+- **Esc** 不改；跟着打的时候放回原来的字。
+- **看卡上全部单词**：按住 ⌥ 或 ⌃ 0.4 秒，卡下面列出每个词的音标和意思；鼠标停在单词上也能看一个。
+- **整句翻译**、**暂停 / 继续**：默认都没设，点键帽按下你想用的组合键（要带 ⌘、⌥、⌃ 或 ⇧）。
 
-Enable **Launch at Login** to start TextWarden when you sign in to your Mac. This uses the standard macOS login-item mechanism.
+## AI 服务商
 
-### Accessibility permission
+自带 Key 时用哪一家：DeepSeek、智谱 GLM、通义千问、Kimi、豆包、OpenAI、Gemini、Claude、OpenRouter，或任何兼容 OpenAI 的接口（「自定义」）。粘贴 Key 后点「试一下」，能连上就写「连上了」。每家的 Key 分开存在 macOS 的钥匙串里，请求从你的 Mac 直接发给那一家。
 
-TextWarden needs Accessibility permission to read editable text, position overlays, and apply corrections in other apps. Grant it under **System Settings → Privacy & Security → Accessibility**. TextWarden does not need this permission to edit text inside its own Sketch Pad.
+现在用的不是自带 Key 时，这一页顶上有一条提示，点「改用自带 Key」就换过来。
 
-## Updates
+## 账号与会员
 
-Update controls live under **Preferences → About**. TextWarden uses [Sparkle](https://sparkle-project.org/) with an HTTPS appcast, EdDSA update signatures, Apple code signing, and notarized release builds.
+顶上「AI 用哪种」三选一：
 
-- **Automatically check for updates on launch:** Enables Sparkle's scheduled checks. When enabled, the interval is 24 hours.
-- **Include experimental releases:** Adds the `experimental` channel, which carries alpha, beta, and release-candidate builds as well as stable releases.
-- **Check for Updates:** Runs a manual check immediately.
+| 用法 | 有什么 | 花多少 |
+|---|---|---|
+| 会员 | 中文和拼音变英文、整句检查和讲解，每天 500 次（一个用到 AI 的弹框算一次），按 UTC 零点重置 | 每月 ¥9.9 / $1.99 或每年 ¥99 / $19.9，刷卡自动续费；人民币也能微信一次买 1 个月或 1 年 |
+| 自带 Key | 同上，不限次数 | 免费，服务商按用量向你自己的账户收费 |
+| 只用本机 | 只查拼写和基础语法，什么都不发出去 | 免费 |
 
-Onboarding asks whether to enable automatic checks and saves that choice. Update checks do not send the text you write.
+TypeRight 不送免费次数。没选过的话：填过 Key 就是自带 Key，没填过就是只用本机。
 
-## Grammar and Spell Checking
+- **开会员…** 打开「方案和价格」窗口：选月付或年付、人民币或美元，点「刷卡订阅」或「微信一次买」，浏览器里打开 Stripe 的付款页，付完回到 TypeRight 自己变成会员，不用再点什么。
+- **授权码**：付款成功页和收据邮件里有，一个最多用在 2 台 Mac 上。另一台 Mac 上在「输入授权码」里粘贴、点「激活」；不用的那台点「解绑这台」。没有账号，不用登录，会员跟着授权码走。
+- **管理订阅**：在浏览器里打开 Stripe 的客户门户，换卡、取消自动续费、看发票。续费没扣成时这里写着几号以前换卡。
 
-### English dialect
+没开会员、会员到期、今天 500 次用完或没连上网时，拼写和基础语法照样在本机查。打中文时第一次出一张说明小卡，之后只在中文词下面出一颗两秒多就走的小胶囊；菜单栏图标左上角有一个琥珀色的小点，菜单里「AI」那一行写着是什么事。
 
-Choose American, British, Canadian, Australian, or Indian English. The dialect changes Harper's spelling and grammar rules.
+## 隐私
 
-### Grammar categories
+- 拼写和基础语法在这台 Mac 上查，不联网。
+- 中文变英文、整句检查只发正在打的这一句：自带 Key 时直接发给你选的那一家；会员时经我们的服务器转给 DeepSeek，只记次数，不存内容。
+- 开会员、用授权码、管理订阅时，会员服务器收到的是这台 Mac 的一个匿名编号和授权码；只用本机检查和自带 Key 时一次都不连。
+- 系统标成密码的输入框不读；错题本、生词本和 Key 只存在这台 Mac 上。「清空错题本和生词本」删了找不回来。
 
-Under **Preferences → Grammar**, you can enable or disable Harper categories individually. They cover spelling, typos, grammar and agreement, punctuation, capitalization, repetition, word choice, usage, regional forms, formatting, and style-related rules.
+## 高级
 
-All categories are enabled by default. The punctuation category also exposes four rule switches:
+TextWarden 原来的设置，分 7 页：
 
-- Oxford comma
-- Ellipsis formatting
-- Unclosed quotes
-- Dash usage
+- **通用**：所有 App 一起暂停 1 小时、24 小时或一直暂停；辅助功能权限；窗口外观；「一键改掉明显的错」「改写选中的文字」两个快捷键，默认都没设。
+- **拼写**：英式、美式、加拿大、澳大利亚、印度英语的拼法；Harper 的各类检查可以单独关；内置词表（网络缩写、科技词、品牌和人名）；「跳过选中的语言」让确定是别的语言的段落不按英文查；macOS「学习拼写」学过的词；自定义词典。
+- **改写**：用 Apple 智能改写选中的文字（要 macOS 26、Apple 芯片并打开 Apple 智能），选风格和变化多少。
+- **全部 App**：一般 App、默认关着的 App、TypeRight 不看的 App 三张表。
+- **网站**：在这些网站的输入框里不弹框，`github.com` 这样的域名或 `*.google.com` 这样的通配都行。
+- **诊断**：现在能不能用、为什么；导出诊断包（日志里的文字会先清理掉）；日志级别和日志文件（默认 `~/Library/Logs/TypeRight/typeright.log`）；恢复全部高级设置。
+- **关于**：版本、自动检查更新（Sparkle）、上手指南、源码、许可证、反馈问题。
 
-### Custom vocabulary
+## 求助
 
-Add project terms, product names, or proper nouns to the custom dictionary so they are no longer flagged. You can also add a flagged term from its suggestion popover.
-
-The Grammar tab includes optional predefined word lists. They are enabled by default:
-
-| Word list | Included terms |
-| --- | --- |
-| Internet Abbreviations | More than 3,200 common abbreviations |
-| Gen Z Slang | More than 270 modern terms |
-| IT & Tech Terminology | More than 10,000 technical terms |
-| Brand & Company Names | More than 2,400 names |
-| Person Names | More than 100,000 international first names |
-| Surnames | More than 150,000 US Census surnames |
-
-Matching is case-insensitive. You can also enable **Import macOS learned words**, which asks `NSSpellChecker` about words learned through the system **Learn Spelling** command. TextWarden's own custom words remain separate from the macOS dictionary.
-
-### Language detection
-
-Language detection is off by default. Enable **Ignore selected languages** to prevent English grammar checks in passages confidently detected as a selected language.
-
-The searchable selector contains all 69 non-English languages supported by the bundled detector. Search by English name, native name, or ISO 639-3 code. Selected languages appear first when the search field is empty.
-
-TextWarden detects language once per semantic segment, such as a sentence, paragraph, or list item. If more than 60% of all substantive segments are reliably detected as any selected language, it skips Harper and English readability analysis for the document. Otherwise it suppresses Harper errors only inside reliably matched segments. English and unselected passages in mixed-language documents remain checked.
-
-Uncertain detections fail open: TextWarden keeps checking the passage. This is most likely with very short, ambiguous, or closely related language samples. The feature prevents false positives; it does not translate or proofread non-English text.
-
-## Readability
-
-Readability analysis is on by default and does not require Apple Intelligence. For text with at least 30 words, TextWarden calculates a Flesch Reading Ease score and checks sentence complexity against the selected audience.
-
-### Target audience
-
-| Audience | Minimum score | Intended reader |
-| --- | ---: | --- |
-| Accessible | 65 | Broad audience, roughly eighth-grade reading level |
-| General | 50 | Average adult reader |
-| Professional | 40 | Business and professional readers |
-| Technical | 30 | Readers familiar with specialized material |
-| Academic | 20 | Graduate-level or academic readers |
-
-**General** is the default. A sentence is eligible for a complexity underline when it has at least 12 words and scores more than 10 points below the selected threshold.
-
-Turn off **Show Complexity Underlines** if you want the overall score without violet dashed sentence underlines.
-
-## Apple Intelligence Features
-
-AI Style Suggestions and AI Compose require macOS 26 or later, a supported Apple Silicon Mac, and Apple Intelligence enabled in System Settings. TextWarden uses Apple's Foundation Models framework on-device. The feature is unavailable on Intel Macs, but Harper grammar checking and readability scoring continue to work.
-
-### AI Style Suggestions
-
-AI style suggestions are off by default. Once enabled, TextWarden runs style analysis after grammar analysis with a three-second debounce, a 50-character minimum, and a 30-second minimum interval between automatic checks. You can trigger a check immediately with `⌥⌃S`; selected text is checked by itself, otherwise TextWarden checks the full field.
-
-Choose one writing style:
-
-- **Default:** Clear, natural writing
-- **Concise:** Less repetition and filler
-- **Formal:** Professional vocabulary and complete sentences
-- **Casual:** Conversational phrasing
-- **Business:** Direct, action-oriented writing
-
-The **Creativity** control has three presets:
-
-- **Consistent:** Greedy sampling for repeatable output
-- **Balanced:** Temperature `0.3` and the default setting
-- **Creative:** Temperature `0.5` for more variation
-
-The selected preset is used for manual style checks. Automatic style checks currently use Balanced.
-
-These presets control variation, not correctness. Even Consistent can miss errors or change meaning, and output can change after model or operating-system updates.
-
-TextWarden filters model output before showing it. Suggestions must point to exact source text, change that text, avoid overlapping ranges, and pass app-level safety checks before replacement.
-
-### Quick Rewrite
-
-Select a passage in a supported application and press `⌥⇧R` to rewrite it in place with Apple Intelligence. TextWarden uses your writing style and creativity preset from **Preferences → Style** and asks the on-device model to preserve the original language and meaning. Style checking must be enabled, and TextWarden must be active for the application.
-
-Quick Rewrite is not a translation command. It declines selections whose language is uncertain and discards changed results whose detected language does not confidently match the source. If asked, select a longer passage. Detection can still be wrong, especially for short phrases shared by multiple languages or mixed-language text, so review the result before applying it. Your writing style does not select a different output language.
-
-Every changed AI result appears in a compact **Original / Rewrite** comparison at the bottom of the screen. Your selection stays unchanged until you choose **Apply** or press **Return**; **Cancel** or **Escape** leaves it untouched. The review cancels automatically after 45 seconds, with the countdown inside **Cancel**. Hover anywhere over the review to pause the countdown; a pause mark appears beside the remaining seconds. Press **Space** to remove the time limit. VoiceOver reviews have no time limit. An unchanged result simply reports that no rewrite was suggested. Review the meaning before applying: AI can miss corrections or change facts, and formatting is not guaranteed. Existing grammar correction actions remain separate from AI rewriting.
-
-If Apple Intelligence blocks the first attempt, TextWarden can try Apple's text-transformation mode once and label that alternative in the review. Exact quotation extractions also receive a context-loss warning; this warning does not detect every omission. Press the shortcut again to cancel; changing focus or selection while it is working or awaiting review also cancels the rewrite. With no selection, TextWarden asks you to select text; it never reads clipboard text as input. Selections over 4,000 UTF-8 bytes are rejected rather than truncated. Use your editor's Undo command to undo a replacement where the editor supports it.
-
-Change **Quick Rewrite Selected Text** under **Preferences → General → Keyboard Shortcuts** if another app, such as Raycast, already uses `⌥⇧R`.
-
-### AI Compose
-
-AI Compose generates text from an instruction. Open it from the writing section of the floating indicator or press `⌥⌃W`. With text selected, describe how to rewrite that selection. Without a selection, describe a new draft; nearby document text is not used. Choose a writing style, generate, review the result, then insert it. To change existing text, select it before opening Compose.
-
-Generated text can be inserted into the active field or copied. Retry uses a different sampling seed and a higher temperature to produce another version.
-
-## Sketch Pad
-
-Sketch Pad is TextWarden's built-in editor. Open it from the menu bar or press `⌥⌃N`.
-
-It provides:
-
-- Real-time Harper grammar and spell checking
-- Readability scores and sentence analysis
-- Apple Intelligence style suggestions and quick rewrites when available
-- An insights sidebar grouped by correctness, style, and clarity
-- Undo and redo
-- Line-number, current-line, invisible-character, and line-wrapping controls
-- Automatic document saving
-
-AI quick actions apply to the selection when one exists, or the full document otherwise. The current actions are Professional, Friendly, Concise, and Refine.
-
-## Appearance
-
-### Suggestion popover
-
-- **Position:** Auto, Above, or Below
-- **Show on hover:** Opens suggestions when the pointer rests over an underline or indicator
-- **Text size:** 10–20 pt; 13 pt by default
-- **Theme:** System, Light, or Dark for the preferences window
-- **Overlay Theme:** System, Light, or Dark for popovers and indicators
-
-### Underlines
-
-**Show error underlines** controls grammar and spelling underlines globally. Thickness ranges from 1 to 5 pt and defaults to 2 pt. TextWarden hides underlines when the error count exceeds the configured threshold; the threshold ranges from 1 to 20 and defaults to 10.
-
-An app must expose usable character geometry for underlines to appear. The floating indicator remains available when only error counts and suggestions can be shown.
-
-### Floating indicator
-
-The default position can be Top Left, Top Right, Center Left, Center Right, Bottom Left, or Bottom Right. It defaults to Center Right. Drag the indicator along the window edge to remember a different position for a specific app.
-
-**Always show indicator** keeps a green checkmark visible when there are no issues. **Hover delay** ranges from 0 to 1,000 ms in 50 ms steps and defaults to instant.
-
-## Browser Extension (Preview)
-
-Open **Preferences → Browser** for Chrome, Brave, Firefox, Zen, or Safari. Expand **Install Extension** for the folder and setup controls. The connection to TextWarden is configured automatically.
-
-- **Chrome / Brave:** Open the browser’s Extensions page, enable **Developer mode**, choose **Load unpacked**, and select the revealed folder.
-- **Firefox / Zen:** Open `about:debugging`, choose **Load Temporary Add-on**, and select `manifest.json` in the revealed folder. Temporary installations end when the browser restarts.
-- **Safari:** Enable **TextWarden Browser Extension (Preview)** in Safari’s Extensions settings. The extension is bundled with the Mac app; signed, notarized builds need no Developer mode.
-
-Keep TextWarden running and click the feather on the web page to grant temporary access. Repeat on another website or port. The preview supports standard fields and basic rich text, not Google Docs or complex editors. Sensitive fields and private windows are excluded.
-
-The toolbar menu provides **Suggestions**, **AI Compose**, and **Rewrite**. **Check this page** remembers a pause for its exact address and path; **Pause site** offers one hour, 24 hours, or until resumed. Scheme and port are preserved, while queries and fragments are ignored. **Show underlines** applies to the current document. Global and per-browser pauses still apply.
-
-After an app update, reload unpacked extensions and affected web pages. Firefox and Zen previews must be loaded again after a browser restart; Safari updates with the app. Full setup and development-build notes are in the [browser extension guide](https://github.com/PhilipSchmid/textwarden/blob/main/BrowserExtension/README.md).
-
-## Application and Website Controls
-
-### Supported applications
-
-Apps with dedicated TextWarden configurations are enabled by default. The registry includes Slack, Teams, Claude, ChatGPT, Perplexity, supported browsers, Notion, Apple Mail, Messages, Notes, TextEdit, Reminders, Calendar, Pages, WhatsApp, Telegram, Microsoft Word, PowerPoint, Outlook, Webex, and Proton Mail.
-
-See the [supported-app matrix](README.md#supported-apps) and [application notes](docs/applications/README.md) for known limitations.
-
-### Other applications
-
-For an eligible app without a dedicated configuration, TextWarden asks whether to **Try Safely** or **Keep Paused**. A safe trial uses the floating indicator and copy-only fixes; underlines and direct edits stay off. You can change this choice under **Preferences → Applications**. TextWarden can profile the app's Accessibility capabilities locally and cache a strategy recommendation for seven days, but results still depend on the editor.
-
-### Apps paused by default
-
-Terminal, iTerm2, Hyper, Warp, Alacritty, Kitty, WezTerm, Ghostty, and Terax are paused until resumed by default. Choose **Try Safely** to opt in. Existing explicit per-app choices are preserved; command output and code can produce noisy suggestions.
-
-### Per-app controls
-
-All three application lists show only apps found on this Mac. Uninstalled apps are hidden, even when TextWarden has a built-in rule or saved preference for them.
-
-Eligible apps can be Active, paused for one hour, paused for 24 hours, or paused until resumed. For supported apps, **More → Show Underlines** is checked when underlines are enabled for that app. Turn it off to hide underlines without turning off grammar checking; global underline settings still apply.
-
-To exclude an app, open **Preferences → Applications** and choose **Paused Until Resumed**. **Pause Another App…** lets you select an installed app without opening it first. For an app awaiting approval, its **More** menu also offers **Pause Until Resumed**. This choice stays saved across restarts; **Try Safely** lets you opt in later.
-
-**Excluded by TextWarden** lists apps that are never checked. This includes system and credential utilities, plus selected media, viewer, and reporting apps such as 1Password, Photos, Preview, and PDF Expert. **Always Excluded** is read-only: these apps cannot be resumed, even if they were previously enabled. Search by app name or bundle identifier to find one.
-
-If another utility should be excluded for everyone, choose **More → Suggest Default Exclusion…** beside it. TextWarden opens a GitHub draft with only the app name and bundle identifier; explain its purpose and submit it yourself. See the [default exclusion policy](https://github.com/PhilipSchmid/textwarden/blob/main/docs/APPLICATION_EXCLUSIONS.md).
-
-### Website exclusions
-
-Under **Preferences → Websites**, add a domain to disable TextWarden in browser text fields on that site. Exact domains such as `github.com` and wildcard patterns such as `*.google.com` cover all ports and schemes. Rules created by the extension can pause a specific page or site, including its port, and expire automatically. Remove a rule here to resume checking.
-
-## Keyboard Shortcuts
-
-All shortcuts can be changed under **Preferences → General**. They can also be disabled together with **Enable keyboard shortcuts**.
-
-| Action | Default shortcut |
-| --- | --- |
-| Toggle TextWarden | `⌥⌃T` |
-| Fix all grammar errors with one suggestion | `⌥⌃A` |
-| Show grammar suggestions | `⌥⌃G` |
-| Show style suggestions | `⌥⌃Y` |
-| Show AI Compose | `⌥⌃W` |
-| Quick Rewrite Selected Text | `⌥⇧R` |
-| Show readability | `⌥⌃R` |
-| Run style check | `⌥⌃S` |
-| Open or close Sketch Pad | `⌥⌃N` |
-
-When a suggestion popover is open:
-
-| Action | Default shortcut |
-| --- | --- |
-| Accept the current suggestion | `Tab` |
-| Dismiss the popover | `⌥Esc` |
-| Previous suggestion | `⌥←` |
-| Next suggestion | `⌥→` |
-| Apply suggestion 1, 2, or 3 | `⌥1`, `⌥2`, or `⌥3` |
-
-## Diagnostics and Logging
-
-### Runtime health
-
-Open **Preferences → Diagnostics** to see TextWarden's current state for the active application. The runtime-health card shows whether checking is active, limited, recovering, or paused, along with the last successful check and detected support capabilities. When TextWarden can recover automatically or needs an action from you, the relevant control appears in the same card.
-
-### Log levels
-
-TextWarden writes to macOS Unified Logging at these levels: Trace, Debug, Info, Warning, Error, and Critical. Info is the default.
-
-File logging is optional. Its default path is:
-
-```text
-~/Library/Logs/TextWarden/textwarden.log
-```
-
-Most Info-level messages record metadata, but warning and error diagnostics for failed or stale replacements can include short text fragments. Debug and Trace logs may contain more analyzed text. Use verbose logging only while investigating a problem, and review any log before sharing it.
-
-### Debug overlays
-
-The Diagnostics tab can draw text-field bounds, CGWindow coordinates, Cocoa coordinates, and character-position markers. These tools help identify Accessibility and coordinate-conversion problems. Leave them off during normal use.
-
-### Export Diagnostics
-
-**Preferences → Diagnostics → Export Diagnostics** creates a ZIP containing:
-
-- `diagnostic_overview.json` with system, permission, settings, application-state, statistics, performance, and Apple Intelligence metadata
-- Sanitized current and rotated TextWarden log files, when present
-- Up to ten recent TextWarden `.crash` or `.ips` reports, when present
-
-The settings dump omits custom-dictionary entries and ignored rule or error text. Website and per-app underline overrides are recorded as counts, while the selected language exclusions are listed by name. Log sanitization anonymizes `/Users/<name>/` paths and removes lines containing common secret keywords. Logs and Apple crash reports can still contain sensitive context, so extract and inspect the ZIP before sharing it.
-
-### Reset options
-
-The Diagnostics tab can reset all settings, clear the custom dictionary, clear ignored rules or error text, and reset milestone prompts. Statistics have a separate reset control under **Preferences → Statistics**. **Reset All Settings** relaunches TextWarden and shows onboarding again.
-
-## Getting Help
-
-- Choose **Preferences → About → Replay Tutorial** to review the floating control, suggestions, and quick actions.
-- Read [Troubleshooting](TROUBLESHOOTING.md).
-- [Open a bug report](https://github.com/PhilipSchmid/textwarden/issues/new/choose).
-- Use [GitHub Discussions](https://github.com/PhilipSchmid/textwarden/discussions) for feature requests and questions.
+- 先看 [常见问题和排查](TROUBLESHOOTING.md)。
+- 在 [GitHub Issues](https://github.com/SchaeferAnjon/TypeRight/issues) 报问题，在 [GitHub Discussions](https://github.com/SchaeferAnjon/TypeRight/discussions) 提建议和提问。

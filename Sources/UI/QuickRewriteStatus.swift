@@ -178,7 +178,7 @@ final class QuickRewriteStatus: ObservableObject {
                     Image(systemName: completion == .applied ? "checkmark.circle.fill" : "xmark.circle")
                         .foregroundStyle(completion == .applied ? Color.green : Color.secondary)
                 } else {
-                    Image("FeatherLogo")
+                    Image("MenuBarNormal")
                         .renderingMode(.template)
                         .resizable()
                         .scaledToFit()
@@ -266,7 +266,7 @@ struct QuickRewritePreviewContent: View {
             .frame(maxHeight: maximumHeight)
             Divider()
             HStack(spacing: 8) {
-                Image("FeatherLogo").renderingMode(.template).resizable().scaledToFit()
+                Image("MenuBarNormal").renderingMode(.template).resizable().scaledToFit()
                     .frame(width: 16, height: 16).foregroundStyle(colors.textSecondary).accessibilityHidden(true)
                 Spacer()
                 Button { onDecision(false) } label: {

@@ -2,7 +2,7 @@
 //  TRMenu.swift
 //  TypeRight
 //
-//  The menu under the menu-bar feather: today's count with 14 small bars, pause here or
+//  The menu under the menu-bar icon: today's count with 14 small bars, pause here or
 //  everywhere for an hour, open the main window or settings, which AI is in use, quit.
 //
 
@@ -36,40 +36,29 @@ enum TRMenuBarIcon {
     }
 }
 
-/// The "AI" line near the bottom of the menu.
-enum TRMenuAILine: Equatable {
-    case ready(CoachProvider)
-    /// The provider answered 401 / 403 to the saved key.
-    case keyRejected(CoachProvider)
-    case notSet
+/// The "AI" line near the bottom of the menu: a dot and a few words (TRAccountFacts.menuLine).
+/// Every state opens a settings page: 自带 Key the AI 服务商 page, the others 账号与会员.
+struct TRMenuAILine: Equatable {
+    var tone: TRTone
+    var title: String
+    var opens: TRSettingsPage
 
-    static func current() -> TRMenuAILine {
-        guard CoachSettings.isAIReady else { return .notSet }
-        let provider = CoachSettings.provider
-        return CoachKeyStore.shared.isRejected(provider) ? .keyRejected(provider) : .ready(provider)
+    @MainActor
+    static func current() -> TRMenuAILine { of(.current()) }
+
+    static func of(_ facts: TRAccountFacts) -> TRMenuAILine {
+        let line = facts.menuLine
+        return TRMenuAILine(tone: line.tone, title: line.text, opens: facts.plan == .own ? .ai : .account)
     }
 
-    var title: String {
-        switch self {
-        case let .ready(provider): "AI：\(provider.displayName)"
-        case let .keyRejected(provider): "AI：\(provider.displayName) 的 Key 失效了"
-        case .notSet: "AI：还没选，只查拼写"
-        }
-    }
-
-    /// Status dot (DESIGN.md: ok usable, warn one step left, danger key rejected).
+    /// Status dot (DESIGN.md: ok in use, warn something to look at, danger key rejected, grey off).
     var dotColor: NSColor {
-        switch self {
-        case .ready: TR.fixNS
-        case .keyRejected: TR.dangerNS
-        case .notSet: TR.markNS
+        switch tone {
+        case .ok: TR.fixNS
+        case .warn: TR.markNS
+        case .danger: TR.dangerNS
+        case .off, .wait: .tertiaryLabelColor
         }
-    }
-
-    /// Clicking the line opens 设置 › AI 服务商 whenever there is something to fix.
-    var opensSettings: Bool {
-        if case .ready = self { return false }
-        return true
     }
 }
 
@@ -138,10 +127,12 @@ final class TypeRightMenu: NSObject {
         menu.addItem(settings)
         menu.addItem(.separator())
 
-        let ai = NSMenuItem(title: state.ai.title, action: state.ai.opensSettings ? #selector(openAI) : nil, keyEquivalent: "")
+        let ai = NSMenuItem(title: state.ai.title, action: #selector(openAI(_:)), keyEquivalent: "")
         ai.target = self
-        ai.image = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: 6, weight: .regular)
+        ai.representedObject = state.ai.opens.rawValue
+        // Waiting for a payment: an hourglass instead of a dot (a menu item cannot spin).
+        ai.image = NSImage(systemSymbolName: state.ai.tone == .wait ? "hourglass" : "circle.fill", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: state.ai.tone == .wait ? 10 : 6, weight: .regular)
                 .applying(.init(paletteColors: [state.ai.dotColor])))
         menu.addItem(ai)
         if state.needsAccess {
@@ -172,7 +163,9 @@ final class TypeRightMenu: NSObject {
     @objc private func resumeAll() { UserPreferences.shared.resume(.global) }
     @objc private func openMain() { TRMainWindowController.shared.show() }
     @objc private func openSettings() { TRSettingsWindowController.shared.show() }
-    @objc private func openAI() { TRSettingsWindowController.shared.show(.ai) }
+    @objc private func openAI(_ sender: NSMenuItem) {
+        TRSettingsWindowController.shared.show(TRSettingsPage(rawValue: sender.representedObject as? String ?? "") ?? .account)
+    }
 
     @objc private func openAccess() {
         NSApp.sendAction(Selector(("openOnboardingWindow")), to: nil, from: nil)

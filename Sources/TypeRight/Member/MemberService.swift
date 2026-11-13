@@ -2,16 +2,17 @@
 //  MemberService.swift
 //  TypeRight
 //
-//  Membership without an account: this Mac registers with the backend and the first 100 new Macs
-//  get 300 free AI checks; after that a subscription (monthly or yearly, card, renews by itself) or,
-//  in yuan, a one-time pass of 1 month or 1 year (WeChat Pay and others, does not renew), 500 checks a day.
-//  A license code works on a second Mac (2 per code). Without a key of their own, the AI cards go
-//  through the backend (OpenAI-compatible, X-Use-Id: one use number per card); the provider key
-//  stays on the server.
+//  Membership without an account: a subscription (monthly or yearly, card, renews by itself) or, in
+//  yuan, a one-time pass of 1 month or 1 year (WeChat Pay and others, does not renew), 500 AI checks
+//  a day. There are no free uses. This Mac registers with the backend (an anonymous device id, no
+//  name or email) only when the user buys, enters a license code or opens the customer portal; a
+//  license code works on a second Mac (2 per code). On the member plan the AI cards go through the
+//  backend (OpenAI-compatible, X-Use-Id: one use number per card); the provider key stays on the server.
 //
-//  This is the model the "账号与会员" settings page binds to: the plan, the trial and membership
-//  state, purchases and the license code. Backend contract: meetcaption-server docs/multi-product.md §4.
-//  Ported from GetNewWord's MemberService.swift (same author, GPL-3.0); sync is left out.
+//  This is the model the "账号与会员" settings page, the "方案和价格" window, the menu's AI line and
+//  the coach bind to: the plan, the membership state, purchases and the license code. Backend
+//  contract: meetcaption-server docs/multi-product.md §4 and §7.
+//  Ported from GetNewWord's MemberService.swift (same author, GPL-3.0); the trial and sync are left out.
 //
 
 import AppKit
@@ -38,7 +39,7 @@ enum MemberAPI {
 
     /// Release builds always use production. Debug builds only connect when pointed at a backend
     /// (TYPERIGHT_API or `defaults write com.typeright.app typeright.api http://127.0.0.1:8820`),
-    /// so they never take one of the first 100 trials. Unit tests run inside the app and never connect.
+    /// so a development Mac never shows up among the real ones. Unit tests run inside the app and never connect.
     static func base(environment: [String: String], defaults: UserDefaults, isDebug: Bool) -> URL? {
         if environment["XCTestConfigurationFilePath"] != nil { return nil }
         guard isDebug else { return URL(string: production) }
@@ -69,7 +70,7 @@ enum MemberAPI {
 
 enum MemberDevice {
     /// sha256("typeright:" + hardware UUID) in hex: the same Mac reinstalled is still the same Mac and
-    /// gets no second trial. The backend only keeps a hash of it.
+    /// finds its membership again. The backend only keeps a hash of it.
     static func fingerprint(hardwareUUID: String) -> String {
         SHA256.hash(data: Data("\(MemberAPI.product):\(hardwareUUID)".utf8)).map { String(format: "%02x", $0) }.joined()
     }
@@ -168,14 +169,15 @@ final class MemberService: ObservableObject {
     @Published private(set) var lastError: MemberError?
     /// Waiting for a payment (asks every 3 seconds).
     @Published private(set) var purchase: Purchase?
-    /// What registering got: granted / existing / closed / ip-limit / daily-limit
-    @Published private(set) var trialResult: String?
     /// Just paid (the page says so).
     @Published var justPaid = false
     /// This Mac has a device token.
     @Published private(set) var registered: Bool
     /// Registering right now.
-    @Published private(set) var claiming = false
+    @Published private(set) var registeringNow = false
+    /// The last request to the backend (status, a card, a purchase) found no network; the next one
+    /// that gets an answer clears it. Kept apart from the status, which stays as it was last read.
+    @Published private(set) var offline = false
     /// An error raised elsewhere, to show on the page.
     @Published var notice: MemberError?
 
@@ -183,13 +185,13 @@ final class MemberService: ObservableObject {
     var isAvailable: Bool { api != nil }
 
     var state: MemberState {
-        MemberState.of(status, available: isAvailable, failed: lastError != nil, trialResult: trialResult, registered: registered || claiming)
+        MemberState.of(status, available: isAvailable, failed: lastError != nil, registered: registered || registeringNow)
     }
 
     var isMember: Bool { status?.isMember == true }
 
-    /// How TypeRight works: on-device only, own key, or trial / membership. Never chosen: own when a key
-    /// is filled in, otherwise member (AIPlan.resolve).
+    /// How TypeRight works: on-device only, own key, or membership. Never chosen: own when a key is
+    /// filled in, otherwise on-device only (AIPlan.resolve).
     var plan: AIPlan {
         get { AIPlan.resolve(stored: defaults.string(forKey: AIPlan.key), hasOwnKey: ownKey() != nil) }
         set {
@@ -197,6 +199,16 @@ final class MemberService: ObservableObject {
             defaults.set(newValue.rawValue, forKey: AIPlan.key)
             Logger.info("TypeRight member: plan \(newValue.rawValue)", category: Logger.general)
         }
+    }
+
+    /// The user picked a plan (or never did: the default is a guess, not a choice).
+    var planChosen: Bool { defaults.string(forKey: AIPlan.key) != nil }
+
+    /// The user picked a plan in settings, the setup or the price window. Back on the member plan, a
+    /// Mac that registered before asks for its status at once; one that never did stays quiet.
+    func choose(_ plan: AIPlan) {
+        self.plan = plan
+        if plan == .member, registered { Task { await refresh() } }
     }
 
     /// Whether the AI cards are on now and where they go.
@@ -249,7 +261,6 @@ final class MemberService: ObservableObject {
     private struct Cache: Codable {
         var api: String
         var status: MemberStatus?
-        var trialResult: String?
     }
 
     init(api: URL?, defaults: UserDefaults, tokens: MemberTokenStore? = nil,
@@ -272,7 +283,6 @@ final class MemberService: ObservableObject {
            let cache = try? JSONDecoder().decode(Cache.self, from: data), cache.api == api.absoluteString
         {
             status = cache.status
-            trialResult = cache.trialResult
         }
     }
 
@@ -303,9 +313,9 @@ final class MemberService: ObservableObject {
 
     // MARK: Registering and status
 
-    /// Registers this Mac and claims the trial, keeping the device token; returns the token if there
-    /// is one already. Calls at the same time share one registration. Only called when someone really
-    /// uses the membership: the first AI card on the member plan, choosing that plan, buying, a code.
+    /// Registers this Mac, keeping the device token; returns the token if there is one already. Calls
+    /// at the same time share one registration. Only called when someone really uses the membership:
+    /// buying, a license code, the portal, or a card on the member plan after the token was lost.
     func ensureDevice() async throws -> String {
         guard api != nil else { throw MemberError.unavailable }
         if let token = tokens.load() { return token }
@@ -317,38 +327,24 @@ final class MemberService: ObservableObject {
             let (data, _) = try await self.call("POST", "device", body: body, auth: false)
             let r = try MemberStatus.registration(from: data)
             self.storeToken(r.token)
-            // Registering again (token lost) only says existing: keep the first answer to explain a missing trial.
-            if r.trial != "existing" || self.trialResult == nil { self.trialResult = r.trial }
             self.lastError = nil
             self.checkedAt = Date()
             self.apply(r.status)
-            Logger.info("TypeRight member: registered, trial \(r.trial), plan \(r.status.plan), left \(r.status.trial.left)", category: Logger.general)
+            Logger.info("TypeRight member: registered, plan \(r.status.plan)", category: Logger.general)
             return r.token
         }
         registering = task
-        claiming = true
+        registeringNow = true
         defer {
             registering = nil
-            claiming = false
+            registeringNow = false
         }
         return try await task.value
     }
 
-    /// The member plan was chosen: register and claim the trial now. If the backend cannot be reached
-    /// that is only noted; the first AI card tries again.
-    func claimTrial() async {
-        guard api != nil, !registered else { return }
-        do {
-            _ = try await ensureDevice()
-        } catch {
-            lastError = error as? MemberError ?? .network
-            Logger.info("TypeRight member: claiming the trial failed: \(lastError?.code ?? "?")", category: Logger.general)
-        }
-    }
-
     /// Asks for the latest status (another Mac used some, a refund, an expiry: only the backend knows).
     /// Unreachable keeps the old one. maxAge: with a status checked less than this many seconds ago,
-    /// do not ask. Never registers: that would take a trial for someone who has not used the membership.
+    /// do not ask. Never registers: a Mac that never bought or entered a code has nothing to ask about.
     func refresh(maxAge: TimeInterval = 0) async {
         guard api != nil, registered else { return }
         if let task = refreshing { return await task.value }
@@ -372,24 +368,21 @@ final class MemberService: ObservableObject {
 
     private func apply(_ s: MemberStatus) {
         status = s
-        if let api, let data = try? JSONEncoder().encode(Cache(api: api.absoluteString, status: s, trialResult: trialResult)) {
+        if let api, let data = try? JSONEncoder().encode(Cache(api: api.absoluteString, status: s)) {
             defaults.set(data, forKey: Self.cacheKey)
         }
     }
 
-    /// Before an error is shown: add what explains it from this Mac's status (why no trial, until
-    /// when a pass runs, whether a daily limit is the cost cap).
+    /// Before an error is shown: add what explains it from this Mac's status (until when a pass runs,
+    /// whether a daily limit is the cost cap).
     func explain(_ e: MemberError) -> MemberError {
         var e = e
         switch e.code {
-        case "trial-closed": e.miss = .of(status?.trialResult ?? trialResult)
         case "pass-active": e.until = MemberStatus.date(status?.memberUntil)
         // Two daily limits: 500 uses, or this license's cost for the day. /status says which in limitBy;
-        // right after a 429, before asking: a trial has no daily count, so it is the cost; a member
-        // with uses left today hit the cost too.
+        // right after a 429, before asking: a member with uses left today hit the cost.
         case "daily-limit":
             if let by = status?.limitBy, status?.reason == "daily-limit" { e.costCap = by == "cost" }
-            else if status?.isMember != true { e.costCap = true }
             else { e.costCap = (status?.today?.left ?? 0) > 0 }
         default: break
         }
@@ -406,7 +399,7 @@ final class MemberService: ObservableObject {
         Logger.info("TypeRight member: activated a license code, plan \(status?.plan ?? "?")", category: Logger.general)
     }
 
-    /// This Mac goes back to its own trial license (whatever is left of it).
+    /// This Mac leaves the license: it has no membership of its own afterwards, and the code has a place free.
     func unbind() async throws {
         apply(try decodeStatus(await request("POST", "license/unbind")))
         Logger.info("TypeRight member: unbound this Mac", category: Logger.general)
@@ -462,6 +455,13 @@ final class MemberService: ObservableObject {
         Logger.info("TypeRight member: checkout \(mode) \(plan) \(currency)", category: Logger.general)
         openURL(url)
         startPolling(r.claim)
+    }
+
+    /// 重新打开付款页: the browser shows the page being waited for again.
+    func reopenCheckout() {
+        guard let purchase else { return }
+        backFromBrowser = true
+        openURL(purchase.url)
     }
 
     /// "不等了": stop asking; the page stays valid, and the same choice within the hour reopens it.
@@ -574,6 +574,7 @@ final class MemberService: ObservableObject {
 
     /// The coach found the member plan blocked: ask again at most every 10 minutes, so a purchase or a
     /// renewal made elsewhere (another Mac on the same code, the website) unblocks it without a restart.
+    /// A Mac that never registered has nothing to ask (refresh does not register).
     func recheckWhileBlocked() {
         guard state != .unavailable else { return }
         Task { await refresh(maxAge: 600) }
@@ -598,14 +599,6 @@ final class MemberService: ObservableObject {
         }
         guard var s = status, let left = header("X-Uses-Left").flatMap(Int.init) else { return }
         switch header("X-Uses-Kind") {
-        case "trial":
-            s.trial.left = left
-            s.trial.used = max(0, s.trial.total - left)
-            if left <= 0, !s.isMember {
-                s.plan = "none"
-                s.canUse = false
-                s.reason = s.trial.granted ? "trial-used-up" : "trial-closed"
-            }
         case "sub":
             if var today = s.today {
                 today.left = left
@@ -675,8 +668,10 @@ final class MemberService: ObservableObject {
             throw CancellationError()
         } catch {
             Logger.info("TypeRight member: \(method) \(path) got no answer: \((error as? URLError)?.code.rawValue.description ?? String(describing: type(of: error)))", category: Logger.general)
+            offline = true
             throw MemberError.network
         }
+        offline = false
         let http = response as? HTTPURLResponse
         let status = http?.statusCode ?? 0
         let replyHeaders = http?.stringHeaders ?? [:]
@@ -701,8 +696,10 @@ final class MemberService: ObservableObject {
             throw CancellationError()
         } catch {
             Logger.info("TypeRight member: \(method) \(path) got no answer: \((error as? URLError)?.code.rawValue.description ?? String(describing: type(of: error)))", category: Logger.general)
+            offline = true
             throw MemberError.network
         }
+        offline = false
         let http = response as? HTTPURLResponse
         let status = http?.statusCode ?? 0
         let replyHeaders = http?.stringHeaders ?? [:]

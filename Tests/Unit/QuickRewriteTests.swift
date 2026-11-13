@@ -345,7 +345,7 @@ final class QuickRewriteTests: XCTestCase {
         if let directory { try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true) }
         try await Task.sleep(for: .milliseconds(200))
         try captureReviewView(XCTUnwrap(panel.contentView), name: "status-loading", directory: directory)
-        XCTAssertNotNil(NSImage(named: "FeatherLogo"))
+        XCTAssertNotNil(NSImage(named: "MenuBarNormal"))
         let compactHeight = panel.frame.height
         XCTAssertEqual(compactHeight, 36, accuracy: 1, "The icon and feedback need ten points of vertical padding on each side")
         XCTAssertLessThan(panel.frame.width, 240, "Short feedback should fit its content, not fill a fixed-width box")

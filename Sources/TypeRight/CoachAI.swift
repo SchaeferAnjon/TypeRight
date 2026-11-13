@@ -5,7 +5,7 @@
 //  The AI behind the two cards that need it: turning a Chinese or pinyin fragment into English,
 //  and checking a finished sentence. Every provider is spoken to through the OpenAI-compatible
 //  chat/completions API; the user's key never leaves their Mac except to the provider they chose.
-//  Without a key of their own, the trial or membership sends the same request through our backend
+//  Without a key of their own, the membership sends the same request through our backend
 //  (MemberService.chat), which picks the model.
 //
 
@@ -166,9 +166,6 @@ enum CoachSettings {
         set { defaults.set(newValue, forKey: "typeright.accent") }
     }
 
-    /// The daily anonymous check-in; off until the user agrees (UsagePing.answer).
-    static var anonymousReport: Bool { UsageConsent.load(from: defaults) == .yes }
-
     static var onboarded: Bool {
         get { defaults.bool(forKey: "typeright.onboarded") }
         set { defaults.set(newValue, forKey: "typeright.onboarded") }
@@ -317,13 +314,20 @@ final class CoachKeyStore: @unchecked Sendable {
             known[provider] = saved ? !trimmed.isEmpty : nil
             if saved { rejected.remove(provider) }
         }
+        Self.announce()
         return saved
+    }
+
+    /// The menu bar's dot follows the key (it is read on the main thread).
+    private static func announce() {
+        DispatchQueue.main.async { NotificationCenter.default.post(name: .typeRightAIChanged, object: nil) }
     }
 
     func isRejected(_ provider: CoachProvider) -> Bool { lock.withLock { rejected.contains(provider) } }
 
     func markRejected(_ provider: CoachProvider) {
         _ = lock.withLock { rejected.insert(provider) }
+        Self.announce()
         Logger.warning("TypeRight: \(provider.rawValue) turned the key down; AI cards stop until a new key is saved", category: Logger.llm)
     }
 }
@@ -404,7 +408,7 @@ enum CoachAIError: LocalizedError {
     case timedOut
     case offline
     case badResponse
-    /// Through our backend: the trial or membership cannot be used now, or the backend could not be reached.
+    /// Through our backend: the membership cannot be used now, or the backend could not be reached.
     /// `MemberError.kind` says which (used up, today's limit, offline, device token …).
     case member(MemberError)
 
