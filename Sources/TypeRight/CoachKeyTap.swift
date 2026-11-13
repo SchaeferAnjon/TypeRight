@@ -3,8 +3,10 @@
 //  TypeRight
 //
 //  While a card is on screen, Tab and Esc can belong to the card: they are taken out of the key
-//  stream so the app being typed in never sees them. Every other key passes through and is
-//  reported, so the card can step aside once the user keeps typing.
+//  stream so the app being typed in never sees them. While the user types along with a card, a
+//  Backspace with nothing typed yet is the card's too (it puts the original back). Every other key
+//  passes through and is reported, so the card can step aside once the user keeps typing; a
+//  modifier held on its own is reported as well (holding ⌥ lists the card's words).
 //
 //  The tap runs on its own thread and decides from a small policy the coach hands it, so no key
 //  anywhere on the Mac waits for TypeRight's main thread. What to do with a key happens afterwards
@@ -21,14 +23,19 @@ enum CoachKey: Equatable, Sendable {
     case escape
     /// A character typed on: a letter, digit, punctuation or space, with or without Shift.
     case typed
-    /// Return, the arrows, the page keys, Home, End and the delete keys (with any modifier), and
+    /// Return, the arrows, the page keys, Home, End, Forward Delete, Backspace with ⌘ ⌃ or ⌥, and
     /// Shift-Tab: the caret went elsewhere or the text next to it changed.
     case moves
     /// Types nothing: function keys, modifier and input mode keys on their own, and shortcuts with
     /// ⌘, ⌃ or ⌥ (a screenshot, copy, switching the input source).
     case typesNothing
+    /// Backspace, with or without Shift (⌥⌫ and ⌘⌫ delete a word or a line: those are `moves`).
+    case deleteBack
+    /// The modifier keys held now changed (pressed or let go); nothing is typed.
+    case modifiers(CoachModifiers)
 
     static func of(keyCode: Int64, flags: CGEventFlags) -> CoachKey {
+        if keyCode == 51, flags.isDisjoint(with: [.maskCommand, .maskControl, .maskAlternate]) { return .deleteBack }
         if movingKeys.contains(keyCode) { return .moves }
         // Every key that types a character has a code below 128; the codes above are the system
         // keys of Apple keyboards (Mission Control, Spotlight, dictation, Globe and the like).
@@ -53,11 +60,58 @@ enum CoachKey: Equatable, Sendable {
     ]
 }
 
+/// Which modifier keys are held, read from a key event's flags.
+enum CoachModifiers: Equatable, Sendable {
+    case none, option, control
+    /// Some other modifier, or more than one.
+    case other
+
+    init(_ flags: CGEventFlags) {
+        let held = flags.intersection([.maskCommand, .maskControl, .maskAlternate, .maskShift, .maskSecondaryFn])
+        if held.isEmpty {
+            self = .none
+        } else if held == .maskAlternate {
+            self = .option
+        } else if held == .maskControl {
+            self = .control
+        } else {
+            self = .other
+        }
+    }
+}
+
+/// The modifier held on its own to list every word on the card (设置 › 快捷键).
+enum CoachHeldKey: String, CaseIterable, Sendable {
+    case option, control
+    /// Not used.
+    case off
+
+    func matches(_ held: CoachModifiers) -> Bool {
+        switch self {
+        case .option: held == .option
+        case .control: held == .control
+        case .off: false
+        }
+    }
+}
+
 /// Which keys the card on screen takes. `tabFrom` is an uptime: a Tab before it passes through.
 struct CoachKeyPolicy: Equatable, Sendable {
     var tab: Bool
     var tabFrom: TimeInterval
     var esc: Bool
+    /// Set while the user types along with the card.
+    var follow: CoachFollowKeys? = nil
+}
+
+/// The keys while the user types along with a card: Tab fills in the rest and Esc puts the original
+/// back, from the first moment (no grace time), and Backspace with nothing typed puts it back too.
+struct CoachFollowKeys: Equatable, Sendable {
+    /// Characters typed so far in the part being typed along. The coach sets it from the field; the
+    /// tap counts on from there, so a quick run of Backspaces stops at the start.
+    var typed: Int
+    /// An input method holds text it has not committed: Tab, Esc and Backspace are its.
+    var composing: Bool
 }
 
 /// The decision itself, kept on the tap thread.
@@ -77,6 +131,22 @@ struct CoachKeyGate: Equatable, Sendable {
     /// Tab and Esc may be the input method's (picking or cancelling a candidate), so they pass.
     mutating func swallows(_ key: CoachKey, at now: TimeInterval) -> Bool {
         guard let policy else { return false }
+        if var follow = policy.follow {
+            defer { self.policy?.follow = follow }
+            switch key {
+            case .tab, .escape: return !follow.composing
+            case .typed:
+                follow.typed += 1
+                return false
+            case .deleteBack:
+                guard !follow.composing else { return false }
+                if follow.typed == 0 { return true }
+                follow.typed -= 1
+                return false
+            case .moves, .typesNothing, .modifiers:
+                return false
+            }
+        }
         let composing = inputMethod && typedSinceShown > 0
         switch key {
         case .tab: return policy.tab && now >= policy.tabFrom && !composing
@@ -84,7 +154,7 @@ struct CoachKeyGate: Equatable, Sendable {
         case .typed:
             typedSinceShown += 1
             return false
-        case .moves, .typesNothing:
+        case .moves, .typesNothing, .deleteBack, .modifiers:
             return false
         }
     }
@@ -136,7 +206,7 @@ final class CoachKeyTap: CoachKeyInput {
                 tap: .cgSessionEventTap,
                 place: .headInsertEventTap,
                 options: .defaultTap,
-                eventsOfInterest: CGEventMask(1 << CGEventType.keyDown.rawValue),
+                eventsOfInterest: CGEventMask(1 << CGEventType.keyDown.rawValue) | CGEventMask(1 << CGEventType.flagsChanged.rawValue),
                 callback: coachKeyTapCallback,
                 userInfo: Unmanaged.passUnretained(box).toOpaque()
             )
@@ -167,6 +237,8 @@ final class CoachKeyTap: CoachKeyInput {
 
 /// What the tap thread touches: the port and the gate behind a lock.
 private final class CoachKeyTapBox: @unchecked Sendable {
+    private static let ownProcess = Int64(ProcessInfo.processInfo.processIdentifier)
+
     private let lock = NSLock()
     private var gate = CoachKeyGate()
     /// Written once on the tap thread before the main thread reads it (after the semaphore).
@@ -182,8 +254,13 @@ private final class CoachKeyTapBox: @unchecked Sendable {
             if let port, lock.withLock({ gate.policy != nil }) { CGEvent.tapEnable(tap: port, enable: true) }
             return Unmanaged.passUnretained(event)
         }
-        guard type == .keyDown else { return Unmanaged.passUnretained(event) }
-        let key = CoachKey.of(keyCode: event.getIntegerValueField(.keyboardEventKeycode), flags: event.flags)
+        // Keys TypeRight posts itself (a paste while writing a fix) are not the user's.
+        guard type == .keyDown || type == .flagsChanged,
+              event.getIntegerValueField(.eventSourceUnixProcessID) != Self.ownProcess
+        else { return Unmanaged.passUnretained(event) }
+        let key: CoachKey = type == .flagsChanged
+            ? .modifiers(CoachModifiers(event.flags))
+            : CoachKey.of(keyCode: event.getIntegerValueField(.keyboardEventKeycode), flags: event.flags)
         let swallowed = lock.withLock { gate.policy == nil ? nil : gate.swallows(key, at: ProcessInfo.processInfo.systemUptime) }
         guard let swallowed else { return Unmanaged.passUnretained(event) }
         DispatchQueue.main.async { [weak owner = self.owner] in

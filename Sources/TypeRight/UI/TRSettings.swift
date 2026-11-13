@@ -280,12 +280,25 @@ struct TRKeySettings: View {
     var translate: KeyboardShortcuts.Name = .typeRightTranslate
     var pause: KeyboardShortcuts.Name = .toggleTextWarden
 
+    @State private var tabFollows = CoachSettings.tabFollows
+    @State private var allWordsKey = CoachSettings.allWordsKey
+
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
             TRGroup(title: "弹框出来时") {
-                TRRow(title: "接受改法", note: "固定的键，不能换") { KeyCap(label: "Tab", look: .fixed) }
-                TRRow(title: "不改，关掉", note: "固定的键，不能换") { KeyCap(label: "Esc", look: .fixed) }
-                TRRow(title: "接着打字", note: "打两个字框就让开，不用按键", last: true) { EmptyView() }
+                TRRow(title: "按 Tab", note: tabFollows
+                    ? "原来的字先拿掉，照着卡上的英文打一遍，打对一个亮一个；再按 Tab 补全，连按两下就是直接换"
+                    : "一按就把改法写进去")
+                {
+                    TRSegmented(options: [(true, "先跟着打"), (false, "直接换")], selection: $tabFollows)
+                        .onChange(of: tabFollows) { _, follows in CoachSettings.tabFollows = follows }
+                }
+                TRRow(title: "不改", note: "出卡时关掉；跟着打的时候放回原来的字") { KeyCap(label: "Esc", look: .fixed) }
+                TRRow(title: "看卡上全部单词", note: "按住不放，0.4 秒后在卡下面列出每个词的音标和意思，松开就收；鼠标停在单词上也能看一个") {
+                    TRSegmented(options: [(CoachHeldKey.option, "⌥"), (.control, "⌃"), (.off, "不用")], selection: $allWordsKey)
+                        .onChange(of: allWordsKey) { _, key in CoachSettings.allWordsKey = key }
+                }
+                TRRow(title: "接着打字", note: "出卡时打两个字框就让开；跟着打的时候打字不让开", last: true) { EmptyView() }
             }
             TRGroup(title: "自己选的键") {
                 TRRow(title: "整句翻译", note: "整句都是中文时，按这个键把这句变成英文") {

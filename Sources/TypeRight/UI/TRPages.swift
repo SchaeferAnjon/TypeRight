@@ -135,6 +135,20 @@ struct TRSpeakButton: View {
     }
 }
 
+/// 自己打的 / 帮你换的 after a notebook line: how the English got into the field.
+struct TRHowTag: View {
+    let how: NotebookEntry.Help
+
+    var body: some View {
+        Text(how.title)
+            .font(.system(size: 12))
+            .foregroundStyle(TR.text2)
+            .padding(.horizontal, 6)
+            .frame(height: 18)
+            .background(TR.fill, in: RoundedRectangle(cornerRadius: 5))
+    }
+}
+
 struct TREmpty: View {
     let text: String
 
@@ -286,8 +300,10 @@ struct TRTodayPage: View {
                         } else {
                             TRDiffText(from: e.from, to: e.to)
                         }
-                        Text(TRMeta.line(e))
-                            .font(.system(size: 12)).foregroundStyle(TR.text2)
+                        HStack(spacing: 8) {
+                            Text(TRMeta.line(e)).font(.system(size: 12)).foregroundStyle(TR.text2).lineLimit(1)
+                            TRHowTag(how: e.how)
+                        }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 16).padding(.vertical, 10)
@@ -415,8 +431,10 @@ struct TRMistakesPage: View {
                 TRDiffText(from: e.from, to: e.to, size: 14)
                 if !e.why.isEmpty { Text(e.why).font(.system(size: 12)).foregroundStyle(TR.text2) }
                 if !e.context.isEmpty { Text(e.context).font(.system(size: 12)).foregroundStyle(TR.text2).italic() }
-                Text(TRMeta.line(e))
-                    .font(.system(size: 12)).foregroundStyle(TR.text2)
+                HStack(spacing: 8) {
+                    Text(TRMeta.line(e)).font(.system(size: 12)).foregroundStyle(TR.text2)
+                    TRHowTag(how: e.how)
+                }
             }
             Spacer()
             if e.mastered {
@@ -459,8 +477,10 @@ struct TRWordsPage: View {
                                 if !w.context.isEmpty { Text(w.context).font(.system(size: 12)).foregroundStyle(TR.text2).italic() }
                             }
                             Spacer()
-                            Text(TRMeta.line(w, kind: false))
-                                .font(.system(size: 12)).foregroundStyle(TR.text2)
+                            HStack(spacing: 8) {
+                                Text(TRMeta.line(w, kind: false)).font(.system(size: 12)).foregroundStyle(TR.text2)
+                                TRHowTag(how: w.how)
+                            }
                         }
                         .padding(.horizontal, 16).padding(.vertical, 12)
                         .contentShape(Rectangle())

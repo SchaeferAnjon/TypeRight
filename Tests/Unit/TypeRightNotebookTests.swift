@@ -41,6 +41,26 @@ final class TypeRightNotebookTests: XCTestCase {
         XCTAssertEqual(notebook.days.first?.clean, 0)
     }
 
+    /// Written before typing along existed: every entry then was TypeRight's replacement.
+    func testOldEntriesCountAsReplaced() throws {
+        try write(#"{"entries":[{"kind":"word","from":"预约","to":"book","date":"2026-11-10T08:00:00Z"}],"days":[]}"#)
+        XCTAssertEqual(CoachNotebook(fileURL: file).entries.first?.how, .replaced)
+    }
+
+    func testHowTheEnglishGotThereIsKeptAndUpdated() throws {
+        let notebook = CoachNotebook(fileURL: file)
+        let book = CoachCardContent.translate(source: "预约", result: CoachTranslation(english: "book", ipa: "", note: ""))
+        notebook.record(book, app: "Chat", context: "", how: .typed)
+        notebook.record(.spelling(wrong: "tomorow", fixes: ["tomorrow"]), app: "Chat", context: "")
+        notebook.flush()
+        let again = CoachNotebook(fileURL: file)
+        XCTAssertEqual(again.words.first?.how, .typed)
+        XCTAssertEqual(again.mistakes.first?.how, .replaced)
+        again.record(book, app: "Chat", context: "", how: .replaced)
+        XCTAssertEqual(again.words.first?.how, .replaced, "the same word again: the latest way counts")
+        XCTAssertEqual(again.words.first?.times, 2)
+    }
+
     func testUnknownKindOfMistakeBecomesOther() throws {
         try write(#"{"entries":[{"kind":"mistake","category":"idioms-2027","from":"a","to":"b","date":"2026-11-10T08:00:00Z"}],"days":[]}"#)
         let notebook = CoachNotebook(fileURL: file)

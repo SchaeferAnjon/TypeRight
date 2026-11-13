@@ -26,14 +26,44 @@ final class FakeCoachHost: TypingCoachHost {
     /// Words the system spell checker marks, with its guesses.
     var misspellings: [String: [String]] = [:]
     private(set) var writes: [(range: Range<Int>, replacement: String)] = []
+    /// Where the caret is; nil means at the end of the text.
+    var caret: Int?
+    var canMoveCaret = true
+    private(set) var caretMoves: [Int] = []
+    /// Characters per line: past this the next character sits on the line below (for the card following the typing).
+    var lineLength = Int.max
 
     func coachAnchor(for range: Range<Int>, in _: String) -> CGRect? {
-        CGRect(x: 100 + CGFloat(range.lowerBound) * 10, y: 500, width: CGFloat(range.count) * 10, height: 16)
+        let line = range.lowerBound / lineLength
+        let column = range.lowerBound - line * (lineLength == .max ? 0 : lineLength)
+        return CGRect(x: 100 + CGFloat(column) * 10, y: 500 - CGFloat(line) * 20, width: CGFloat(range.count) * 10, height: 16)
     }
 
     func coachFallbackAnchor() -> CGRect? { CGRect(x: 10, y: 10, width: 30, height: 30) }
-    func coachCaret(in text: String) -> Int? { text.unicodeScalars.count }
+    func coachCaret(in text: String) -> Int? { min(caret ?? text.unicodeScalars.count, text.unicodeScalars.count) }
     func coachReadText() -> String? { readable ? text : nil }
+    var coachCanMoveCaret: Bool { canMoveCaret }
+
+    func coachSetCaret(_ offset: Int, in _: String) -> Bool {
+        guard canMoveCaret else { return false }
+        caretMoves.append(offset)
+        caret = offset
+        return true
+    }
+
+    /// Types `characters` where the caret is, the way a key reaches the field.
+    func typeAtCaret(_ characters: String) {
+        let at = coachCaret(in: text) ?? 0
+        text = CoachText.replacing(at ..< at, in: text, with: characters)
+        caret = at + characters.unicodeScalars.count
+    }
+
+    /// One Backspace where the caret is.
+    func deleteBack() {
+        guard let at = coachCaret(in: text), at > 0 else { return }
+        text = CoachText.replacing(at - 1 ..< at, in: text, with: "")
+        caret = at - 1
+    }
 
     func coachMisspelling(in word: String) -> CoachMisspelling? {
         misspellings[word].map { CoachMisspelling(range: 0 ..< word.unicodeScalars.count, guesses: $0) }
@@ -46,6 +76,8 @@ final class FakeCoachHost: TypingCoachHost {
         switch write {
         case .writes:
             text = CoachText.replacing(range, in: text, with: replacement)
+            // Like the AX write: the caret right after what was written.
+            caret = range.lowerBound + replacement.unicodeScalars.count
             return .written(text: text, at: range.lowerBound ..< range.lowerBound + replacement.unicodeScalars.count)
         case .ignores:
             return .notWritten
@@ -85,7 +117,25 @@ final class FakeCardDisplay: CoachCardDisplay {
         return true
     }
 
-    func hide() { visible = nil }
+    /// The card's typing-along state as last shown, and every place it moved to.
+    private(set) var follow: CoachFollow?
+    private(set) var moves: [CGRect] = []
+    private(set) var allWords = false
+
+    func follow(_ state: CoachFollow?, anchor: CGRect?) -> Bool {
+        guard visible != nil else { return false }
+        follow = state
+        if let anchor { moves.append(anchor) }
+        return true
+    }
+
+    func showAllWords(_ shown: Bool) { allWords = shown }
+
+    func hide() {
+        visible = nil
+        follow = nil
+        allWords = false
+    }
 }
 
 @MainActor
@@ -264,6 +314,7 @@ class TypeRightCoachTestCase: XCTestCase {
     /// typing does: all but its last characters, then the rest.
     func type(_ text: String, errors: [GrammarErrorModel] = []) {
         clock.lastKeyAt = clock.now
+        host.caret = nil
         let scalars = Array(text.unicodeScalars)
         for error in errors where error.category == "Spelling" && error.end <= scalars.count {
             host.misspellings[CoachText.substring(scalars, error.start ..< error.end)] = error.suggestions
@@ -279,6 +330,7 @@ class TypeRightCoachTestCase: XCTestCase {
 
     /// Types `text` after what is there, one character every `every` seconds, like a person.
     func typeOn(_ text: String, every: TimeInterval = 0.1) {
+        host.caret = nil
         for character in text {
             clock.advance(every)
             clock.lastKeyAt = clock.now
@@ -295,6 +347,7 @@ class TypeRightCoachTestCase: XCTestCase {
 
     /// The field is new or was left and came back: it gets focus empty.
     func focusEmptyField() {
+        host.caret = nil
         host.text = ""
         coach.textDidChange("")
     }
@@ -312,7 +365,13 @@ class TypeRightCoachTestCase: XCTestCase {
         }
     }
 
+    /// Tab Tab: with Tab set to type along (the default) the first takes the original out and the
+    /// second fills in the fix, which is the old replace; set to replace at once, one Tab writes it.
+    /// A first write that failed leaves no card to type along with, and no second Tab.
     func tab() async {
+        keys.press(.tab)
+        await coach.writeTask?.value
+        guard behavior.tabFollows, display.follow != nil else { return }
         keys.press(.tab)
         await coach.writeTask?.value
     }
@@ -640,8 +699,11 @@ final class TypeRightTypingCoachTests: TypeRightCoachTestCase {
         await waitForTabGrace()
         XCTAssertTrue(keys.press(.tab))
         await coach.writeTask?.value
+        XCTAssertTrue(keys.press(.tab), "Tab Tab is the old replace")
+        await coach.writeTask?.value
         XCTAssertEqual(host.text, "I want to book")
         XCTAssertEqual(notebook.words.first?.to, "book")
+        XCTAssertEqual(notebook.words.first?.how, .replaced)
     }
 
     func testSpellingCardRightAfterTypingLetsAnEarlyTabThrough() async throws {
@@ -960,7 +1022,9 @@ final class TypeRightCardKeyTests: TypeRightCoachTestCase {
     func testTabAndEscWorkAsBefore() async throws {
         try showSpellingCard()
         clock.advance(TypingCoach.tabGrace + 0.05)
-        XCTAssertTrue(keys.press(key(48)), "Tab takes the fix")
+        XCTAssertTrue(keys.press(key(48)), "Tab types along")
+        await coach.writeTask?.value
+        XCTAssertTrue(keys.press(key(48)), "Tab again fills in the fix")
         await coach.writeTask?.value
         XCTAssertEqual(host.text, "a meeting room tomorrow ")
 

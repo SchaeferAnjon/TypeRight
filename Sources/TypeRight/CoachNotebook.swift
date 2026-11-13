@@ -2,7 +2,7 @@
 //  CoachNotebook.swift
 //  TypeRight
 //
-//  What the user took with Tab, kept on this Mac only: the mistake book (spelling and sentence
+//  What the user took from a card (typed along, or replaced with Tab), kept on this Mac only: the mistake book (spelling and sentence
 //  fixes, grouped by kind of mistake) and the word book (English learned from Chinese or pinyin).
 //  A point counts as learned once the user writes it right three times without help.
 //
@@ -53,6 +53,21 @@ enum MistakeCategory: String, Codable, CaseIterable, Identifiable {
 struct NotebookEntry: Codable, Identifiable, Equatable {
     enum Kind: String, Codable { case mistake, word }
 
+    /// How the English got into the field.
+    enum Help: String, Codable {
+        /// The user typed it along with the card, every character.
+        case typed
+        /// TypeRight wrote it: Tab Tab, Tab to fill in the rest, or Tab set to replace at once.
+        case replaced
+
+        var title: String {
+            switch self {
+            case .typed: "自己打的"
+            case .replaced: "帮你换的"
+            }
+        }
+    }
+
     var id = UUID()
     var kind: Kind
     var category: MistakeCategory
@@ -69,11 +84,12 @@ struct NotebookEntry: Codable, Identifiable, Equatable {
     /// Times the user later wrote it right on their own.
     var correctUses = 0
     var mastered = false
+    var how: Help = .replaced
 }
 
 extension NotebookEntry {
     private enum CodingKeys: String, CodingKey {
-        case id, kind, category, from, to, why, ipa, context, app, date, times, correctUses, mastered
+        case id, kind, category, from, to, why, ipa, context, app, date, times, correctUses, mastered, how
     }
 
     /// Fields added later or missing get defaults and an unknown kind of mistake becomes "other",
@@ -96,6 +112,8 @@ extension NotebookEntry {
         times = value(.times, 1)
         correctUses = value(.correctUses, 0)
         mastered = value(.mastered, false)
+        // Written before typing along existed: every entry then was replaced by TypeRight.
+        how = Help(rawValue: value(.how, "")) ?? .replaced
     }
 }
 
@@ -183,19 +201,19 @@ final class CoachNotebook: ObservableObject {
 
     // MARK: Recording
 
-    func record(_ content: CoachCardContent, app: String, context: String) {
+    func record(_ content: CoachCardContent, app: String, context: String, how: NotebookEntry.Help = .replaced) {
         let now = Date()
         switch content {
         case let .spelling(wrong, fixes):
             add(NotebookEntry(kind: .mistake, category: .spelling, from: wrong, to: fixes.first ?? "", why: "",
-                              ipa: "", context: context, app: app, date: now))
+                              ipa: "", context: context, app: app, date: now, how: how))
         case let .translate(source, result):
             add(NotebookEntry(kind: .word, category: .other, from: source, to: result.english, why: result.note,
-                              ipa: result.ipa, context: context, app: app, date: now))
+                              ipa: result.ipa, context: context, app: app, date: now, how: how))
         case let .sentence(_, check):
             for change in check.changes where !change.to.isEmpty || !change.from.isEmpty {
                 add(NotebookEntry(kind: .mistake, category: MistakeCategory(aiType: change.type), from: change.from,
-                                  to: change.to, why: change.why, ipa: "", context: check.corrected, app: app, date: now))
+                                  to: change.to, why: change.why, ipa: "", context: check.corrected, app: app, date: now, how: how))
             }
         case .thinking, .failed:
             return
@@ -314,6 +332,7 @@ final class CoachNotebook: ObservableObject {
             entries[i].date = entry.date
             entries[i].context = entry.context
             entries[i].app = entry.app
+            entries[i].how = entry.how
             entries[i].correctUses = 0
             entries[i].mastered = false
         } else {

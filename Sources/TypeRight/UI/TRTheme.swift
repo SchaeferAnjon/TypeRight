@@ -490,8 +490,9 @@ struct TRCardPreview: View {
                     Text("预约").foregroundStyle(TR.text2).font(.system(size: 13))
                     Text("→").foregroundStyle(TR.text3).font(.system(size: 12))
                     Text("book").foregroundStyle(TR.fix).font(.system(size: 16, weight: .semibold))
-                    Text("/bʊk/").foregroundStyle(TR.text2).font(.system(size: 12))
+                    Image(systemName: "speaker.wave.2").foregroundStyle(TR.text2).font(.system(size: 11))
                     KeyCap(label: "Tab")
+                    Text("跟着打").foregroundStyle(TR.text2).font(.system(size: 12))
                 }
                 .padding(.horizontal, 12)
                 .frame(height: 36)

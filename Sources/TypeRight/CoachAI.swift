@@ -179,6 +179,19 @@ enum CoachSettings {
         set { defaults.set(newValue, forKey: "typeright.cardsEnabled") }
     }
 
+    /// 设置 › 快捷键 › 按 Tab: true 先跟着打 (the default: the user types the English along with the
+    /// card; Tab again fills in the rest), false 直接换 (Tab writes the fix at once).
+    static var tabFollows: Bool {
+        get { defaults.string(forKey: "typeright.tab") != "replace" }
+        set { defaults.set(newValue ? "follow" : "replace", forKey: "typeright.tab") }
+    }
+
+    /// The key held alone to list every word on the card.
+    static var allWordsKey: CoachHeldKey {
+        get { CoachHeldKey(rawValue: defaults.string(forKey: "typeright.allWordsKey") ?? "") ?? .option }
+        set { defaults.set(newValue.rawValue, forKey: "typeright.allWordsKey") }
+    }
+
     static var isAIReady: Bool {
         let provider = provider
         if provider == .custom, URL(string: provider.endpoint)?.host == nil { return false }

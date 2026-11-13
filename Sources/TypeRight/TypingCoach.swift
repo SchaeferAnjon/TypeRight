@@ -13,11 +13,17 @@
 //
 //  Cards come one at a time, in the order of the text. An AI answer that arrives while the user is
 //  typing waits for a short stop, so nothing pops up under the words being typed; answers stream in
-//  and the card shows the first useful part. Tab takes the card's fix, Esc keeps the text, the second
-//  character typed makes it step aside, return, an arrow or a delete key closes it; keys that type
-//  nothing (function keys, shortcuts, switching the input source) leave it. A spelling card typed
-//  past right after the word comes back once at the next stop, unless a sentence card covers its
-//  sentence.
+//  and the card shows the first useful part. Esc keeps the text, the second character typed makes
+//  it step aside, return, an arrow or a delete key closes it; keys that type nothing (function keys,
+//  shortcuts, switching the input source, a modifier held on its own) leave it. A spelling card
+//  typed past right after the word comes back once at the next stop, unless a sentence card covers
+//  its sentence.
+//
+//  Tab types along (设置 › 快捷键 › 按 Tab, the default): the Chinese or the misspelled word goes,
+//  the card stays, and each character the user types right lights up on it; a sentence card goes
+//  through its changed words one by one. Tab again fills in the rest (so Tab Tab is the old
+//  replace), Esc or Backspace at the start puts the original back, return, an arrow, a click or
+//  another field ends it and keeps what was typed. Set to 直接换, Tab writes the fix at once.
 //
 //  What was offered is remembered per field (app and text field), by text and position: a piece
 //  offered (taken, turned down, clicked away, failed, or typed past after a stop) is not offered or
@@ -55,6 +61,10 @@ protocol TypingCoachHost: AnyObject {
     var coachIsComposing: Bool { get }
     /// Reading the field right after a key does not slow this app down.
     var coachReadsOnKeys: Bool { get }
+    /// The caret can be put somewhere in the field (a sentence card is typed along only then).
+    var coachCanMoveCaret: Bool { get }
+    /// Puts the caret at a scalar offset of `text`; false when the app did not take it.
+    func coachSetCaret(_ offset: Int, in text: String) -> Bool
 }
 
 struct CoachMisspelling: Equatable {
@@ -106,10 +116,14 @@ struct CoachBehavior: Equatable {
     var autoTranslateMixed = true
     var pinyinEnabled = true
     var pauseSeconds = 0.5
+    /// Tab types along first (false: Tab replaces at once).
+    var tabFollows = true
+    var allWordsKey = CoachHeldKey.option
 
     static var current: CoachBehavior {
         CoachBehavior(cardsEnabled: CoachSettings.cardsEnabled, autoTranslateMixed: CoachSettings.autoTranslateMixed,
-                      pinyinEnabled: CoachSettings.pinyinEnabled, pauseSeconds: CoachSettings.pauseSeconds)
+                      pinyinEnabled: CoachSettings.pinyinEnabled, pauseSeconds: CoachSettings.pauseSeconds,
+                      tabFollows: CoachSettings.tabFollows, allWordsKey: CoachSettings.allWordsKey)
     }
 }
 
@@ -183,6 +197,10 @@ final class TypingCoach {
     /// After a space or punctuation key, the field is read at these delays until the change shows,
     /// so a card does not wait on an app that is slow to say its text changed.
     static let keyReadDelays: [TimeInterval] = [0.015, 0.045, 0.12]
+    /// A card typed along to the end says what was recorded this long.
+    static let doneSeconds: TimeInterval = 1.6
+    /// The modifier for the card's word list is held alone this long before the list shows.
+    static let holdSeconds: TimeInterval = 0.4
 
     weak var host: TypingCoachHost?
 
@@ -331,6 +349,66 @@ final class TypingCoach {
         }
     }
 
+    /// Typing along with the card on screen.
+    private struct Follow {
+        enum Phase: Equatable {
+            /// TypeRight is writing into the field (taking the original out, filling in, putting it back).
+            case writing
+            case typing
+            /// Recorded; the card says so for a moment.
+            case done
+        }
+
+        /// What a key asked for while the write that starts typing along was under way.
+        enum Asked { case fill, putBack }
+
+        var card: Card
+        var phase = Phase.writing
+        /// The English to type: one for a translation or spelling card, each changed word of a sentence card.
+        var steps: [CoachText.Placement]
+        var step = 0
+        /// The field reads `before` + what was typed + `after` while the user types along.
+        var before: [Unicode.Scalar] = []
+        var after: [Unicode.Scalar] = []
+        var typed: [Unicode.Scalar] = []
+        var composing = false
+        /// The stretch TypeRight works in lies between `head` scalars at the start of the field and
+        /// `tail` at its end: Esc writes `original` over it, Tab writes `filled` over it.
+        var head: Int
+        var tail: Int
+        var original: String
+        var filled: String
+        /// A space TypeRight puts before or after the English (`to预约a` → `to book a`).
+        var lead = ""
+        var trail = ""
+        /// Where the caret was when Tab was pressed, counted from the end of the field: it goes back there.
+        var caretFromEnd: Int
+        /// Where the card sits (the line being typed on).
+        var anchor: CGRect?
+        var asked: Asked?
+        /// Finished with Tab rather than typed to the end.
+        var filledIn = false
+
+        var target: String { steps.indices.contains(step) ? steps[step].to : "" }
+
+        var isSentence: Bool { card.isSentence }
+
+        /// How much of the target was typed right, and where it went wrong.
+        func progress() -> (right: Int, wrongAt: Int?) {
+            let goal = Array(target.unicodeScalars)
+            let typed = typed.map { $0 == "\u{00A0}" ? " " : $0 }
+            var right = 0
+            while right < typed.count, right < goal.count, typed[right] == goal[right] {
+                right += 1
+            }
+            return (right, right < typed.count ? right : nil)
+        }
+    }
+
+    private var follow: Follow?
+    private var heldTimer: CoachTimer?
+    private var allWordsShown = false
+
     private var active: Card?
     /// Cards that came while another card was up or the user was typing, in the order of the text.
     private var pending: [Card] = []
@@ -383,6 +461,7 @@ final class TypingCoach {
             Self.importDevKey()
         #endif
         PinyinDetector.warmUp()
+        CoachDictionary.shared.warmUp()
         MemberService.shared.start()
         UsagePing.shared.start()
         KeyboardShortcuts.onKeyUp(for: .typeRightTranslate) { [weak self] in self?.translateWholeSentence() }
@@ -445,6 +524,14 @@ final class TypingCoach {
         cancelKeyReads()
         if ai.status().isOn { ai.warm() }
 
+        if follow?.phase == .done {
+            // Typing on after the end: the card goes, and the text is looked at as usual.
+            close(.typedOn)
+        }
+        if follow != nil {
+            followTextChanged(text)
+            return
+        }
         if host.coachIsComposing {
             // An input method is composing: nothing pops up and no key is taken until it commits.
             if let card = active, !card.isThinking { close(.typedOn) }
@@ -468,7 +555,7 @@ final class TypingCoach {
             textDidChange(text, source: .analysis)
         }
         latestAnalysis = (text, errors)
-        guard text == latestText, let card = active, case .spelling = card.content else { return }
+        guard follow == nil, text == latestText, let card = active, case .spelling = card.content else { return }
         // The analysis found nothing at the word the system spell checker marked (code, a link, a word
         // the app's own rules allow): the card goes and does not come back.
         let flagged = errors.contains { ($0.category == "Spelling" || $0.category == "Typo") && $0.start < card.range.upperBound && $0.end > card.range.lowerBound }
@@ -481,7 +568,13 @@ final class TypingCoach {
     /// A space or punctuation key went down somewhere: read the field shortly, in case the app is
     /// late to say (or never says) its text changed.
     func wordEndKeyPressed() {
-        guard behavior().cardsEnabled, let host, host.coachIsWatching, host.coachReadsOnKeys else { return }
+        guard behavior().cardsEnabled, let host, host.coachIsWatching else { return }
+        readSoon()
+    }
+
+    /// Reads the field shortly after a key (an app may be late to say its text changed).
+    private func readSoon() {
+        guard let host, host.coachReadsOnKeys else { return }
         cancelKeyReads()
         let before = latestText
         keyReads = Self.keyReadDelays.map { delay in
@@ -508,6 +601,8 @@ final class TypingCoach {
     }
 
     private func forgetField() {
+        // Typing along ends with the field, and nothing more is written into it.
+        follow = nil
         quickTimer?.cancel()
         settleTimer?.cancel()
         pauseTimer?.cancel()
@@ -607,8 +702,8 @@ final class TypingCoach {
 
     /// The translate shortcut: the Chinese sentence at the caret becomes English.
     func translateWholeSentence() {
-        guard behavior().cardsEnabled, let host, host.coachIsWatching else {
-            Logger.info("TypeRight: translate key ignored (cards off, paused or no field)", category: Logger.ui)
+        guard behavior().cardsEnabled, let host, host.coachIsWatching, follow == nil else {
+            Logger.info("TypeRight: translate key ignored (cards off, paused, no field or typing along)", category: Logger.ui)
             return
         }
         if host.coachFieldID != fieldID {
@@ -657,7 +752,7 @@ final class TypingCoach {
     private func spelling(after edit: CoachText.Edit, in scalars: [Unicode.Scalar], behavior: CoachBehavior,
                           seenAt: TimeInterval, keyLatency: TimeInterval, source: ChangeSource)
     {
-        guard edit.inserted > 0, edit.inserted <= Self.typedChunk, let host else { return }
+        guard edit.inserted > 0, edit.inserted <= Self.typedChunk, follow == nil, let host else { return }
         var found: [(mark: CoachMark, fixes: [String])] = []
         for range in CoachText.finishedWords(in: scalars, by: edit) {
             let word = CoachText.substring(scalars, range)
@@ -692,7 +787,7 @@ final class TypingCoach {
     /// What this edit ended: a sentence (its . ? ! or the character right after it was typed) or a
     /// Chinese run (something was typed right after it). Those go to the AI now.
     private func aiTriggers(after edit: CoachText.Edit, in scalars: [Unicode.Scalar], behavior: CoachBehavior) {
-        guard ai.status().isOn else { return }
+        guard ai.status().isOn, follow == nil else { return }
         let typedEnd = edit.start + edit.inserted
         let sentences = CoachText.sentences(in: scalars)
         if behavior.autoTranslateMixed, edit.inserted > 0 {
@@ -726,7 +821,7 @@ final class TypingCoach {
 
     /// The user stopped for a moment: a period at the end ends its sentence; "想一下" may show.
     private func userStoppedBriefly() {
-        guard let host, !host.coachIsComposing else { return }
+        guard let host, !host.coachIsComposing, follow == nil else { return }
         let scalars = Array(latestText.unicodeScalars)
         let finished = Set(CoachText.sentences(in: scalars).filter(\.finished).map(\.range))
         let confirmed = unconfirmed.filter { finished.contains($0) }
@@ -742,7 +837,7 @@ final class TypingCoach {
     /// After a pause: Chinese at the end, pinyin, and every finished sentence typed or edited here
     /// that was not checked yet; the sentence at the caret without . ? ! after a longer one.
     private func userPaused() {
-        guard let host, !host.coachIsComposing else { return }
+        guard let host, !host.coachIsComposing, follow == nil else { return }
         let status = ai.status()
         let text = latestText
         let scalars = Array(text.unicodeScalars)
@@ -788,7 +883,7 @@ final class TypingCoach {
 
     private func userLingered() {
         // A card is up: the sentence waits until the user is done with it and stops again.
-        guard let host, ai.status().isOn, active?.isThinking ?? true else { return }
+        guard let host, ai.status().isOn, active?.isThinking ?? true, follow == nil else { return }
         let scalars = Array(latestText.unicodeScalars)
         let caret = min(host.coachCaret(in: latestText) ?? scalars.count, scalars.count)
         // Only when the caret sits at the end of what was typed.
@@ -967,6 +1062,8 @@ final class TypingCoach {
 
     private enum CloseReason {
         case accepted, declined, typedOn, clickedOutside, textChanged, timeUp, gone
+        /// Typing along ended before the end (return, an arrow, the field changed elsewhere).
+        case leftFollow
     }
 
     /// "想一下" for the newest request still waiting for its first words, unless it was typed past.
@@ -994,7 +1091,7 @@ final class TypingCoach {
 
     /// What waited comes now: the first card in the text, a misspelling typed past, or "想一下".
     private func showNext() {
-        guard active?.isThinking ?? true, let host, !host.coachIsComposing else { return }
+        guard active?.isThinking ?? true, follow == nil, let host, !host.coachIsComposing else { return }
         let card = nextWaiting()
         guard let card else {
             if active == nil { showCapsule() }
@@ -1059,6 +1156,8 @@ final class TypingCoach {
             card.keys = .readOnly
         } else if card.content.acceptText != nil, let app = host.coachAppID, copyOnlyApps.contains(app) {
             card.keys = .copy
+        } else if card.content.acceptText != nil, !canFollow(card) {
+            card.keys = .direct
         }
         guard display.show(card.content, keys: card.keys, anchor: anchor) else {
             // A card nobody can see takes no key and holds no place, as if none had come up. The
@@ -1134,6 +1233,8 @@ final class TypingCoach {
     private func close(_ reason: CloseReason) {
         guard let card = active else { return }
         active = nil
+        follow = nil
+        cancelAllWords()
         closeTimer?.cancel()
         display.hide()
         keys.set(nil)
@@ -1153,13 +1254,27 @@ final class TypingCoach {
     }
 
     private func keyArrived(_ key: CoachKey, swallowed: Bool) {
+        if case let .modifiers(held) = key {
+            heldKeysChanged(held)
+            return
+        }
+        // Any other key while the modifier is held: it was a shortcut, not a look at the words.
+        cancelAllWords()
         guard var card = active else {
             keys.set(nil)
             return
         }
+        if follow != nil {
+            followKey(key, swallowed: swallowed)
+            return
+        }
         switch key {
         case .tab where swallowed:
-            accept(card)
+            if card.keys == .normal {
+                startFollow(card)
+            } else {
+                accept(card)
+            }
         case .escape:
             close(.declined)
             showNext()
@@ -1170,11 +1285,11 @@ final class TypingCoach {
             } else {
                 active = card
             }
-        case .typesNothing:
+        case .typesNothing, .modifiers:
             // A screenshot, copy, a function key, switching the input source. A shortcut that does
             // change the text (paste, undo) closes the card once the text it points at changed.
             break
-        case .tab, .moves:
+        case .tab, .moves, .deleteBack:
             // A Tab that went to the app, return, an arrow, a delete key: the caret is elsewhere.
             close(.typedOn)
         }
@@ -1202,23 +1317,411 @@ final class TypingCoach {
     }
 
     private func finishWrite(_ card: Card, replacement: String, result: CoachWriteResult, app: String, appName: String) {
+        guard case let .written(text, at) = result else {
+            writeFailed(result, at: card.range, replacement: replacement, app: app)
+            return
+        }
+        adopt(text)
+        memory.fix(at)
+        if case let .sentence(_, check) = card.content { memory.checked.insert(Self.sentenceKey(check.corrected)) }
+        notebook.record(card.content, app: appName, context: Self.context(of: card, after: replacement), how: .replaced)
+        showNext()
+    }
+
+    /// A write that did not happen, or came out wrong: the card says so; in an app where it came
+    /// out wrong, Tab copies from then on.
+    private func writeFailed(_ result: CoachWriteResult, at range: Range<Int>, replacement: String, app: String) {
         switch result {
-        case let .written(text, at):
-            _ = take(text)
-            remember(text)
-            memory.fix(at)
-            if case let .sentence(_, check) = card.content { memory.checked.insert(Self.sentenceKey(check.corrected)) }
-            notebook.record(card.content, app: appName, context: Self.context(of: card, after: replacement))
-            showNext()
+        case .written:
+            return
         case .notWritten:
             Logger.warning("TypeRight: write-back left the text unchanged in \(app)", category: Logger.analysis)
-            showFailed("没改成：这个输入框里的字没变，自己改一下吧。", at: card.range)
+            showFailed("没改成：这个输入框里的字没变，自己改一下吧。", at: range)
         case .wrongResult:
             Logger.warning("TypeRight: write-back gave the wrong text in \(app); Tab copies there from now on", category: Logger.analysis)
             copyOnlyApps.insert(app)
             copy(replacement)
             showFailed("这个 App 里没改对。改法「\(replacement)」已复制，粘贴替换一下；之后在这里按 Tab 只复制，不直接改。", at: nil)
         }
+    }
+
+    /// The field reads `text` after a write TypeRight made.
+    private func adopt(_ text: String) {
+        _ = take(text)
+        remember(text)
+    }
+
+    // MARK: - Typing along
+
+    /// Tab types along with this card: the setting says so and, for a sentence card, the app lets
+    /// the caret be put on each changed word.
+    private func canFollow(_ card: Card) -> Bool {
+        guard behavior().tabFollows, let host else { return false }
+        switch card.content {
+        case .translate, .spelling:
+            return true
+        case let .sentence(original, check):
+            return host.coachCanMoveCaret && !CoachText.placements(of: check.changes, in: original).isEmpty
+        case .thinking, .failed:
+            return false
+        }
+    }
+
+    /// The first Tab: the original goes out of the field and the card stays, to be typed along with.
+    private func startFollow(_ card: Card) {
+        guard let host, let english = card.content.acceptText else { return }
+        guard latestTextStill(has: card.piece, at: card.range) else {
+            close(.textChanged)
+            showNext()
+            return
+        }
+        let scalars = Array(latestText.unicodeScalars)
+        let caret = min(host.coachCaret(in: latestText) ?? scalars.count, scalars.count)
+        let tail = scalars.count - card.range.upperBound
+        closeTimer?.cancel()
+        if case let .sentence(original, check) = card.content {
+            follow = Follow(card: card, steps: CoachText.placements(of: check.changes, in: original), head: card.range.lowerBound,
+                            tail: tail, original: original, filled: check.corrected, caretFromEnd: scalars.count - caret)
+        } else {
+            var lead = "", trail = ""
+            if case .translate = card.content {
+                let spaced = CoachText.spaced(english, replacing: card.range, in: scalars)
+                if spaced.hasPrefix(" "), !english.hasPrefix(" ") { lead = " " }
+                if spaced.hasSuffix(" "), !english.hasSuffix(" ") { trail = " " }
+            }
+            // The original was all the field had: a space holds the place, so no write has to go
+            // over nothing or leave nothing behind.
+            if card.range == 0 ..< scalars.count, lead.isEmpty, trail.isEmpty { trail = " " }
+            let step = CoachText.Placement(range: 0 ..< card.range.count, from: card.piece, to: english)
+            follow = Follow(card: card, steps: [step], head: card.range.lowerBound, tail: tail, original: card.piece,
+                            filled: lead + english + trail, lead: lead, trail: trail, caretFromEnd: scalars.count - caret)
+        }
+        Logger.info("TypeRight: typing along with the \(Self.kind(card.content)) card", category: Logger.ui)
+        beginStep()
+    }
+
+    /// Takes the words of the current step out of the field; typing along starts once they are gone.
+    private func beginStep() {
+        guard var follow else { return }
+        let scalars = Array(latestText.unicodeScalars)
+        let place = follow.steps[follow.step]
+        var start = follow.head + place.range.lowerBound
+        for done in follow.steps[..<follow.step] {
+            start += done.to.unicodeScalars.count - done.range.count
+        }
+        let range = start ..< start + place.range.count
+        guard range.upperBound <= scalars.count, CoachText.substring(scalars, range) == place.from else {
+            Logger.info("TypeRight: the words to type along with are not where they were, typing along ends", category: Logger.ui)
+            close(.leftFollow)
+            showNext()
+            return
+        }
+        follow.phase = .writing
+        follow.typed = []
+        follow.after = Array(follow.trail.unicodeScalars) + scalars[range.upperBound...]
+        self.follow = follow
+        keys.set(followPolicy())
+        let id = follow.card.id
+        write(follow.lead + follow.trail, over: range) { [weak self] result in
+            self?.stepWritten(result, cardID: id)
+        }
+    }
+
+    private func stepWritten(_ result: CoachWriteResult, cardID: UUID) {
+        guard var follow, follow.card.id == cardID, follow.phase == .writing, let host else {
+            // Typing along ended while TypeRight was writing: nothing more is written.
+            if case let .written(text, _) = result { adopt(text) }
+            return
+        }
+        guard case let .written(text, at) = result else {
+            close(.leftFollow)
+            writeFailed(result, at: follow.card.range, replacement: follow.target, app: host.coachAppID ?? "")
+            return
+        }
+        adopt(text)
+        let scalars = Array(text.unicodeScalars)
+        let start = min(at.lowerBound + follow.lead.unicodeScalars.count, scalars.count)
+        follow.before = Array(scalars[..<start])
+        follow.phase = .typing
+        follow.anchor = caretAnchor(at: start, in: text) ?? follow.anchor
+        let asked = follow.asked
+        follow.asked = nil
+        self.follow = follow
+        if host.coachCaret(in: text) != start, !host.coachSetCaret(start, in: text) {
+            Logger.info("TypeRight: the app did not take the caret at \(start)", category: Logger.ui)
+        }
+        if follow.target.isEmpty {
+            // A change that only takes words out: TypeRight took them out, nothing to type.
+            stepDone()
+            return
+        }
+        switch asked {
+        case .fill:
+            fill()
+            return
+        case .putBack:
+            putBack()
+            return
+        case nil:
+            break
+        }
+        // A translation or spelling card sits under where the English is typed; a sentence card
+        // stays where it came up, under the sentence, while the caret goes from change to change.
+        guard display.follow(followView(follow), anchor: follow.isSentence ? nil : follow.anchor) else {
+            close(.gone)
+            return
+        }
+        keys.set(followPolicy())
+        followTextChanged(text)
+    }
+
+    /// Compares what is typed between `before` and `after` with the English on the card.
+    private func followTextChanged(_ text: String) {
+        guard var follow, follow.phase == .typing, let host else { return }
+        let scalars = Array(text.unicodeScalars)
+        guard scalars.count >= follow.before.count + follow.after.count, scalars.starts(with: follow.before),
+              scalars.suffix(follow.after.count).elementsEqual(follow.after)
+        else {
+            Logger.info("TypeRight: the field changed outside the part typed along, typing along ends", category: Logger.ui)
+            close(.leftFollow)
+            return
+        }
+        // An input method's letters are not typed yet: only what it commits counts.
+        follow.composing = host.coachIsComposing
+        if !follow.composing { follow.typed = Array(scalars[follow.before.count ..< scalars.count - follow.after.count]) }
+        var moved: CGRect?
+        let end = follow.before.count + follow.typed.count
+        if !follow.isSentence, !follow.typed.isEmpty, let pinned = follow.anchor, let last = host.coachAnchor(for: end - 1 ..< end, in: text),
+           abs(last.midY - pinned.midY) > max(last.height, pinned.height) / 2
+        {
+            // The typing went on to another line: the card follows to it, and stays put along the line.
+            moved = CGRect(x: last.minX, y: last.minY, width: 0, height: last.height)
+            follow.anchor = moved
+        }
+        self.follow = follow
+        keys.set(followPolicy())
+        let progress = follow.progress()
+        if !follow.composing, progress.wrongAt == nil, progress.right == follow.target.unicodeScalars.count {
+            stepDone()
+            return
+        }
+        guard display.follow(followView(follow), anchor: moved) else {
+            close(.gone)
+            return
+        }
+    }
+
+    /// The current step is typed: on to the next changed word, or done.
+    private func stepDone() {
+        guard var follow else { return }
+        if follow.step + 1 < follow.steps.count {
+            follow.step += 1
+            self.follow = follow
+            beginStep()
+        } else {
+            finishFollow(filled: false)
+        }
+    }
+
+    /// Typed to the end or filled in: recorded, the caret back where the user was, the card says so for a moment.
+    private func finishFollow(filled: Bool) {
+        guard var follow, let host else { return }
+        let card = active ?? follow.card
+        let text = latestText
+        let count = text.unicodeScalars.count
+        follow.phase = .done
+        follow.filledIn = filled
+        self.follow = follow
+        let caret = count - follow.caretFromEnd
+        if host.coachCaret(in: text) != caret, !host.coachSetCaret(caret, in: text) {
+            Logger.info("TypeRight: the app did not take the caret back at \(caret)", category: Logger.ui)
+        }
+        memory.fix(follow.head ..< count - follow.tail)
+        let context: String
+        if case let .sentence(_, check) = card.content {
+            memory.checked.insert(Self.sentenceKey(check.corrected))
+            context = check.corrected
+        } else {
+            context = Self.context(of: card, after: follow.target)
+        }
+        notebook.record(card.content, app: host.coachAppName, context: context, how: filled ? .replaced : .typed)
+        Logger.info("TypeRight: typed along to the end (\(filled ? "filled in" : "all typed"))", category: Logger.ui)
+        keys.set(CoachKeyPolicy(tab: false, tabFrom: 0, esc: true))
+        guard display.follow(followView(follow), anchor: nil) else {
+            close(.gone)
+            return
+        }
+        let id = card.id
+        closeTimer?.cancel()
+        closeTimer = clock.after(Self.doneSeconds) { [weak self] in
+            guard let self, self.active?.id == id, self.follow?.phase == .done else { return }
+            self.close(.accepted)
+            self.showNext()
+        }
+    }
+
+    /// Tab again: what is left is written in, a wrong character along with it.
+    private func fill() {
+        guard var follow else { return }
+        let count = latestText.unicodeScalars.count
+        follow.phase = .writing
+        self.follow = follow
+        let id = follow.card.id
+        let filled = follow.filled
+        write(filled, over: follow.head ..< count - follow.tail) { [weak self] result in
+            guard let self else { return }
+            guard self.follow?.card.id == id, case let .written(text, _) = result else {
+                if case let .written(text, _) = result { self.adopt(text) } else if self.follow?.card.id == id {
+                    self.close(.leftFollow)
+                    self.writeFailed(result, at: self.latestTextRange(head: follow.head, tail: follow.tail), replacement: filled,
+                                     app: self.host?.coachAppID ?? "")
+                }
+                return
+            }
+            self.adopt(text)
+            self.finishFollow(filled: true)
+        }
+    }
+
+    /// Esc, or Backspace at the start: the original goes back where it was, and is not offered again.
+    private func putBack() {
+        guard var follow else { return }
+        let count = latestText.unicodeScalars.count
+        follow.phase = .writing
+        self.follow = follow
+        let id = follow.card.id
+        write(follow.original, over: follow.head ..< count - follow.tail) { [weak self] result in
+            guard let self else { return }
+            guard self.follow?.card.id == id, case let .written(text, at) = result else {
+                if case let .written(text, _) = result { self.adopt(text) } else if self.follow?.card.id == id {
+                    self.close(.leftFollow)
+                    self.writeFailed(result, at: self.latestTextRange(head: follow.head, tail: follow.tail), replacement: follow.original,
+                                     app: self.host?.coachAppID ?? "")
+                }
+                return
+            }
+            self.adopt(text)
+            if !follow.isSentence { self.memory.offer(CoachMark(text: follow.original, range: at)) }
+            let caret = text.unicodeScalars.count - follow.caretFromEnd
+            if let host = self.host, host.coachCaret(in: text) != caret, !host.coachSetCaret(caret, in: text) {
+                Logger.info("TypeRight: the app did not take the caret back at \(caret)", category: Logger.ui)
+            }
+            Logger.info("TypeRight: typing along ended with Esc, the original is back", category: Logger.ui)
+            self.close(.declined)
+            self.showNext()
+        }
+    }
+
+    private func latestTextRange(head: Int, tail: Int) -> Range<Int> {
+        let count = latestText.unicodeScalars.count
+        return min(head, count) ..< max(min(head, count), count - tail)
+    }
+
+    private func followKey(_ key: CoachKey, swallowed: Bool) {
+        guard var follow else { return }
+        switch follow.phase {
+        case .done:
+            switch key {
+            case .typesNothing, .modifiers:
+                break
+            default:
+                // Typing on after the end: the card goes at once.
+                close(key == .escape && swallowed ? .declined : .typedOn)
+                showNext()
+            }
+        case .writing:
+            switch key {
+            case .tab:
+                if swallowed { follow.asked = .fill }
+            case .escape, .deleteBack:
+                if swallowed { follow.asked = .putBack }
+            case .moves:
+                close(.leftFollow)
+                return
+            case .typed, .typesNothing, .modifiers:
+                break
+            }
+            self.follow = follow
+        case .typing:
+            switch key {
+            case .tab:
+                if swallowed { fill() }
+            case .escape:
+                if swallowed { putBack() }
+            case .deleteBack:
+                if swallowed { putBack() } else { readSoon() }
+            case .typed:
+                readSoon()
+            case .moves:
+                close(.leftFollow)
+                showNext()
+            case .typesNothing, .modifiers:
+                break
+            }
+        }
+    }
+
+    private func followPolicy() -> CoachKeyPolicy {
+        CoachKeyPolicy(tab: true, tabFrom: 0, esc: true,
+                       follow: CoachFollowKeys(typed: follow?.typed.count ?? 0, composing: follow?.composing ?? false))
+    }
+
+    private func followView(_ follow: Follow) -> CoachFollow {
+        if follow.phase == .done {
+            return CoachFollow(phase: .done(filled: follow.filledIn), target: follow.target,
+                               right: follow.target.unicodeScalars.count, step: follow.step)
+        }
+        let progress = follow.progress()
+        return CoachFollow(phase: .typing, target: follow.target, right: progress.right, wrongAt: progress.wrongAt,
+                           composing: follow.composing, step: follow.step)
+    }
+
+    /// Where the caret at `offset` sits on screen: the right edge of the character before it.
+    private func caretAnchor(at offset: Int, in text: String) -> CGRect? {
+        guard let host else { return nil }
+        let scalars = Array(text.unicodeScalars)
+        if offset > 0, offset <= scalars.count, scalars[offset - 1] != "\n",
+           let before = host.coachAnchor(for: offset - 1 ..< offset, in: text)
+        {
+            return CGRect(x: before.maxX, y: before.minY, width: 0, height: before.height)
+        }
+        if offset < scalars.count, let after = host.coachAnchor(for: offset ..< offset + 1, in: text) {
+            return CGRect(x: after.minX, y: after.minY, width: 0, height: after.height)
+        }
+        return nil
+    }
+
+    private func write(_ replacement: String, over range: Range<Int>, then: @escaping (CoachWriteResult) -> Void) {
+        guard let host else { return }
+        let text = latestText
+        writeTask = Task {
+            let result = await host.coachReplace(range: range, with: replacement, analyzedText: text)
+            then(result)
+        }
+    }
+
+    // MARK: - The card's word list (a modifier held alone)
+
+    private func heldKeysChanged(_ held: CoachModifiers) {
+        guard behavior().allWordsKey.matches(held), let card = active, !card.isThinking, !card.isFailure else {
+            cancelAllWords()
+            return
+        }
+        guard heldTimer == nil, !allWordsShown else { return }
+        heldTimer = clock.after(Self.holdSeconds) { [weak self] in
+            guard let self, self.active != nil else { return }
+            self.heldTimer = nil
+            self.allWordsShown = true
+            self.display.showAllWords(true)
+        }
+    }
+
+    private func cancelAllWords() {
+        heldTimer?.cancel()
+        heldTimer = nil
+        guard allWordsShown else { return }
+        allWordsShown = false
+        display.showAllWords(false)
     }
 
     /// The sentence around the fix as it reads afterwards.

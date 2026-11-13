@@ -217,6 +217,8 @@ final class TypeRightSpeedTests: TypeRightCoachTestCase {
     }
 
     func testRunOnSentencesAreEachCheckedOnceAndComeInOrder() async {
+        // Tab set to replace at once: each card writes its whole sentence.
+        behavior.tabFollows = false
         let first = "i dont now this ."
         let second = "this is vertical, bro."
         let third = "Hope you're doing good."

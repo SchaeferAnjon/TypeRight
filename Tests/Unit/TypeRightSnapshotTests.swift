@@ -80,6 +80,7 @@ final class TypeRightSnapshotTests: XCTestCase {
                 save(window, dark: dark, backdrop: NSColor(white: 0.5, alpha: 0.15), to: dir.appendingPathComponent("card-\(name)-\(dark ? "dark" : "light").png"))
             }
         }
+        drawTypingAlong()
         for dark in [false, true] {
             let state = TRMenuState(app: nil, allPaused: false, ai: .ready(.deepseek), needsAccess: false)
             let header = try XCTUnwrap(TypeRightMenu.shared.build(state: state, notebook: notebook).items.first?.view)
@@ -88,6 +89,52 @@ final class TypeRightSnapshotTests: XCTestCase {
             save(window, dark: dark, to: dir.appendingPathComponent("menu-header-\(dark ? "dark" : "light").png"))
         }
         draw(KeyCapSheet().padding(20).background(TR.bg), nil, "keycaps")
+    }
+
+    /// The card while the user types along with it, and the word layer (2026-11-13, direction B).
+    private func drawTypingAlong() {
+        let english = "a mix of wind and snow"
+        let translation = CoachCardContent.translate(source: "风雪交加", result: CoachTranslation(
+            english: english, ipa: "", note: "用来说风雪同时出现的天气；若只想说下大雪就用 “heavy snow”，只想说大风就用 “strong wind”。"
+        ))
+        let sentence = CoachCardContent.sentence(original: "Yesterday I go to the office because I has a question.", check: CoachSentenceCheck(
+            ok: false, corrected: "Yesterday I went to the office because I had a question.",
+            changes: [.init(from: "go", to: "went", why: "yesterday 说的是过去，动词都用过去式：go 变 went，has 变 had。", type: "tense"),
+                      .init(from: "has", to: "had", why: "", type: "tense")]
+        ))
+        let spelling = CoachCardContent.spelling(wrong: "tomorow", fixes: ["tomorrow", "todorov", "tomaro"])
+        // The spot of "mix" on the translation card: the mouse rests on it.
+        let mixSpot = 10_000_002
+        let states: [(String, CoachCardContent, CoachFollow?, Int?)] = [
+            ("translate-hover", translation, nil, mixSpot),
+            ("translate-typing", translation, CoachFollow(target: english, right: 6), nil),
+            ("translate-wrong", translation, CoachFollow(target: english, right: 3, wrongAt: 3), nil),
+            ("translate-composing", translation, CoachFollow(target: english, right: 2, composing: true), nil),
+            ("translate-done", translation, CoachFollow(phase: .done(filled: false), target: english), nil),
+            ("spelling-typing", spelling, CoachFollow(target: "tomorrow", right: 4), nil),
+            ("spelling-filled", spelling, CoachFollow(phase: .done(filled: true), target: "tomorrow"), nil),
+            ("sentence", sentence, nil, nil),
+            ("sentence-typing", sentence, CoachFollow(target: "had", right: 1, step: 1), nil),
+            ("sentence-done", sentence, CoachFollow(phase: .done(filled: false), target: "had", step: 1), nil),
+        ]
+        for (name, content, follow, hot) in states {
+            draw(CoachCardView(content: content, tail: CoachTailPlacement(pointsUp: true, x: 20), follow: follow, hot: hot), nil, "follow-\(name)")
+        }
+        let mix = CoachWordInfo(word: "mix", ipa: "/mɪks/", senses: [.init(pos: "v.", meaning: "使…混合；调制"), .init(pos: "n.", meaning: "混合物；混合料")],
+                                status: .found)
+        let words: [(String, CoachWordLayerView.Mode)] = [
+            ("mix", .word(mix)),
+            ("went", .word(CoachWordInfo(word: "went", ipa: "/wɛnt/", senses: [.init(pos: "v.", meaning: "go 的过去式：去；进入某处")], status: .found))),
+            ("not-found", .word(CoachWordInfo(word: "Huang", ipa: "", senses: [], status: .notFound))),
+            ("no-dictionary", .word(CoachWordInfo(word: "mix", ipa: "", senses: [], status: .noDictionary))),
+            ("list", .list([mix, CoachWordInfo(word: "wind", ipa: "/wɪnd/", senses: [.init(pos: "n.", meaning: "风；趋势")], status: .found),
+                            CoachWordInfo(word: "snow", ipa: "/snoʊ/", senses: [.init(pos: "n.", meaning: "雪；“雪花”"), .init(pos: "v.", meaning: "下雪")],
+                                          status: .found)], key: "⌥")),
+        ]
+        for (name, mode) in words {
+            let tail: CoachTailPlacement? = if case .word = mode { CoachTailPlacement(pointsUp: true, x: 26) } else { nil }
+            draw(CoachWordLayerView(mode: mode, tail: tail), nil, "word-\(name)")
+        }
     }
 
     // MARK: What changed in this round (light)

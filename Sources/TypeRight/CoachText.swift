@@ -200,6 +200,20 @@ enum CoachText {
     /// near where the previous one was, never overlapping another. Returns the indices of the edits
     /// that found their place; the others are left out of the sentence.
     static func applying(_ edits: [(from: String, to: String)], to original: String) -> (text: String, placed: [Int]) {
+        let spots = spots(of: edits, in: original)
+        var text = ""
+        var at = original.startIndex
+        for spot in spots {
+            text += original[at ..< spot.range.lowerBound]
+            text += spot.to
+            at = spot.range.upperBound
+        }
+        text += original[at...]
+        return (text, spots.map(\.index).sorted())
+    }
+
+    /// Where `applying` puts each edit in `original`, in the order of the text.
+    private static func spots(of edits: [(from: String, to: String)], in original: String) -> [(range: Range<String.Index>, to: String, index: Int)] {
         var spots: [(range: Range<String.Index>, to: String, index: Int)] = []
         var cursor = original.startIndex
         for (index, edit) in edits.enumerated() where !edit.from.isEmpty && edit.from != edit.to {
@@ -214,16 +228,26 @@ enum CoachText {
             spots.append((found, edit.to, index))
             cursor = found.upperBound
         }
-        spots.sort { $0.range.lowerBound < $1.range.lowerBound }
-        var text = ""
-        var at = original.startIndex
-        for spot in spots {
-            text += original[at ..< spot.range.lowerBound]
-            text += spot.to
-            at = spot.range.upperBound
+        return spots.sorted { $0.range.lowerBound < $1.range.lowerBound }
+    }
+
+    /// One change of a sentence card where it sits in the original sentence: `range` (scalar offsets)
+    /// becomes `to`. A change that only takes words out has an empty `to`.
+    struct Placement: Equatable {
+        var range: Range<Int>
+        var from: String
+        var to: String
+    }
+
+    /// The card's changes where they sit in `original`, in the order of the text, placed the same
+    /// way the corrected sentence was made. Typing along goes from one to the next.
+    static func placements(of changes: [CoachSentenceCheck.Change], in original: String) -> [Placement] {
+        let scalars = original.unicodeScalars
+        return spots(of: changes.map { ($0.from, $0.to) }, in: original).map { spot in
+            let start = scalars.distance(from: scalars.startIndex, to: spot.range.lowerBound)
+            let length = scalars.distance(from: spot.range.lowerBound, to: spot.range.upperBound)
+            return Placement(range: start ..< start + length, from: String(original[spot.range]), to: spot.to)
         }
-        text += original[at...]
-        return (text, spots.map(\.index).sorted())
     }
 
     /// A word taken out takes one space with it, so `I very like it` becomes `I like it`.

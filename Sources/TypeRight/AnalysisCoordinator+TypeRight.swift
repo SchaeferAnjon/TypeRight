@@ -110,7 +110,29 @@ extension AnalysisCoordinator: TypingCoachHost {
 
     /// Writes the fix with TextWarden's per-app methods, then reads the field until it shows the fix
     /// (keyboard and paste methods land a moment later). Typing that follows the fix is allowed.
+    /// Nothing written over text (typing along takes the Chinese out) or text written into nothing
+    /// (Esc puts it back with nothing typed) takes the character before it along: a paste of nothing
+    /// leaves the selection as it was, and an empty range cannot be selected and checked.
     func coachReplace(range: Range<Int>, with replacement: String, analyzedText: String) async -> CoachWriteResult {
+        guard range.isEmpty || replacement.isEmpty else { return await replace(range: range, with: replacement, analyzedText: analyzedText) }
+        let scalars = Array(analyzedText.unicodeScalars)
+        if range.lowerBound > 0, range.upperBound <= scalars.count {
+            let before = String(scalars[range.lowerBound - 1])
+            let result = await replace(range: range.lowerBound - 1 ..< range.upperBound, with: before + replacement, analyzedText: analyzedText)
+            guard case let .written(text, at) = result else { return result }
+            return .written(text: text, at: at.lowerBound + 1 ..< at.upperBound)
+        }
+        if range.upperBound < scalars.count {
+            let after = String(scalars[range.upperBound])
+            let result = await replace(range: range.lowerBound ..< range.upperBound + 1, with: replacement + after, analyzedText: analyzedText)
+            guard case let .written(text, at) = result else { return result }
+            return .written(text: text, at: at.lowerBound ..< at.upperBound - 1)
+        }
+        Logger.info("TypeRight: nothing next to the write to take along, not writing", category: Logger.analysis)
+        return .notWritten
+    }
+
+    private func replace(range: Range<Int>, with replacement: String, analyzedText: String) async -> CoachWriteResult {
         let probe = GrammarErrorModel(start: range.lowerBound, end: range.upperBound, message: "TypeRight",
                                       severity: .error, category: "TypeRight", lintId: "TypeRight", suggestions: [replacement])
         guard let before = coachReadText(),
@@ -191,6 +213,37 @@ extension AnalysisCoordinator: TypingCoachHost {
         default: "en_US"
         }
         return NSSpellChecker.shared.availableLanguages.contains(code) ? code : "en"
+    }
+
+    /// Whether the app lets TypeRight put the caret somewhere (needed to type a sentence card's changes along).
+    var coachCanMoveCaret: Bool {
+        guard let element = textMonitor.monitoredElement, let bundleID = monitoredContext?.bundleIdentifier else { return false }
+        let call = AXClient.perform(bundleID: bundleID, attribute: "TypeRight.canMoveCaret") { () -> Bool in
+            var settable: DarwinBoolean = false
+            return AXUIElementIsAttributeSettable(element, kAXSelectedTextRangeAttribute as CFString, &settable) == .success && settable.boolValue
+        }
+        return call?.value ?? false
+    }
+
+    /// Puts the caret at a scalar offset of `text` (the analysed text; parsers that drop leading
+    /// text are moved forward by what they dropped).
+    func coachSetCaret(_ offset: Int, in text: String) -> Bool {
+        guard let element = textMonitor.monitoredElement, let bundleID = monitoredContext?.bundleIdentifier else { return false }
+        let shift = contentParserFactory.parser(for: bundleID).textReplacementOffset
+        let call = AXClient.perform(bundleID: bundleID, attribute: "TypeRight.setCaret") { () -> Bool in
+            var fieldText = text
+            if shift > 0 {
+                var value: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &value) == .success,
+                      let raw = value as? String else { return false }
+                fieldText = raw
+            }
+            guard let index = TextIndexConverter.scalarIndexToStringIndex(offset + shift, in: fieldText) else { return false }
+            var caret = CFRange(location: fieldText.utf16.distance(from: fieldText.startIndex, to: index), length: 0)
+            guard let value = AXValueCreate(.cfRange, &caret) else { return false }
+            return AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, value) == .success
+        }
+        return call?.value ?? false
     }
 
     /// Apps that read slowly through Accessibility are only read when they say their text changed.
