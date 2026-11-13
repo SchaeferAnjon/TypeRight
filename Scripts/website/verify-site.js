@@ -149,8 +149,9 @@ async function flows() {
     await page.goBack(); await page.waitForTimeout(300);
     if (!await page.isVisible('#hdemo')) throw new Error('back did not return home');
     await page.click('.foot a[data-go="privacy"]'); await page.waitForTimeout(300);
-    const lead = await page.textContent('.doc .lead');
-    if (!/first 100 new Macs/.test(lead)) throw new Error('privacy lead missing the reason for counting: ' + lead);
+    // no free checks and no anonymous check-in any more (2026-11-13): the privacy page must not promise either
+    const doc = await page.textContent('.doc');
+    if (/first 100|free checks|check-in/i.test(doc)) throw new Error('privacy page still mentions free checks or the check-in');
     await page.click('.toc a[data-go="privacy#d10"]'); await page.waitForTimeout(900);
     const top = await page.evaluate(() => document.getElementById('d10').getBoundingClientRect().top);
     if (top < 0 || top > 200) throw new Error('contents link did not scroll to its section, top=' + top);
@@ -160,7 +161,7 @@ async function flows() {
   await step('redirect pages land on their page', async () => {
     const { ctx } = await context();
     const page = await ctx.newPage(); watch(page, 'redirects');
-    for (const [file, sel] of [['pricing.html', '#persona'], ['guide.html', '.doc [data-part="拿 Key 步骤"]'], ['privacy.html', '.doc .lead'], ['refund.html', '#d0'], ['terms.html', '#d7']]) {
+    for (const [file, sel] of [['pricing.html', '#persona'], ['guide.html', '.doc [data-part="拿 Key 步骤"]'], ['privacy.html', '.doc[data-part="隐私政策"]'], ['refund.html', '#d0'], ['terms.html', '#d6']]) {
       await page.goto(base + file); await page.waitForURL(/index\.html#page=|\/#page=/); await page.waitForTimeout(300);
       if (!await page.isVisible(sel)) throw new Error(`${file} did not show ${sel} (at ${page.url()})`);
     }

@@ -1,188 +1,91 @@
-# TextWarden: Private Grammar Checker for macOS
+<h1 align="center">TypeRight</h1>
 
-[![CI](https://github.com/PhilipSchmid/textwarden/actions/workflows/ci.yml/badge.svg)](https://github.com/PhilipSchmid/textwarden/actions/workflows/ci.yml)
-[![Latest release](https://img.shields.io/github/v/release/PhilipSchmid/textwarden)](https://github.com/PhilipSchmid/textwarden/releases/latest)
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![macOS](https://img.shields.io/badge/macOS-14%2B-brightgreen.svg)](https://github.com/PhilipSchmid/textwarden/releases/latest)
-
-TextWarden is a free, open-source grammar checker and writing assistant for macOS. It checks English spelling, grammar, punctuation, and style while you type.
-
-**Nothing you type is sent anywhere.** Your writing never leaves your Mac: not for grammar checking, not for AI features, and not for analytics. There is no account to create and no subscription.
+<p align="center"><b>Mac 菜单栏上的英文打字助手：拼错一个词、不会说先打了中文、一句打完语法不对，它在那个词旁边弹一张小卡，按 Tab 改好，按 Esc 不改。</b></p>
 
 <p align="center">
-  <img src="Assets/textwarden_logo.svg" alt="TextWarden macOS grammar checker logo" width="320" height="320">
+<a href="https://github.com/SchaeferAnjon/TypeRight/releases/latest"><b>下载 Mac 版</b></a> · Apple 芯片和 Intel 通用 · macOS 14 以上 · <a href="https://typeright.us-cloud.uk">官网</a> · <a href="#english">English</a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/PhilipSchmid/textwarden/releases/latest">
-    <img src="Assets/download-macos-button.png" alt="Download TextWarden for macOS" width="180">
-  </a>
+<a href="https://github.com/SchaeferAnjon/TypeRight/releases/latest"><img src="https://img.shields.io/github/v/release/SchaeferAnjon/TypeRight?label=latest&color=1d1d1f" alt="最新版本"></a>
+<a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0--or--later-1d1d1f" alt="GPL-3.0-or-later"></a>
+<img src="https://img.shields.io/badge/macOS-14%2B-1d1d1f" alt="macOS 14+">
 </p>
 
-> [!NOTE]
-> TextWarden is under active development. Apps do not all share text with macOS in the same way, so underlines and corrections may work differently from one app to another. If something breaks, please [open a bug report](https://github.com/PhilipSchmid/textwarden/issues/new/choose).
+<!-- 截图：首屏放一张小卡在真 App 里弹出来的截图（中文变英文那张），发版前补上 -->
 
-## Why TextWarden?
+## 它做什么
 
-- **Your writing stays on your Mac:** Grammar checks run locally with [Harper](https://github.com/Automattic/harper), and optional AI features use Apple Intelligence on your Mac. TextWarden never uploads your text or prompts.
-- **Works in many Mac apps:** Check writing in Apple apps, browsers, chat apps, web-based editors, and Microsoft Office.
-- **Fast feedback:** TextWarden underlines errors when an app provides the location of each word. Otherwise, a small floating indicator shows the suggestions.
-- **A rewrite without leaving your app:** Improve selected text using your preferred writing style, then review the changes before applying them.
-- **No account or subscription:** Download the app and grant Accessibility permission. Your usage statistics and custom dictionary stay on your Mac.
+在任何 App 里照常打英文，下面三种时刻它自己弹一张小卡，不用去点下划线：
 
-## Features
+| 你打到 | 小卡里 | 你做什么 |
+|---|---|---|
+| `I want to 预约`（不会说，先打了中文；英文状态下打拼音 `yuyue` 也认得） | 预约 → **book** /bʊk/，点喇叭能听发音 | Tab，`预约` 换成 `book` |
+| `a meeting room tomorow`（拼错一个词） | tomorow → **tomorrow** | Tab 改好；不理它接着打，卡自己让开 |
+| `because I has a question.`（一句打完） | 整句改好的版本，改动处标出来，加一句讲解：主语是 I，用 have | Tab 整句换掉 |
 
-- Real-time English grammar, spelling, punctuation, capitalization, and word-choice suggestions
-- One-click corrections and a Fix All command for clear-cut errors
-- American, British, Canadian, Australian, and Indian English dialects
-- Custom vocabulary, the macOS learned-word dictionary, and optional word lists for technical terms, names, brands, abbreviations, and slang
-- Optional detection of 69 selectable non-English languages to avoid false positives in multilingual documents
-- Readability scores and sentence-complexity underlines for text with at least 30 words
-- [Browser extension preview](#browser-extension-preview) with precise underlines and native writing tools
-- Per-app pause controls, per-app underline controls, and website exclusions
-- A built-in Sketch Pad for focused drafting and revision
-- Optional automatic updates, with a separate channel for experimental releases
+- 拼写和基础语法在你的 Mac 上用开源的 [Harper](https://github.com/Automattic/harper) 查，不联网，不算次数。
+- 中文变英文和整句检查要用 AI，用法见下面「三种用法」。
+- 讲解默认用简体中文，设置里能换成繁體中文、English、日本語、한국어、Deutsch、Français、Español、Italiano。
+- 你按 Tab 接受的改法记进错题本，从中文变来的词记进生词本，同一个点用对 3 次算会了；主窗口的「进步」看最近 14 天。
+- 能用的地方：微信、浏览器、邮件、备忘录、文档、给 AI 写提示词的地方。每个 App 一个开关，终端默认关着；菜单栏里能在当前 App 暂停，或全部暂停 1 小时。
 
-### Apple Intelligence writing tools
+<!-- 截图：菜单栏菜单、主窗口「今天」、设置「AI 服务商」各一张，发版前补上 -->
 
-On macOS 26 or later, a compatible Mac with an Apple M-series chip can use Apple's built-in, on-device AI for:
+## 下载安装
 
-- Style suggestions for clear, concise, formal, casual, or business writing
-- Quick Rewrite, which proposes improvements to selected text using your configured writing style
-- AI Compose, which drafts from your instructions or rewrites selected text with a specific instruction
-- Sentence simplification and readability tips
-- Quick actions in Sketch Pad for professional, friendly, concise, or refined rewrites
+1. 从 [GitHub Releases](https://github.com/SchaeferAnjon/TypeRight/releases/latest) 下载 `TypeRight-<版本>-Universal.dmg`，把 TypeRight 拖进「应用程序」，打开。
+2. 第一次打开如果提示无法验证开发者：打开「系统设置 › 隐私与安全性」，拉到最下面，点「仍要打开」。
+3. 跟着引导给「辅助功能」权限：TypeRight 要靠它读到你正在打的那一句，并在你按 Tab 时把改法写回去。
+4. 选一种用法，然后回到任何 App 打一句英文试试。
 
-These features are off by default. Grammar checking, spell checking, custom dictionaries, language detection, and readability scoring do not require Apple Intelligence.
+更新：设置 › 高级 › 关于，点「检查更新」，或打开「打开时自动检查更新」。
 
-### Quick Rewrite
+## 三种用法
 
-Quick Rewrite uses Apple Intelligence to suggest changes to selected text in supported apps, following your writing style from **Preferences → Style**. Compare the original and rewritten text before applying; nothing changes without your approval. AI can change meaning, so review the result carefully.
+| | 怎么开始 | 花多少 |
+|---|---|---|
+| **只用本机检查** | 设置里把用法选成「只用本机检查」 | 免费。只查拼写和基础语法，什么都不发出去；没有中文变英文和整句检查 |
+| **自带 Key** | 在「设置 › AI 服务商」里点一家，粘贴你的 API Key（[5 分钟图文教程](https://typeright.us-cloud.uk/#page=guide)） | 永久免费，不限次数；服务商按用量向你自己的账户收费，用 DeepSeek 查一句约 0.003 元 |
+| **会员** | 不用申请 Key：在「设置 › 账号与会员」里开会员，浏览器打开 Stripe 付款页，付完回到应用就生效 | 每月 ¥9.9 / $1.99，或每年 ¥99 / $19.9，Stripe 自动续费，随时取消；人民币也能用微信一次买 1 个月或 1 年，不自动续费。每天 500 次 AI 检查（一个用到 AI 的小卡算一次），按 UTC 日期重置；一个授权码最多 2 台 Mac |
 
-See [Quick Rewrite configuration](CONFIGURATION.md#quick-rewrite) for setup, shortcuts, and limits.
+<!-- 会员这一行按上线时的「账号与会员」界面核对，见 docs/RELEASE.md -->
 
-## Requirements
+自带 Key 能选 DeepSeek、智谱 GLM、通义千问、Kimi、豆包、OpenAI、Gemini、Claude、OpenRouter，或任何兼容 OpenAI 的接口（「自定义」）。每家的 Key 分开存在 macOS 的钥匙串里。
 
-- macOS 14 Sonoma or later
-- An Intel or Apple Silicon Mac
-- Accessibility permission, so TextWarden can read and update text in other apps
+## 隐私
 
-Apple Intelligence features additionally require macOS 26, a supported Mac with an Apple M-series chip, and Apple Intelligence enabled in System Settings.
+拼写和基础语法在你的 Mac 上查，不联网；用到 AI 时只发你正在打的这一句：自带 Key 时直接发给你选的服务商，会员时经我们的服务器转给 DeepSeek，服务器不存你打的字。系统标成密码的输入框不读，密码管理器和钥匙串访问整个不看。全文见[隐私政策](https://typeright.us-cloud.uk/#page=privacy)。
 
-## Install TextWarden
+## 从源码编译
 
-1. Download the latest TextWarden installer (`.dmg`) from [GitHub Releases](https://github.com/PhilipSchmid/textwarden/releases/latest).
-2. Drag TextWarden into the Applications folder and open it.
-3. Grant Accessibility permission when macOS asks.
-4. Start typing in a supported app.
+需要 Xcode 26 或更新、用 [rustup](https://rustup.rs/) 装的 Rust，以及两种芯片的 Rust 目标：
 
-The download works on both Intel and Apple Silicon Macs. To avoid overlapping suggestions, turn off the other app's built-in spelling and grammar checker when you use TextWarden there.
+```bash
+rustup target add x86_64-apple-darwin aarch64-apple-darwin
+make build      # 先编 Rust 的语法引擎（GrammarEngine），再用 Xcode 编 App
+make run        # 编好、换掉 /Applications/TypeRight.app、重新打开
+make test       # Rust 和 Swift 的单元测试
+```
 
-See the [Configuration Guide](CONFIGURATION.md) for every setting and the [Troubleshooting Guide](TROUBLESHOOTING.md) if the app, indicator, or underlines do not behave as expected.
+Xcode 工程和 scheme 还叫 TextWarden，编出来的是 `TypeRight.app`。工程用的是作者的开发者团队签名；自己编时在 Xcode 的 Signing & Capabilities 里换成你的 Team，或者不签名：`xcodebuild -project TextWarden.xcodeproj -scheme TextWarden -configuration Release CODE_SIGNING_ALLOWED=NO build`。更多细节见 [BUILD.md](BUILD.md)（沿用 TextWarden 的英文文档）。
 
-## Browser Extension (Preview)
+## 许可证和致谢
 
-The extension adds precise underlines and TextWarden’s writing tools to Chrome, Brave, Firefox, Zen, and Safari. Your writing stays on your Mac. Google Docs and complex web editors are not supported yet.
+TypeRight 按 [GPL-3.0](LICENSE)（或更高版本）开源。
 
-Use a preview-enabled TextWarden build and open Preferences → Browser → Install Extension:
+TypeRight 的底子是 Philip Schmid 的 [TextWarden](https://github.com/PhilipSchmid/textwarden)，按 Apache-2.0 发布，许可全文保留在 [LICENSES/Apache-2.0-TextWarden.txt](LICENSES/Apache-2.0-TextWarden.txt)，改了哪些见 [NOTICE](NOTICE)。谢谢 TextWarden 做好了最难的部分：用辅助功能在各个 App 里读写文字、为每个 App 单独适配、算出每个词在屏幕上的位置。TextWarden 的名字和标志归它的作者，TypeRight 和 TextWarden 项目没有关联。
 
-- Chrome / Brave: Enable Developer mode and Load unpacked from the revealed folder.
-- Firefox / Zen: Load Temporary Add-on in `about:debugging` and select `manifest.json`. Repeat after each browser restart.
-- Safari: Enable the bundled extension in Safari → Settings → Extensions. Signed, notarized builds need no Developer mode.
+拼写和语法检查用的是 Automattic 的 [Harper](https://github.com/Automattic/harper)（Apache-2.0），自动更新用的是 [Sparkle](https://sparkle-project.org)（MIT）。
 
-Click the toolbar feather on a page to start checking. Installation is manual during the preview; it is not listed in extension stores. See the [extension guide](BrowserExtension/README.md) for setup and privacy details.
+---
 
-## How It Works
+<h2 id="english">English</h2>
 
-After you grant permission, TextWarden reads the text field you are typing in and checks it locally with the bundled Harper grammar checker. Suggestions appear as underlines or in a small floating indicator beside the app. If you enable **Ignore selected languages**, TextWarden uses local language detection to skip English grammar checks only in passages it identifies confidently as one of your selected languages.
+TypeRight is an English typing assistant in the Mac menu bar. Misspell a word, type Chinese (or pinyin) where you don't know the English word, or finish a sentence with a grammar mistake, and a small card pops up next to the word. Press Tab to take the fix, Esc to leave it. Explanations are in Simplified Chinese by default and can be switched to eight other languages.
 
-When Apple Intelligence features are enabled, TextWarden gives the current text or selection to Apple's on-device AI. TextWarden does not operate a grammar or AI server.
-
-## Supported Apps
-
-TextWarden is tuned for the apps below. Some apps give macOS less information about their text fields than others, so the exact experience varies.
-
-| Application | Grammar checking | Visual underlines |
-| --- | --- | --- |
-| Slack | Full | Full |
-| Claude | Full | Full |
-| ChatGPT | Full | Full |
-| Perplexity | Full | Full |
-| Safari, Chrome, and Brave | Full[^extension] | Extension preview[^extension] |
-| Firefox and Zen | Full[^extension][^gecko] | Extension preview[^extension] |
-| Comet | Full | Indicator only[^browsers] |
-| Apple Mail | Full | Full |
-| Apple Notes | Full | Full |
-| Apple Messages | Full | Full |
-| Apple Calendar | Full | Full |
-| Apple Pages | Full | Full |
-| Apple Reminders | Full | Full |
-| TextEdit | Full | Full |
-| Notion | Full | Partial[^notion] |
-| Telegram | Full | Full |
-| WhatsApp | Full | Full |
-| Webex | Full | Full |
-| Microsoft Word | Full | Full |
-| Microsoft PowerPoint | Notes only[^powerpoint] | Notes only[^powerpoint] |
-| Microsoft Outlook | Full | Full |
-| Microsoft Teams | Full | Full |
-| Proton Mail | Full | Full |
-| Microsoft Excel | Not supported | Not available |
-
-[^notion]: Notion does not make every text block available to macOS at once, so some errors appear in the indicator without an underline. See [Notion support notes](docs/applications/NOTION.md).
-[^powerpoint]: PowerPoint lets TextWarden read speaker notes, but not text boxes on slides. See [PowerPoint support notes](docs/applications/POWERPOINT.md).
-[^browsers]: Without an extension, browser checking uses macOS Accessibility and shows the floating indicator instead of precise underlines. Comet has no extension preview.
-[^extension]: Browser support covers text fields and simple rich-text editors; Google Docs and complex web editors are not supported yet. Precise underlines require the [extension preview](#browser-extension-preview), activated on the page through its toolbar.
-[^gecko]: Without the extension, Firefox and Zen can also show suggestions in read-only fields because of a [browser accessibility bug](https://bugzilla.mozilla.org/show_bug.cgi?id=1995330).
-
-Website editors vary, especially editors with formatting controls. Before TextWarden reads text in an unrecognized app, it asks whether you want to try it safely or keep it paused. A safe trial uses the floating indicator and copy-only fixes; underlines and direct edits stay off. You can change this choice later in **Preferences → Applications**.
-
-Terminal apps are paused by default because command output and source code produce poor grammar-checking results.
-
-## Privacy: Nothing You Write Leaves Your Mac
-
-TextWarden does not send your writing anywhere. It has no cloud grammar service, remote AI model, analytics, telemetry, advertising, or automatic crash reporting. Your text, AI prompts, corrections, custom vocabulary, settings, usage statistics, logs, and diagnostic reports stay on your Mac.
-
-Grammar checks, language detection, and readability scores run inside TextWarden. Optional AI features run on your Mac through Apple Intelligence. Nothing is uploaded for processing.
-
-If you enable update checks, TextWarden downloads release information from GitHub. The update check does not upload your writing, prompts, usage data, logs, or diagnostics.
-
-Logs can contain parts of your writing, especially with Debug or Trace logging enabled, but they remain on your Mac. TextWarden only creates a diagnostic ZIP when you ask it to, and it never uploads that file for you. Review the file yourself before choosing to share it.
-
-## Known Limitations
-
-- Grammar checking is English-only. Language detection can suppress checks for 69 selected non-English languages, but it does not proofread or translate them. Very short or ambiguous passages remain checked when detection is uncertain.
-- Some custom text editors do not give macOS enough information for accurate underlines or safe corrections.
-- A correction can remove formatting in apps that only let TextWarden replace the entire text field.
-- Apple Intelligence style and composition features are unavailable on Intel Macs and on macOS releases before 26.
-- TextWarden is a macOS app. There are no Windows, Linux, iOS, or Android versions.
-
-## Project Documentation
-
-- [Browser extension preview](BrowserExtension/README.md)
-- [Configuration](CONFIGURATION.md)
-- [Troubleshooting](TROUBLESHOOTING.md)
-- [Building from source](BUILD.md)
-- [Contributing](CONTRIBUTING.md)
-- [Architecture](ARCHITECTURE.md)
-- [Apple Foundation Models integration](docs/FOUNDATION_MODELS.md)
-- [Application-specific notes](docs/applications/README.md)
-
-## Credits
-
-TextWarden uses [Harper](https://github.com/Automattic/harper), an open-source English grammar checker written in Rust. It also depends on [swift-bridge](https://github.com/chinedufn/swift-bridge), [Whatlang](https://github.com/greyblake/whatlang-rs), [KeyboardShortcuts](https://github.com/sindresorhus/KeyboardShortcuts), [LaunchAtLogin-Modern](https://github.com/sindresorhus/LaunchAtLogin-Modern), [Sparkle](https://sparkle-project.org), [swift-markdown](https://github.com/apple/swift-markdown), [STTextView](https://github.com/krzyzanowskim/STTextView), and [ConfettiSwiftUI](https://github.com/simibac/ConfettiSwiftUI).
-
-The codebase was developed with substantial AI assistance and human review. The TextWarden logo was created with [Recraft](https://www.recraft.ai/).
-
-## Support the Project
-
-TextWarden is maintained as a side project. If it helps your writing, you can support its development:
-
-<a href="https://buymeacoffee.com/textwarden"><img src="Assets/bmc-button-black.png" alt="Support TextWarden on Buy Me a Coffee" height="40"></a>
-
-- [Report a bug](https://github.com/PhilipSchmid/textwarden/issues/new/choose)
-- [Request a feature or ask a question](https://github.com/PhilipSchmid/textwarden/discussions)
-
-## License
-
-TextWarden is available under the [Apache License 2.0](LICENSE).
+- **Download**: [GitHub Releases](https://github.com/SchaeferAnjon/TypeRight/releases/latest), one DMG for Apple silicon and Intel, macOS 14 or later. If macOS says it cannot verify the developer the first time, open System Settings › Privacy & Security and click Open Anyway. TypeRight needs the Accessibility permission to read the sentence you are typing and write the fix back.
+- **Three ways to use it**: on your Mac only (free, spelling and basic grammar, nothing leaves the Mac); your own AI key (free, the provider bills you directly); or membership ($1.99 a month or $19.90 a year, 500 AI checks a day, through Stripe).
+- **Privacy**: spelling and basic grammar are checked on your Mac with [Harper](https://github.com/Automattic/harper). AI features send only the sentence you are typing, straight to your provider with your own key, or through our server to DeepSeek for members; the server does not keep what you typed. Password fields are never read.
+- **Build from source**: Xcode 26, Rust with the `x86_64-apple-darwin` and `aarch64-apple-darwin` targets, then `make build`. Set your own signing team in Xcode, or build with `CODE_SIGNING_ALLOWED=NO`.
+- **License**: GPL-3.0-or-later. Based on [TextWarden](https://github.com/PhilipSchmid/textwarden) by Philip Schmid (Apache-2.0, kept in [LICENSES/](LICENSES/) with a [NOTICE](NOTICE)). TypeRight is not affiliated with or endorsed by the TextWarden project.

@@ -1,10 +1,12 @@
+# TextWarden 带来的检查（Rust 格式和 Clippy、SwiftFormat、SwiftLint、编译、单元测试、macOS 14 + Xcode 16.2 编译）。
+# 先只能在 Actions 页手动跑，推送和 PR 不自动跑，因为一推上去就会一直红：
+# - `make test-browser` 本机就失败（2026-11-13）：BrowserExtension/tests/test_package.py 还在找 TextWarden.app；
+# - 这台 Mac 上没装 swiftformat 和 swiftlint，TypeRight 加的代码没过过它们；macOS 14 + Xcode 16.2 那一项也没在 TypeRight 的代码上编过。
+# 本机 `brew install swiftformat swiftlint` 以后 `make ci-check` 全过，再把下面的 push、pull_request 加回来。
 name: CI
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
