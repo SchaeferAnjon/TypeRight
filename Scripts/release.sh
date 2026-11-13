@@ -38,6 +38,10 @@ UNNOTARIZED_NOTE="这一版没有经过苹果公证：第一次打开时如果�
 # Sparkle update signing. The private key lives in the login keychain under its own account,
 # like GetNewWord's ("getnewword"), so it never mixes with the other apps' keys.
 SPARKLE_ACCOUNT="typeright"
+# The keychain asks in a dialog before sign_update may read that key, and the release waits on it.
+# SPARKLE_KEY_FROM_ENV=1 pipes the backup in dispatch env to sign_update instead, like Ask Free;
+# the key goes through stdin only, never into a file, an argument or the terminal.
+SPARKLE_KEY_ENV="TYPERIGHT_SPARKLE_PRIVATE_KEY"
 # TextWarden's Sparkle public key, still in Info.plist after the fork. Installed copies accept only
 # updates signed by the matching private key, which only TextWarden's author holds.
 TEXTWARDEN_SPARKLE_PUBLIC_KEY="Vif5a8JO+wPQUakHgRhQh5ogO7CEZ/cFCAZGHe8ykg0="
@@ -149,6 +153,19 @@ check_sparkle_public_key() {
 check_sparkle_key_pair() {
     local sparkle_bin="$1"
     local expected actual
+    if [[ "${SPARKLE_KEY_FROM_ENV:-}" == "1" ]]; then
+        # Sign a scrap file before the long build, so a missing or wrong key stops the release here.
+        local probe signature
+        probe=$(mktemp)
+        echo "TypeRight Sparkle key check" > "$probe"
+        if ! signature=$(run_sign_update "$sparkle_bin" -p "$probe") || ! signature_matches_info_plist "$probe" "$signature"; then
+            rm -f "$probe"
+            echo -e "${RED}没发：取不到 dispatch env 的 $SPARKLE_KEY_ENV，或它和 Info.plist 的 SUPublicEDKey 不是一对。${NC}" >&2
+            exit 1
+        fi
+        rm -f "$probe"
+        return 0
+    fi
     expected=$(/usr/libexec/PlistBuddy -c "Print :SUPublicEDKey" "$PROJECT_ROOT/Info.plist")
     if ! actual=$("$sparkle_bin/generate_keys" --account "$SPARKLE_ACCOUNT" -p 2>&1); then
         echo -e "${RED}没发：登录钥匙串里没有 account \"$SPARKLE_ACCOUNT\" 的 Sparkle 私钥。${NC}" >&2
@@ -445,6 +462,34 @@ create_dmg() {
     echo "$dmg_path"
 }
 
+# sign_update with the private key from the keychain, or from dispatch env (SPARKLE_KEY_FROM_ENV=1)
+run_sign_update() {
+    local sparkle_bin="$1"
+    shift
+    if [[ "${SPARKLE_KEY_FROM_ENV:-}" == "1" ]]; then
+        dispatch env get "$SPARKLE_KEY_ENV" | "$sparkle_bin/sign_update" --ed-key-file - "$@"
+    else
+        "$sparkle_bin/sign_update" --account "$SPARKLE_ACCOUNT" "$@"
+    fi
+}
+
+# Whether the signature verifies with Info.plist's SUPublicEDKey, the only key installed copies accept
+signature_matches_info_plist() {
+    local file="$1"
+    local signature="$2"
+    local public_key
+    public_key=$(/usr/libexec/PlistBuddy -c "Print :SUPublicEDKey" "$PROJECT_ROOT/Info.plist")
+    swift - "$public_key" "$signature" "$file" <<'SWIFT'
+import CryptoKit
+import Foundation
+let a = CommandLine.arguments
+guard let pub = Data(base64Encoded: a[1]), let sig = Data(base64Encoded: a[2]),
+      let key = try? Curve25519.Signing.PublicKey(rawRepresentation: pub),
+      let file = FileManager.default.contents(atPath: a[3]) else { exit(2) }
+exit(key.isValidSignature(sig, for: file) ? 0 : 1)
+SWIFT
+}
+
 # Sign update with Sparkle
 sign_update() {
     local dmg_path="$1"
@@ -455,7 +500,7 @@ sign_update() {
     # Don't suppress stderr - we need to see errors if keychain access fails
     local raw_signature
     local sign_exit_code=0
-    raw_signature=$("$sparkle_bin/sign_update" --account "$SPARKLE_ACCOUNT" "$dmg_path" 2>&1) || sign_exit_code=$?
+    raw_signature=$(run_sign_update "$sparkle_bin" "$dmg_path" 2>&1) || sign_exit_code=$?
 
     if [[ $sign_exit_code -ne 0 ]]; then
         echo -e "${RED}Failed to sign update (exit code $sign_exit_code):${NC}" >&2
@@ -483,16 +528,15 @@ sign_update() {
         exit 1
     fi
 
-    # CRITICAL: Verify the signature is valid before continuing
-    # This catches cases where keychain access silently failed
-    echo -e "${BLUE}Verifying signature...${NC}" >&2
-    if ! "$sparkle_bin/sign_update" --account "$SPARKLE_ACCOUNT" --verify "$dmg_path" "$signature" >/dev/null 2>&1; then
+    # CRITICAL: the signature must verify with the public key in Info.plist, or installed copies
+    # reject the update. This also catches a key from the wrong keychain item or env entry.
+    echo -e "${BLUE}Verifying signature against Info.plist's SUPublicEDKey...${NC}" >&2
+    if ! signature_matches_info_plist "$dmg_path" "$signature"; then
         echo -e "${RED}SIGNATURE VERIFICATION FAILED!${NC}" >&2
-        echo -e "The generated signature does not match the private key." >&2
-        echo -e "This usually means keychain access is broken." >&2
+        echo -e "The signature does not verify with SUPublicEDKey in Info.plist." >&2
+        echo -e "The private key used is not the other half of that public key." >&2
         echo "" >&2
-        echo -e "Try running: $sparkle_bin/generate_keys --account $SPARKLE_ACCOUNT -p" >&2
-        echo -e "If that fails, the keychain entry may need to be re-authorized." >&2
+        echo -e "Check: $sparkle_bin/generate_keys --account $SPARKLE_ACCOUNT -p (must print SUPublicEDKey)" >&2
         exit 1
     fi
 
