@@ -3,8 +3,11 @@
 //  TypeRight
 //
 //  Puts the card on screen next to a word without taking focus from the app being typed in.
-//  Below the word by default, flipped above when the screen has no room underneath. A card whose
-//  answer is still streaming in grows away from the word: its edge next to the word stays put.
+//  Below the word by default, above it when the visible part of the word's screen has no room
+//  underneath, and pushed onto the screen when neither side has room: it may cover the word, it is
+//  never cut off. The side is picked for the card as tall as it may still get, since an AI answer
+//  streams in English first and its note after. A card that grows away from the word keeps its
+//  edge next to the word; one that outgrows its side anyway turns over once and stays there.
 //
 //  It also watches the mouse over the card: resting 0.25 s on an English word opens the word
 //  layer (IPA, meaning, sound) under it; once one is open, the next word opens at once; leaving
@@ -37,6 +40,57 @@ protocol CoachCardDisplay: AnyObject {
     func hide()
 }
 
+/// A screen as the card and the word layer see it (made up in tests): where it is, the part a
+/// window may use (no menu bar, no Dock) and its pixel density.
+struct CoachScreen: Equatable {
+    var frame: CGRect
+    var visibleFrame: CGRect
+    var scale: CGFloat
+
+    @MainActor static func all() -> [CoachScreen] {
+        NSScreen.screens.map { CoachScreen(frame: $0.frame, visibleFrame: $0.visibleFrame, scale: $0.backingScaleFactor) }
+    }
+
+    /// The screen a word is on: the one holding its middle (a caret has no width, and a rectangle
+    /// without width meets no screen's frame), else one it touches, else the one with the menu bar.
+    static func containing(_ rect: CGRect, among screens: [CoachScreen]) -> CoachScreen {
+        let middle = CGPoint(x: rect.midX, y: rect.midY)
+        return screens.first(where: { $0.frame.contains(middle) }) ?? screens.first(where: { $0.frame.intersects(rect) }) ?? screens.first
+            ?? CoachScreen(frame: CGRect(x: 0, y: 0, width: 1440, height: 900), visibleFrame: CGRect(x: 0, y: 0, width: 1440, height: 900), scale: 2)
+    }
+}
+
+/// Where a window with a tail (the card, the word layer) or without one (the ⌥ list) goes next to
+/// a rectangle on screen. Heights and edges here are the solid part's, inside the shadow margin.
+enum CoachPlacement {
+    /// Under `rect` when something `height` tall fits there, else above it when it fits there, else
+    /// on the side with more room. `preferring` false tries above first.
+    static func below(height: CGFloat, beside rect: CGRect, gap: CGFloat, in visible: CGRect, preferring first: Bool = true) -> Bool {
+        let roomBelow = rect.minY - gap - visible.minY
+        let roomAbove = visible.maxY - rect.maxY - gap
+        if height <= (first ? roomBelow : roomAbove) { return first }
+        if height <= (first ? roomAbove : roomBelow) { return !first }
+        return roomBelow == roomAbove ? first : roomBelow > roomAbove
+    }
+
+    /// The window on that side of `rect`, `gap` from it, its solid left edge at `left`, moved into
+    /// `visible` where it would stick out (over `rect` rather than off the screen). Something taller
+    /// than the screen keeps its top on it, where it starts.
+    static func frame(size: CGSize, margin: CGFloat, left: CGFloat, below: Bool, beside rect: CGRect, gap: CGFloat, in visible: CGRect) -> CGRect {
+        let width = size.width - 2 * margin
+        let height = size.height - 2 * margin
+        let x = min(max(left, visible.minX + 4), visible.maxX - 4 - width)
+        let y = min(max(below ? rect.minY - gap - height : rect.maxY + gap, visible.minY), visible.maxY - height)
+        return CGRect(x: x - margin, y: y - margin, width: size.width, height: size.height)
+    }
+
+    /// The tail's middle from the solid left edge, to point at `x` on screen; kept off the right
+    /// corner (the view keeps it off the left one).
+    static func tailX(pointingAt x: CGFloat, frame: CGRect, margin: CGFloat) -> CGFloat {
+        min(x - frame.minX - margin, frame.width - 2 * margin - 17)
+    }
+}
+
 @MainActor
 final class CoachCardPanel: CoachCardDisplay {
     /// The gap between the word and the card's tail (DESIGN.md: 9 under the word).
@@ -54,15 +108,17 @@ final class CoachCardPanel: CoachCardDisplay {
     private var mouseMonitors: [Any] = []
     /// The mouse was over the card or the word layer at the last move.
     private var mouseOver = false
-    /// Where the card on screen sits, so an update keeps its place.
-    private var placement: (anchor: CGRect, below: Bool, originX: CGFloat, tailX: CGFloat)?
+    /// Where the card on screen sits, so an update keeps its place: the word, the side of it, whether
+    /// it turned over while growing (it does not turn back), and the tail.
+    private var placement: (anchor: CGRect, below: Bool, turned: Bool, tailX: CGFloat)?
 
     private var content: CoachCardContent = .thinking
     private var keys: CoachCardKeys = .normal
     private var followState: CoachFollow?
     private var minWidth: CGFloat = 0
 
-    private let layer = CoachWordLayer()
+    private let screens: @MainActor () -> [CoachScreen]
+    private let layer: CoachWordLayer
     private var spots: [CoachWordSpot] = []
     private var hot: CoachWordSpot?
     private var openTimer: DispatchWorkItem?
@@ -74,6 +130,11 @@ final class CoachCardPanel: CoachCardDisplay {
     var onNoticeAction: ((CoachNotice.Action) -> Void)?
 
     var isVisible: Bool { panel?.isVisible ?? false }
+
+    init(screens: @escaping @MainActor () -> [CoachScreen] = CoachScreen.all) {
+        self.screens = screens
+        layer = CoachWordLayer(screens: screens)
+    }
 
     func show(_ content: CoachCardContent, keys: CoachCardKeys, anchor: CGRect) -> Bool {
         let start = ProcessInfo.processInfo.systemUptime
@@ -99,20 +160,29 @@ final class CoachCardPanel: CoachCardDisplay {
     }
 
     func update(_ content: CoachCardContent, keys: CoachCardKeys) -> Bool {
-        guard let panel, panel.isVisible, let placement, let host else { return false }
+        guard let panel, panel.isVisible, let placement else { return false }
         if content.hoverWords != self.content.hoverWords {
             CoachDictionary.shared.prefetch(content.hoverWords, accent: CoachSettings.accent)
         }
         self.content = content
         self.keys = keys
-        let size = measure(on: Self.screen(for: placement.anchor))
-        host.rootView = view(pointsUp: placement.below, tailX: placement.tailX)
-        // Under the word the top edge stays; above it the bottom edge stays.
-        let margin = CoachCardView.shadowMargin
-        let originY = placement.below ? placement.anchor.minY - Self.gap - size.height + margin : placement.anchor.maxY + Self.gap - margin
-        let visible = Self.visibleFrame(for: placement.anchor)
-        let originX = min(placement.originX, visible.maxX - size.width + margin - 4)
-        panel.setFrame(NSRect(x: originX, y: originY, width: size.width, height: size.height), display: true)
+        let screen = screen(for: placement.anchor)
+        let size = measure(content, on: screen)
+        // It stays on its side while it fits there (under the word the top edge stays, above it the
+        // bottom edge); grown out of it, it turns over once, to the other side if that has room.
+        let below = placement.turned ? placement.below
+            : CoachPlacement.below(height: size.height - 2 * CoachCardView.shadowMargin, beside: placement.anchor, gap: Self.gap,
+                                   in: screen.visibleFrame, preferring: placement.below)
+        let before = panel.frame
+        put(size: size, below: below, turned: placement.turned || below != placement.below, anchor: placement.anchor, in: screen.visibleFrame)
+        if panel.frame != before {
+            // What hangs off the card follows it: the ⌥ list is put again, a word's layer closes once its word moved.
+            if listShown {
+                showAllWords(true)
+            } else if hot != nil, panel.frame.minX != before.minX || panel.frame.maxY != before.maxY {
+                closeWord()
+            }
+        }
         return Self.isOnScreen(panel)
     }
 
@@ -171,16 +241,20 @@ final class CoachCardPanel: CoachCardDisplay {
     func place(_ content: CoachCardContent, keys: CoachCardKeys, anchor: CGRect) -> NSPanel {
         self.content = content
         self.keys = keys
-        let margin = CoachCardView.shadowMargin
-        let visible = Self.visibleFrame(for: anchor)
+        let screen = screen(for: anchor)
+        let size = measure(content, on: screen)
+        let tallest = Self.grown(content).map { max(measure($0, on: screen).height, size.height) } ?? size.height
+        let below = CoachPlacement.below(height: tallest - 2 * CoachCardView.shadowMargin, beside: anchor, gap: Self.gap, in: screen.visibleFrame)
+        return put(size: size, below: below, turned: false, anchor: anchor, in: screen.visibleFrame)
+    }
 
-        let size = measure(on: Self.screen(for: anchor))
-        let below = anchor.minY - Self.gap - size.height + margin >= visible.minY
-        // The card's left edge lines up with the word's (the panel is wider by the shadow margin).
-        var originX = anchor.minX - margin
-        originX = min(max(originX, visible.minX - margin + 4), visible.maxX - size.width + margin - 4)
-        let originY = below ? anchor.minY - Self.gap - size.height + margin : anchor.maxY + Self.gap - margin
-        let tailX = anchor.minX + min(anchor.width / 2, 16) - originX - margin
+    /// The card window at its size on that side of the word, on screen.
+    @discardableResult
+    private func put(size: CGSize, below: Bool, turned: Bool, anchor: CGRect, in visible: CGRect) -> NSPanel {
+        let margin = CoachCardView.shadowMargin
+        // The card's left edge lines up with the word's; the tail points into the word, at most 16 in.
+        let frame = CoachPlacement.frame(size: size, margin: margin, left: anchor.minX, below: below, beside: anchor, gap: Self.gap, in: visible)
+        let tailX = CoachPlacement.tailX(pointingAt: anchor.minX + min(anchor.width / 2, 16), frame: frame, margin: margin)
 
         let rootView = view(pointsUp: below, tailX: tailX)
         let host: FirstMouseHostingView<CoachCardView>
@@ -197,19 +271,39 @@ final class CoachCardPanel: CoachCardDisplay {
         let panel = panel ?? makePanel()
         self.panel = panel
         if panel.contentView !== host { panel.contentView = host }
-        panel.setFrame(NSRect(x: originX, y: originY, width: size.width, height: size.height), display: false)
-        placement = (anchor, below, originX, tailX)
+        panel.setFrame(frame, display: panel.isVisible)
+        placement = (anchor, below, turned, tailX)
         return panel
+    }
+
+    /// The card as tall as it may still get, when it may still grow. An AI answer streams in English
+    /// first: until its note (a sentence card's reasons) starts coming, the card is measured with a
+    /// stand-in of a usual length there, two lines of note or a line per reason. A longer one turns
+    /// the card over in `update`.
+    private static func grown(_ content: CoachCardContent) -> CoachCardContent? {
+        switch content {
+        case let .translate(source, result) where result.note.isEmpty:
+            return .translate(source: source, result: CoachTranslation(english: result.english, ipa: result.ipa, note: String(repeating: "讲", count: 56)))
+        case let .sentence(original, check) where check.changes.contains(where: { $0.why.isEmpty }):
+            // Each stand-in is different: the card shows a reason once however many changes give it.
+            let changes = check.changes.enumerated().map { index, change in
+                change.why.isEmpty ? CoachSentenceCheck.Change(from: change.from, to: change.to, why: String(repeating: "讲", count: 24) + "\(index)", type: change.type)
+                    : change
+            }
+            return .sentence(original: original, check: CoachSentenceCheck(ok: check.ok, corrected: check.corrected, changes: changes))
+        default:
+            return nil
+        }
     }
 
     /// The card's size with its shadow margin. The tail does not change it, so it is measured with any tail.
     /// Measured at the pixel density of the screen the card goes on: the card's text is many small
     /// pieces (a word to stop on, a Chinese character where a line may break), each rounded to whole
     /// pixels, so measured at 1× it came out 5 points wider than it draws at 2×.
-    private func measure(on screen: NSScreen?) -> CGSize {
+    private func measure(_ content: CoachCardContent, on screen: CoachScreen) -> CGSize {
         let probe = CoachCardView(content: content, tail: CoachTailPlacement(pointsUp: true, x: 20), keys: keys,
                                   follow: followState, minWidth: minWidth)
-        let measured = AnyView(probe.environment(\.displayScale, screen?.backingScaleFactor ?? 2))
+        let measured = AnyView(probe.environment(\.displayScale, screen.scale))
         if let measurer {
             measurer.rootView = measured
             return measurer.fittingSize
@@ -324,12 +418,8 @@ final class CoachCardPanel: CoachCardDisplay {
 
     // MARK: Window
 
-    private static func screen(for anchor: CGRect) -> NSScreen? {
-        NSScreen.screens.first(where: { $0.frame.intersects(anchor) }) ?? NSScreen.main
-    }
-
-    private static func visibleFrame(for anchor: CGRect) -> CGRect {
-        screen(for: anchor)?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
+    private func screen(for anchor: CGRect) -> CoachScreen {
+        CoachScreen.containing(anchor, among: screens())
     }
 
     /// The card is really there: ordered in, on a screen, not zero-sized, its content as big as the window.

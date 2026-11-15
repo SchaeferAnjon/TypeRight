@@ -147,6 +147,11 @@ final class CoachWordLayer {
 
     private var panel: NonActivatingPanel?
     private var host: FirstMouseHostingView<CoachWordLayerView>?
+    private let screens: @MainActor () -> [CoachScreen]
+
+    init(screens: @escaping @MainActor () -> [CoachScreen] = CoachScreen.all) {
+        self.screens = screens
+    }
 
     var isVisible: Bool { panel?.isVisible ?? false }
 
@@ -154,36 +159,46 @@ final class CoachWordLayer {
     var frame: CGRect? { isVisible ? panel?.frame : nil }
 
     /// Under the word (`word` in screen coordinates), opening downwards; `up` opens it above the word
-    /// (the card itself sits above its word). Its left edge is 12 before the word, the tail on the word's middle.
+    /// (the card itself sits above its word). Its left edge is 12 before the word, the tail on the word's
+    /// middle. Without room on that side it opens on the other, and it is always on screen.
     func show(_ info: CoachWordInfo, at word: CGRect, up: Bool) {
-        let margin = CoachWordLayerView.margin
-        let size = Self.size(of: CoachWordLayerView(mode: .word(info), tail: CoachTailPlacement(pointsUp: true, x: 20)), near: word)
-        let visible = Self.visibleFrame(for: word)
-        var originX = word.minX - 12 - margin
-        originX = min(max(originX, visible.minX - margin + 4), visible.maxX - size.width + margin - 4)
-        let originY = up ? word.maxY + Self.gap - margin : word.minY - Self.gap - size.height + margin
-        let tailX = word.midX - originX - margin
-        put(CoachWordLayerView(mode: .word(info), tail: CoachTailPlacement(pointsUp: !up, x: tailX), onSpeak: { CoachSpeaker.speak($0) }),
-            frame: NSRect(x: originX, y: originY, width: size.width, height: size.height))
+        place(info, at: word, up: up).orderFrontRegardless()
     }
 
-    /// Under the card (`card` is its body in screen coordinates), or above it without room below.
+    /// Sizes and puts the layer for `show` without ordering it in (the tests go through here too).
+    func place(_ info: CoachWordInfo, at word: CGRect, up: Bool) -> NSPanel {
+        let margin = CoachWordLayerView.margin
+        let screen = CoachScreen.containing(word, among: screens())
+        let size = Self.size(of: CoachWordLayerView(mode: .word(info), tail: CoachTailPlacement(pointsUp: true, x: 20)), on: screen)
+        let below = CoachPlacement.below(height: size.height - 2 * margin, beside: word, gap: Self.gap, in: screen.visibleFrame, preferring: !up)
+        let frame = CoachPlacement.frame(size: size, margin: margin, left: word.minX - 12, below: below, beside: word, gap: Self.gap, in: screen.visibleFrame)
+        let tailX = CoachPlacement.tailX(pointingAt: word.midX, frame: frame, margin: margin)
+        return put(CoachWordLayerView(mode: .word(info), tail: CoachTailPlacement(pointsUp: below, x: tailX), onSpeak: { CoachSpeaker.speak($0) }),
+                   frame: frame)
+    }
+
+    /// Under the card (`card` is its body in screen coordinates), or above it without room below;
+    /// with room on neither side, over the card where there is more room.
     func showList(_ infos: [CoachWordInfo], key: String, near card: CGRect) {
+        placeList(infos, key: key, near: card).orderFrontRegardless()
+    }
+
+    /// Sizes and puts the list for `showList` without ordering it in.
+    func placeList(_ infos: [CoachWordInfo], key: String, near card: CGRect) -> NSPanel {
         let margin = CoachWordLayerView.margin
         let view = CoachWordLayerView(mode: .list(infos, key: key), onSpeak: { CoachSpeaker.speak($0) })
-        let size = Self.size(of: view, near: card)
-        let visible = Self.visibleFrame(for: card)
-        let originX = min(max(card.minX - margin, visible.minX - margin + 4), visible.maxX - size.width + margin - 4)
-        var originY = card.minY - Self.listGap - size.height + margin
-        if originY + margin < visible.minY { originY = card.maxY + Self.listGap - margin }
-        put(view, frame: NSRect(x: originX, y: originY, width: size.width, height: size.height))
+        let screen = CoachScreen.containing(card, among: screens())
+        let size = Self.size(of: view, on: screen)
+        let below = CoachPlacement.below(height: size.height - 2 * margin, beside: card, gap: Self.listGap, in: screen.visibleFrame)
+        return put(view, frame: CoachPlacement.frame(size: size, margin: margin, left: card.minX, below: below, beside: card,
+                                                     gap: Self.listGap, in: screen.visibleFrame))
     }
 
     func hide() {
         panel?.orderOut(nil)
     }
 
-    private func put(_ view: CoachWordLayerView, frame: NSRect) {
+    private func put(_ view: CoachWordLayerView, frame: NSRect) -> NSPanel {
         let host: FirstMouseHostingView<CoachWordLayerView>
         if let kept = self.host {
             kept.rootView = view
@@ -197,20 +212,12 @@ final class CoachWordLayer {
         self.panel = panel
         if panel.contentView !== host { panel.contentView = host }
         panel.setFrame(frame, display: true)
-        panel.orderFrontRegardless()
+        return panel
     }
 
     /// Measured at the pixel density it is drawn at (see CoachCardPanel.measure).
-    private static func size(of view: CoachWordLayerView, near rect: CGRect) -> CGSize {
-        TRFitting.size(of: view.environment(\.displayScale, screen(for: rect)?.backingScaleFactor ?? 2))
-    }
-
-    private static func screen(for rect: CGRect) -> NSScreen? {
-        NSScreen.screens.first(where: { $0.frame.intersects(rect) }) ?? NSScreen.main
-    }
-
-    private static func visibleFrame(for rect: CGRect) -> CGRect {
-        screen(for: rect)?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1440, height: 900)
+    private static func size(of view: CoachWordLayerView, on screen: CoachScreen) -> CGSize {
+        TRFitting.size(of: view.environment(\.displayScale, screen.scale))
     }
 
     private func makePanel() -> NonActivatingPanel {
