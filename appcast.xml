@@ -3,6 +3,20 @@
     <channel>
         <title>TypeRight Releases</title>
         <item>
+            <title>0.1.1</title>
+            <pubDate>Sun, 15 Nov 2026 02:33:19 +0100</pubDate>
+            <sparkle:version>3</sparkle:version>
+            <sparkle:shortVersionString>0.1.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description>&lt;h3&gt;TypeRight 0.1.1&lt;/h3&gt;
+&lt;ul&gt;
+&lt;li&gt;贴词小卡不再被屏幕下沿切掉：词靠近屏幕底部（比如聊天软件最下面的输入框）时，下面放不下，小卡就翻到词的上面，整张卡都在屏幕里；讲解后到、卡变高时也不会再长出屏幕&lt;/li&gt;
+&lt;li&gt;鼠标停在卡上单词时弹出的小层，和按住 ⌥ 列出的全部单词，也都留在屏幕里&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;这一版没有经过苹果公证：第一次打开时如果提示无法验证开发者，打开「系统设置 › 隐私与安全性」，拉到最下面点「仍要打开」。之后自动更新不再弹。&lt;/p&gt;</description>
+            <enclosure url="https://github.com/SchaeferAnjon/TypeRight/releases/download/v0.1.1/TypeRight-0.1.1-Universal.dmg" length="21260957" type="application/octet-stream" sparkle:edSignature="DTssmCIPgKB4DHtieq2RZrLbUwV+XHdw0U2Fpd8iRL1GTfsHCuvaGRCycobRgnJ02BbsyEM1BeR76WgMfRueAg=="/>
+        </item>
+        <item>
             <title>0.1.0</title>
             <pubDate>Fri, 13 Nov 2026 15:59:07 +0100</pubDate>
             <sparkle:version>2</sparkle:version>
