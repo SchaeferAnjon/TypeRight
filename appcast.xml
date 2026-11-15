@@ -3,6 +3,20 @@
     <channel>
         <title>TypeRight Releases</title>
         <item>
+            <title>0.1.2</title>
+            <pubDate>Sun, 15 Nov 2026 03:49:10 +0100</pubDate>
+            <sparkle:version>4</sparkle:version>
+            <sparkle:shortVersionString>0.1.2</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description>&lt;h3&gt;TypeRight 0.1.2&lt;/h3&gt;
+&lt;ul&gt;
+&lt;li&gt;默认会自动检查更新了&lt;/li&gt;
+&lt;li&gt;装了 0.1.0 或 0.1.1 的，请手动点一次「设置 › 高级 › 关于 › 检查更新」升到这一版，之后就会自动收到更新&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;这一版没有经过苹果公证：第一次打开时如果提示无法验证开发者，打开「系统设置 › 隐私与安全性」，拉到最下面点「仍要打开」。之后自动更新不再弹。&lt;/p&gt;</description>
+            <enclosure url="https://github.com/SchaeferAnjon/TypeRight/releases/download/v0.1.2/TypeRight-0.1.2-Universal.dmg" length="21261091" type="application/octet-stream" sparkle:edSignature="k7PdTmOPxXMwRTDgWvPx1dV9ZtNphlZaHubINmls1A2e1marUd8fpR2MeK+wMPhpcaoJmS92Cd8GgO/WVXkOBA=="/>
+        </item>
+        <item>
             <title>0.1.1</title>
             <pubDate>Sun, 15 Nov 2026 02:33:19 +0100</pubDate>
             <sparkle:version>3</sparkle:version>
