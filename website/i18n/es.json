@@ -250,7 +250,7 @@
  "购买与授权码": "Compras y códigos de licencia",
  "付款由 Stripe 处理：银行卡、Apple Pay；人民币一次买时还能用微信支付。卡号和付款账户只在 Stripe 那里，我们看不到。我们保存付款时的邮箱、授权码和购买记录，用来开通会员、处理退款。": "El pago lo gestiona Stripe: tarjeta o Apple Pay, y WeChat Pay para compras únicas en yuanes. Los números de tarjeta y las cuentas de pago se quedan en Stripe; nunca los vemos. Guardamos el correo con el que pagaste, el código de licencia y el registro de la compra, para activar la suscripción y gestionar reembolsos.",
  "软件更新": "Actualizaciones",
- "安装包和更新信息放在 GitHub 上。应用检查更新时只向 GitHub 要这些，不带你打的字；默认不自动检查。": "El instalador y la información de actualizaciones están en GitHub. Cuando la app busca actualizaciones, solo le pide eso a GitHub y no envía nada de lo que escribes; por defecto no busca sola.",
+ "安装包和更新信息放在 GitHub 上。应用检查更新时只向 GitHub 要这些，不带你打的字；默认每天自动检查一次，可以在「设置 › 高级 › 关于」里关掉。": "Los instaladores y la información de actualizaciones están en GitHub. Al buscar actualizaciones, la app solo le pide eso a GitHub y no envía nada de lo que escribes. Por defecto comprueba automáticamente una vez al día; puedes desactivarlo en Ajustes › Avanzado › Acerca de.",
  "本网站": "Esta web",
  "本网站是静态页面，不用 Cookie，不做访问统计。你选的语言记在你自己的浏览器里。打开网页时，你的浏览器会向 GitHub 的接口（api.github.com）查一次最新版本；点下载时，安装包由 GitHub 提供。": "Esta web es estática, no usa cookies y no cuenta visitas. El idioma que eliges se recuerda en tu propio navegador. Al abrir la página, tu navegador pregunta una vez a la API de GitHub (api.github.com) por la última versión; las descargas vienen de GitHub.",
  "你的权利": "Tus derechos",

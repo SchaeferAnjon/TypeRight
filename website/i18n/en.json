@@ -250,7 +250,7 @@
  "购买与授权码": "Purchases and licence codes",
  "付款由 Stripe 处理：银行卡、Apple Pay；人民币一次买时还能用微信支付。卡号和付款账户只在 Stripe 那里，我们看不到。我们保存付款时的邮箱、授权码和购买记录，用来开通会员、处理退款。": "Payment is handled by Stripe: card or Apple Pay, and WeChat Pay for one-time purchases in CNY. Card numbers and payment accounts stay with Stripe; we never see them. We keep the email you paid with, the licence code and the purchase record, to turn membership on and to handle refunds.",
  "软件更新": "Software updates",
- "安装包和更新信息放在 GitHub 上。应用检查更新时只向 GitHub 要这些，不带你打的字；默认不自动检查。": "The installer and update information are on GitHub. When the app checks for updates it only asks GitHub for these, and sends nothing you typed; it doesn't check automatically by default.",
+ "安装包和更新信息放在 GitHub 上。应用检查更新时只向 GitHub 要这些，不带你打的字；默认每天自动检查一次，可以在「设置 › 高级 › 关于」里关掉。": "Installers and update information live on GitHub. When the app checks for updates it only asks GitHub for these and never sends what you type; by default it checks once a day, which you can turn off in Settings › Advanced › About.",
  "本网站": "This website",
  "本网站是静态页面，不用 Cookie，不做访问统计。你选的语言记在你自己的浏览器里。打开网页时，你的浏览器会向 GitHub 的接口（api.github.com）查一次最新版本；点下载时，安装包由 GitHub 提供。": "This website is static, uses no cookies and counts no visits. The language you pick is remembered in your own browser. When the page opens, your browser asks GitHub's API (api.github.com) once for the latest version; downloads come from GitHub.",
  "你的权利": "Your rights",
