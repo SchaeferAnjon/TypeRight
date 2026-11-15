@@ -64,6 +64,9 @@ final class UpdaterDelegate: NSObject, SPUUpdaterDelegate {
 /// Uses singleton pattern to ensure only ONE SPUStandardUpdaterController exists
 @MainActor
 final class UpdaterViewModel: ObservableObject {
+    /// Set once the automatic-check default has been applied to this Mac's defaults.
+    static let autoCheckDefaultAppliedKey = "typeright.autoUpdateCheckDefaultApplied"
+
     /// Shared singleton instance - ensures only one Sparkle updater exists
     static let shared = UpdaterViewModel()
 
@@ -121,12 +124,14 @@ final class UpdaterViewModel: ObservableObject {
             userDriverDelegate: nil
         )
 
-        // Check if this is first launch - default to disabled
-        // Sparkle persists this in SUEnableAutomaticChecks
-        let hasSetPreference = UserDefaults.standard.object(forKey: "SUEnableAutomaticChecks") != nil
-        if !hasSetPreference {
-            updaterController.updater.automaticallyChecksForUpdates = false
-            Logger.info("First launch - auto update checks disabled by default", category: Logger.lifecycle)
+        // Updates are checked automatically by default (Info.plist SUEnableAutomaticChecks). 0.1.0 and
+        // 0.1.1 wrote "off" into SUEnableAutomaticChecks on first launch without asking, so turn it on once
+        // for those installs; a choice made after this stays as made.
+        let defaults = UserDefaults.standard
+        if !defaults.bool(forKey: Self.autoCheckDefaultAppliedKey) {
+            updaterController.updater.automaticallyChecksForUpdates = true
+            defaults.set(true, forKey: Self.autoCheckDefaultAppliedKey)
+            Logger.info("Auto update checks turned on (default)", category: Logger.lifecycle)
         }
 
         // Sync our property with Sparkle's current state
